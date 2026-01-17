@@ -1,0 +1,99 @@
+# Tool Compass - Docker Compose Configuration
+#
+# Usage:
+#   docker-compose up              # Start Gradio UI
+#   docker-compose up -d           # Start in background
+#   docker-compose --profile dev up # Include development tools
+#
+# Prerequisites:
+#   - Ollama running locally (or update OLLAMA_URL)
+#   - Run `ollama pull nomic-embed-text` first
+
+version: '3.8'
+
+services:
+  # ==========================================================================
+  # Main UI Service
+  # ==========================================================================
+  tool-compass:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: tool-compass-ui
+    ports:
+      - "7860:7860"
+    volumes:
+      # Persist index data
+      - compass-data:/app/tool_compass/db
+      # Optional: Mount config for customization
+      # - ./compass_config.json:/app/tool_compass/compass_config.json:ro
+    environment:
+      # Ollama connection (use host.docker.internal on Docker Desktop)
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      # Analytics and features
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ==========================================================================
+  # Optional: Ollama (if not running locally)
+  # ==========================================================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tool-compass-ollama
+    profiles:
+      - with-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=24h
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Pull nomic-embed-text on startup
+    entrypoint: >
+      sh -c "ollama serve &
+             sleep 5 &&
+             ollama pull nomic-embed-text &&
+             tail -f /dev/null"
+
+  # ==========================================================================
+  # Development Tools
+  # ==========================================================================
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: tool-compass-dev
+    profiles:
+      - dev
+    volumes:
+      - .:/app/tool_compass
+      - compass-data:/app/tool_compass/db
+    environment:
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - LOG_LEVEL=DEBUG
+    command: ["python", "-m", "pytest", "-v", "tests/"]
+
+volumes:
+  compass-data:
+    name: tool-compass-data
+  ollama-data:
+    name: tool-compass-ollama
+
+networks:
+  default:
+    name: tool-compass-network

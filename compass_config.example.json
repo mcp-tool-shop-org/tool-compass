@@ -1,0 +1,58 @@
+{
+  "backends": {
+    "bridge": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-u", "app/mcp/bridge_mcp_server.py"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8",
+        "LOG_LEVEL": "INFO"
+      }
+    },
+    "comfy": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-u", "app/mcp/comfy_mcp_server.py"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8",
+        "COMFYUI_URL": "http://localhost:8188"
+      }
+    },
+    "video": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-u", "app/mcp/video_mcp_server.py"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "chat": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-u", "app/mcp/chat_mcp_server.py"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "doc": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["-u", "app/mcp/doc_mcp_server.py"],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  },
+  "embedding_model": "nomic-embed-text",
+  "ollama_url": "http://localhost:11434",
+  "index_dir": "./db",
+  "auto_sync": true,
+  "default_top_k": 5,
+  "min_confidence": 0.3,
+  "progressive_disclosure": true,
+  "analytics_enabled": true,
+  "hot_cache_size": 10,
+  "chain_indexing_enabled": true,
+  "chain_detection_min_occurrences": 3,
+  "top_chains_cache_size": 5
+}

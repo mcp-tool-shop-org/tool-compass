@@ -1,0 +1,95 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.env
+
+# Database files (generated at runtime)
+db/*.db
+db/*.hnsw
+db/compass.hnsw
+db/tools.db
+db/compass_analytics.db
+db/chains.db
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+files.zip
+nul
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build artifacts
+*.manifest
+*.spec
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code temp files
+tmpclaude-*
+
+# Archive (keep for reference but don't track)
+archive/
