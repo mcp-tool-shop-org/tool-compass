@@ -1,19 +1,26 @@
-# Tool Compass 🧭
+<div align="center">
+
+# Tool Compass
+
+**Semantic navigator for MCP tools - Find the right tool by intent, not memory**
 
 [![Tests](https://github.com/mikeyfrilot/tool-compass/actions/workflows/test.yml/badge.svg)](https://github.com/mikeyfrilot/tool-compass/actions/workflows/test.yml)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](https://www.docker.com/)
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg?logo=docker&logoColor=white)](https://www.docker.com/)
+[![GitHub stars](https://img.shields.io/github/stars/mikeyfrilot/tool-compass?style=social)](https://github.com/mikeyfrilot/tool-compass)
 
-**A semantic navigator for MCP tools. Find the right tool by intent, not memory.**
+*95% fewer tokens. Find tools by describing what you want to do.*
+
+[Installation](#quick-start) • [Usage](#usage) • [Docker](#option-2-docker) • [Performance](#performance) • [Contributing](#contributing)
+
+</div>
+
+---
 
 ## The Problem
 
-MCP servers can expose dozens or hundreds of tools. Loading all tool definitions into context wastes tokens and slows down responses. Claude has to sift through 70+ tool schemas to find the one it needs.
-
-## The Solution
-
-Tool Compass uses **semantic search** to find relevant tools from a natural language description. Instead of loading all tools, Claude calls `compass()` with an intent and gets back only the relevant tools.
+MCP servers expose dozens or hundreds of tools. Loading all tool definitions into context wastes tokens and slows down responses.
 
 ```
 Before: 77 tools × ~500 tokens = 38,500 tokens per request
@@ -22,36 +29,17 @@ After:  1 compass tool + 3 results = ~2,000 tokens per request
 Savings: 95%
 ```
 
-## Features
+## The Solution
 
-- **Semantic Search**: Find tools by describing what you want to do
-- **Progressive Disclosure**: `compass()` → `describe()` → `execute()`
-- **Hot Cache**: Frequently used tools are pre-loaded for faster access
-- **Chain Detection**: Automatically discovers common tool workflows
-- **Analytics**: Track usage patterns and tool performance
-- **Cross-Platform**: Works on Windows, macOS, and Linux
-- **Docker Ready**: One-command deployment
+Tool Compass uses **semantic search** to find relevant tools from a natural language description. Instead of loading all tools, Claude calls `compass()` with an intent and gets back only the relevant tools.
 
-## Architecture
+<!--
+## Demo
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     TOOL COMPASS                             │
-│                                                              │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │   Ollama     │    │   hnswlib    │    │   SQLite     │  │
-│  │   Embedder   │───▶│    HNSW      │◀───│   Metadata   │  │
-│  │  (nomic)     │    │   Index      │    │   Store      │  │
-│  └──────────────┘    └──────────────┘    └──────────────┘  │
-│                              │                               │
-│                              ▼                               │
-│                    ┌──────────────────┐                     │
-│                    │  Gateway (9 tools)│                    │
-│                    │  compass, describe│                    │
-│                    │  execute, etc.    │                    │
-│                    └──────────────────┘                     │
-└─────────────────────────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="Tool Compass Demo" width="600">
+</p>
+-->
 
 ## Quick Start
 
@@ -98,29 +86,36 @@ docker-compose --profile with-ollama up
 # Access the UI at http://localhost:7860
 ```
 
-### Option 3: Docker (Standalone)
+## Features
 
-```bash
-# Build the image
-docker build -t tool-compass .
+- **Semantic Search** - Find tools by describing what you want to do
+- **Progressive Disclosure** - `compass()` → `describe()` → `execute()`
+- **Hot Cache** - Frequently used tools are pre-loaded
+- **Chain Detection** - Automatically discovers common tool workflows
+- **Analytics** - Track usage patterns and tool performance
+- **Cross-Platform** - Windows, macOS, Linux
+- **Docker Ready** - One-command deployment
 
-# Run with Ollama on host
-docker run -p 7860:7860 \
-  -e OLLAMA_URL=http://host.docker.internal:11434 \
-  tool-compass
+## Architecture
+
 ```
-
-## Environment Variables
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TOOL_COMPASS_BASE_PATH` | Project root directory | Auto-detected |
-| `TOOL_COMPASS_PYTHON` | Python executable | Auto-detected |
-| `TOOL_COMPASS_CONFIG` | Config file path | `./compass_config.json` |
-| `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
-| `COMFYUI_URL` | ComfyUI server (for AI backend) | `http://localhost:8188` |
-
-See [`.env.example`](.env.example) for all options.
+┌─────────────────────────────────────────────────────────────┐
+│                     TOOL COMPASS                            │
+│                                                             │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
+│  │   Ollama     │    │   hnswlib    │    │   SQLite     │  │
+│  │   Embedder   │───▶│    HNSW      │◀───│   Metadata   │  │
+│  │  (nomic)     │    │   Index      │    │   Store      │  │
+│  └──────────────┘    └──────────────┘    └──────────────┘  │
+│                              │                              │
+│                              ▼                              │
+│                    ┌──────────────────┐                    │
+│                    │  Gateway (9 tools)│                   │
+│                    │  compass, describe│                   │
+│                    │  execute, etc.    │                   │
+│                    └──────────────────┘                    │
+└─────────────────────────────────────────────────────────────┘
+```
 
 ## Usage
 
@@ -166,6 +161,27 @@ Returns:
 | `compass_sync(force)` | Rebuild index from backends |
 | `compass_audit()` | Full system report |
 
+## Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `TOOL_COMPASS_BASE_PATH` | Project root | Auto-detected |
+| `TOOL_COMPASS_PYTHON` | Python executable | Auto-detected |
+| `TOOL_COMPASS_CONFIG` | Config file path | `./compass_config.json` |
+| `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
+| `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
+
+See [`.env.example`](.env.example) for all options.
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| Index build time | ~5s for 44 tools |
+| Query latency | ~15ms (including embedding) |
+| Token savings | ~95% (38K → 2K) |
+| Accuracy@3 | ~95% (correct tool in top 3) |
+
 ## Testing
 
 ```bash
@@ -177,46 +193,18 @@ pytest --cov=. --cov-report=html
 
 # Skip integration tests (no Ollama required)
 pytest -m "not integration"
-
-# Run specific test file
-pytest tests/test_indexer.py -v
-```
-
-## Performance
-
-| Metric | Value |
-|--------|-------|
-| Index build time | ~5s for 44 tools |
-| Query latency | ~15ms (including embedding) |
-| Token savings | ~95% (38K → 2K) |
-| Accuracy@3 | ~95% (correct tool in top 3) |
-
-## File Structure
-
-```
-tool_compass/
-├── gateway.py           # MCP server with 9 tools
-├── ui.py                # Gradio web interface
-├── indexer.py           # HNSW index management
-├── embedder.py          # Ollama integration
-├── analytics.py         # Usage tracking
-├── config.py            # Configuration handling
-├── tests/               # Test suite
-├── Dockerfile           # Container build
-├── docker-compose.yml   # Multi-service deployment
-└── db/                  # Index and analytics data
 ```
 
 ## Troubleshooting
 
-### MCP Server Not Connecting (JSON Parse Errors)
+### MCP Server Not Connecting
 
-If Claude Desktop logs show:
+If Claude Desktop logs show JSON parse errors:
 ```
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**Cause**: `print()` statements corrupt the JSON-RPC protocol.
+**Cause**: `print()` statements corrupt JSON-RPC protocol.
 
 **Fix**: Use logging or `file=sys.stderr`:
 ```python
@@ -237,23 +225,25 @@ ollama pull nomic-embed-text
 ### Index Not Found
 
 ```bash
-# Rebuild the index
 python gateway.py --sync
 ```
 
+## Related Projects
+
+Part of the **Compass Suite** for AI-powered development:
+
+- [File Compass](https://github.com/mikeyfrilot/file-compass) - Semantic file search
+- [Integradio](https://github.com/mikeyfrilot/integradio) - Vector-embedded Gradio components
+- [Backpropagate](https://github.com/mikeyfrilot/backpropagate) - Headless LLM fine-tuning
+- [Comfy Headless](https://github.com/mikeyfrilot/comfy-headless) - ComfyUI without the complexity
+
 ## Contributing
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for:
-- Development setup
-- Running tests
-- Code style guide
-- Pull request process
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Security
 
-For security vulnerabilities, please see [SECURITY.md](SECURITY.md).
-
-**Do not open public issues for security bugs.**
+For security vulnerabilities, please see [SECURITY.md](SECURITY.md). **Do not open public issues for security bugs.**
 
 ## License
 
@@ -268,6 +258,12 @@ For security vulnerabilities, please see [SECURITY.md](SECURITY.md).
 
 ---
 
-> *"Syntropy above all else."*
->
-> Tool Compass reduces entropy in the MCP ecosystem by organizing tools by semantic meaning, reducing context waste, and accelerating discovery through intent-based search.
+<div align="center">
+
+*"Syntropy above all else."*
+
+Tool Compass reduces entropy in the MCP ecosystem by organizing tools by semantic meaning.
+
+**[Documentation](https://github.com/mikeyfrilot/tool-compass#readme)** • **[Issues](https://github.com/mikeyfrilot/tool-compass/issues)** • **[Discussions](https://github.com/mikeyfrilot/tool-compass/discussions)**
+
+</div>
