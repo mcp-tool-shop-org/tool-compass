@@ -421,6 +421,22 @@ class SimpleBackendManager:
             return True
         return await self.connect_backend(name)
 
+    async def connect_all(self, timeout: Optional[float] = None) -> Dict[str, bool]:
+        """Connect to all configured backends.
+
+        Returns:
+            Dict mapping backend name to connection success status.
+        """
+        results = {}
+        for name in self.config.backends.keys():
+            try:
+                success = await self.connect_backend(name, timeout=timeout)
+                results[name] = success
+            except Exception as e:
+                logger.error(f"Failed to connect to {name}: {e}")
+                results[name] = False
+        return results
+
     async def disconnect_all(self):
         """Disconnect from all backends gracefully."""
         async with self._lock:
