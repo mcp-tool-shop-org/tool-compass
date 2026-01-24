@@ -546,7 +546,8 @@ class CompassAnalytics:
         # Parse timeframe
         hours = {"1h": 1, "24h": 24, "7d": 168, "30d": 720}.get(timeframe, 24)
         since = datetime.now() - timedelta(hours=hours)
-        since_str = since.isoformat()
+        # Use SQLite-compatible format (YYYY-MM-DD HH:MM:SS) for timestamp comparison
+        since_str = since.strftime("%Y-%m-%d %H:%M:%S")
 
         # Search stats
         search_stats = db.execute(
