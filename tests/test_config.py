@@ -6,7 +6,6 @@ Tests cross-platform path handling and environment variable support.
 
 import os
 import sys
-import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -192,7 +191,10 @@ class TestDefaultConfig:
                 # Command should be a valid Python path
                 assert backend.command
                 # Should be an absolute path or the detected executable
-                assert Path(backend.command).is_absolute() or backend.command == sys.executable
+                assert (
+                    Path(backend.command).is_absolute()
+                    or backend.command == sys.executable
+                )
 
     def test_get_default_config_portable_paths(self):
         """Backend paths should be relative to base_path."""
@@ -212,7 +214,9 @@ class TestLoadConfig:
 
     def test_load_config_missing_file(self, tmp_path):
         """Should return defaults if config file doesn't exist."""
-        with patch.dict(os.environ, {"TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json")}):
+        with patch.dict(
+            os.environ, {"TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json")}
+        ):
             config = load_config()
             # Should get default config
             assert config.embedding_model == "nomic-embed-text"
@@ -220,11 +224,11 @@ class TestLoadConfig:
     def test_load_config_from_file(self, tmp_path):
         """Should load config from JSON file."""
         config_file = tmp_path / "test_config.json"
-        config_file.write_text('''{
+        config_file.write_text("""{
             "backends": {},
             "embedding_model": "custom-model",
             "auto_sync": false
-        }''')
+        }""")
 
         with patch.dict(os.environ, {"TOOL_COMPASS_CONFIG": str(config_file)}):
             config = load_config()
