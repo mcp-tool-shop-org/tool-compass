@@ -1,0 +1,21 @@
+# Tool Compass Code Owners
+# These owners will be automatically requested for review when PRs modify these files
+
+# Default owners for everything
+* @mcp-tool-shop/tool-compass-maintainers
+
+# Core functionality
+/gateway.py @mcp-tool-shop/tool-compass-maintainers
+/indexer.py @mcp-tool-shop/tool-compass-maintainers
+/embedder.py @mcp-tool-shop/tool-compass-maintainers
+/config.py @mcp-tool-shop/tool-compass-maintainers
+
+# CI/CD and infrastructure
+/.github/ @mcp-tool-shop/tool-compass-maintainers
+/Dockerfile @mcp-tool-shop/tool-compass-maintainers
+/docker-compose.yml @mcp-tool-shop/tool-compass-maintainers
+
+# Documentation
+/README.md @mcp-tool-shop/tool-compass-maintainers
+/CONTRIBUTING.md @mcp-tool-shop/tool-compass-maintainers
+/docs/ @mcp-tool-shop/tool-compass-maintainers
