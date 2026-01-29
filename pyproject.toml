@@ -54,6 +54,12 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
     "hypothesis>=6.100.0",
+    "ruff>=0.8.0",
+    "pyright>=1.1.390",
+    "black>=24.0.0",
+    "isort>=5.13.0",
+    "bandit[toml]>=1.7.0",
+    "pre-commit>=4.0.0",
 ]
 all = [
     "tool-compass[ui,dev]",
@@ -98,6 +104,48 @@ exclude = [
     "*.egg-info/",
     "compass_config.json",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["tool_compass"]
+
+[tool.pyright]
+include = ["*.py"]
+exclude = [
+    "**/__pycache__",
+    "tests",
+    "archive",
+]
+reportMissingImports = true
+reportMissingTypeStubs = false
+pythonVersion = "3.10"
+pythonPlatform = "All"
+
+[tool.bandit]
+exclude_dirs = ["tests", "archive"]
+skips = ["B101"]  # assert_used - OK in tests
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

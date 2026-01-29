@@ -34,8 +34,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install -e ".[dev]"
+
+      - name: Run linting
+        run: |
+          ruff check .
+
+      - name: Run type checking
+        run: |
+          pyright
+        continue-on-error: true  # Type checking is advisory for now
 
       - name: Run tests
         run: |
@@ -73,8 +81,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
+          pip install -e ".[dev]"
 
       - name: Install Ollama
         run: |
