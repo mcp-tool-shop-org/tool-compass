@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tool-compass"
-version = "2.0.1"
+version = "2.0.2"
 description = "Semantic MCP tool discovery gateway - find tools by intent, not memory"
 readme = "README.md"
 license = "MIT"
@@ -60,11 +60,11 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mcp-tool-shop/tool-compass"
-Documentation = "https://github.com/mcp-tool-shop/tool-compass#readme"
-Repository = "https://github.com/mcp-tool-shop/tool-compass.git"
-Issues = "https://github.com/mcp-tool-shop/tool-compass/issues"
-Changelog = "https://github.com/mcp-tool-shop/tool-compass/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/mcp-tool-shop-org/tool-compass"
+Documentation = "https://github.com/mcp-tool-shop-org/tool-compass#readme"
+Repository = "https://github.com/mcp-tool-shop-org/tool-compass.git"
+Issues = "https://github.com/mcp-tool-shop-org/tool-compass/issues"
+Changelog = "https://github.com/mcp-tool-shop-org/tool-compass/blob/main/CHANGELOG.md"
 
 [project.scripts]
 tool-compass = "tool_compass.gateway:main"
