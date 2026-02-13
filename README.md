@@ -44,15 +44,52 @@ Tool Compass uses **semantic search** to find relevant tools from a natural lang
 
 ## Quick Start
 
-### Option 1: Local Installation
+### Option 1: Homebrew (macOS/Linux) - Recommended
+
+```bash
+# Install via Homebrew
+brew tap mcp-tool-shop-org/mcp-tools
+brew install tool-compass
+
+# Install Ollama (required for embeddings)
+brew install ollama
+ollama pull nomic-embed-text
+
+# Build the search index
+tool-compass --sync
+
+# Run the MCP server
+tool-compass
+
+# Or launch the Gradio UI
+tool-compass-ui
+```
+
+### Option 2: PyPI
+
+```bash
+# Prerequisites: Ollama with nomic-embed-text
+ollama pull nomic-embed-text
+
+# Install from PyPI
+pip install tool-compass
+
+# Build the search index
+tool-compass --sync
+
+# Run the MCP server
+tool-compass
+```
+
+### Option 3: Local Development
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
 ollama pull nomic-embed-text
 
 # Clone and setup
-git clone https://github.com/mikeyfrilot/tool-compass.git
-cd tool-compass/tool_compass
+git clone https://github.com/mcp-tool-shop-org/tool-compass.git
+cd tool-compass
 
 # Create virtual environment
 python -m venv venv
@@ -71,7 +108,7 @@ python gateway.py
 python ui.py
 ```
 
-### Option 2: Docker
+### Option 4: Docker
 
 ```bash
 # Clone the repo
