@@ -1,13 +1,28 @@
 # Tool Compass CI Pipeline
-# Runs tests on every push and PR
+# Runs tests on pushes and PRs that touch code or config
 
 name: Tests
 
 on:
   push:
     branches: [main, develop]
+    paths:
+      - '*.py'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - 'Dockerfile'
+      - '.github/workflows/**'
   pull_request:
     branches: [main]
+    paths:
+      - '*.py'
+      - 'tests/**'
+      - 'requirements*.txt'
+      - 'pyproject.toml'
+      - 'Dockerfile'
+      - '.github/workflows/**'
+  workflow_dispatch:
 
 jobs:
   test:
