@@ -49,9 +49,14 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 mcp = FastMCP("tool-compass-gateway")
 
-# Global state with async locks for thread-safe singleton initialization
-# Pattern: Double-checked locking with asyncio.Lock
-# See: https://www.hevalhazalkurt.com/blog/implementing-singleton-with-asyncawait-in-python/
+# ---------------------------------------------------------------------------
+# Runtime assumptions (single-process MCP server):
+# - The gateway runs as a single process (FastMCP over stdio).
+# - Module-level singletons are initialized lazily with asyncio.Lock
+#   (double-checked locking) to handle concurrent coroutine access.
+# - NOT thread-safe by design — MCP servers are single-threaded async.
+# - For the Gradio UI (multi-threaded), see ui.py which uses threading.Lock.
+# ---------------------------------------------------------------------------
 _compass_index: Optional[CompassIndex] = None
 _backend_manager: Optional[BackendManager] = None
 _config: Optional[CompassConfig] = None
