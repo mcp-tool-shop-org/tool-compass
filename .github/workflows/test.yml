@@ -25,6 +25,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  lint:
+    name: Org URL sanity check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Check for stale org/user URLs
+        run: bash scripts/check-org-urls.sh
+
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
