@@ -37,19 +37,23 @@ from config import load_config
 
 
 def run_async(coro):
-    """Run async coroutine in sync context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Create new loop for nested async
-            import concurrent.futures
+    """Run an async coroutine from synchronous Gradio callbacks.
 
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        else:
-            return loop.run_until_complete(coro)
+    Safe in two scenarios:
+    - No running loop → uses asyncio.run() directly.
+    - Inside a running loop (Gradio's event loop) → dispatches to a
+      worker thread with its own asyncio.run() to avoid nested-loop crashes.
+    """
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+        # Loop is already running — use a worker thread.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
     except RuntimeError:
+        # No running loop — safe to call directly.
         return asyncio.run(coro)
 
 
