@@ -80,6 +80,12 @@ jobs:
           file: coverage.xml
           fail_ci_if_error: false
 
+      - name: Audit dependencies for vulnerabilities
+        if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+        run: |
+          pip-audit -r requirements.txt
+        continue-on-error: true  # Warn-only until clean baseline established
+
   # Integration tests (requires Ollama)
   integration:
     name: Integration Tests
