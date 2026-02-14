@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from config import CompassConfig, StdioBackend, load_config
+from _version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class SimpleBackendConnection:
                 self._send_request("initialize", {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "tool-compass", "version": "2.0"}
+                    "clientInfo": {"name": "tool-compass", "version": __version__}
                 }),
                 timeout=timeout
             )
@@ -415,9 +416,13 @@ class SimpleBackendManager:
 
             return False
 
+    def is_backend_connected(self, name: str) -> bool:
+        """Check if a backend is currently connected."""
+        return name in self._backends and self._backends[name].is_connected
+
     async def ensure_connected(self, name: str) -> bool:
         """Ensure a backend is connected, reconnecting if necessary."""
-        if name in self._backends and self._backends[name].is_connected:
+        if self.is_backend_connected(name):
             return True
         return await self.connect_backend(name)
 

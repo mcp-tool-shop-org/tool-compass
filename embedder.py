@@ -160,25 +160,31 @@ class Embedder:
 
 # Synchronous wrapper for non-async contexts
 class SyncEmbedder:
-    """Synchronous wrapper around async Embedder."""
+    """Synchronous wrapper around async Embedder.
+
+    Safe to call from:
+    - A normal synchronous context (no running loop) — uses asyncio.run()
+    - Inside an active event loop (e.g., Gradio, FastMCP) — runs the
+      coroutine in a dedicated worker thread with its own loop
+    """
 
     def __init__(self, **kwargs):
         self._async_embedder = Embedder(**kwargs)
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-
-    def _get_loop(self) -> asyncio.AbstractEventLoop:
-        """Get or create event loop."""
-        try:
-            return asyncio.get_running_loop()
-        except RuntimeError:
-            if self._loop is None or self._loop.is_closed():
-                self._loop = asyncio.new_event_loop()
-            return self._loop
 
     def _run(self, coro):
-        """Run coroutine in event loop."""
-        loop = self._get_loop()
-        return loop.run_until_complete(coro)
+        """Run coroutine safely from any context."""
+        try:
+            asyncio.get_running_loop()
+            # A loop is already running (e.g., Gradio, FastMCP) —
+            # run_until_complete would crash, so use a worker thread.
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, coro)
+                return future.result()
+        except RuntimeError:
+            # No running loop — safe to use asyncio.run directly.
+            return asyncio.run(coro)
 
     def health_check(self) -> bool:
         return self._run(self._async_embedder.health_check())
@@ -194,8 +200,6 @@ class SyncEmbedder:
 
     def close(self):
         self._run(self._async_embedder.close())
-        if self._loop and not self._loop.is_closed():
-            self._loop.close()
 
 
 if __name__ == "__main__":

@@ -273,10 +273,12 @@ class CompassAnalytics:
         )
 
         # Update aggregated stats
+        # Note: last_success_at uses a SQL CASE expression (not a bound parameter)
+        # so CURRENT_TIMESTAMP is evaluated by SQLite as a function, not a string.
         db.execute(
             """
             INSERT INTO tool_usage_stats (tool_name, call_count, success_count, failure_count, avg_latency_ms, last_called_at, last_success_at)
-            VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+            VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
             ON CONFLICT(tool_name) DO UPDATE SET
                 call_count = call_count + 1,
                 success_count = success_count + excluded.success_count,
@@ -291,7 +293,7 @@ class CompassAnalytics:
                 1 if success else 0,
                 0 if success else 1,
                 latency_ms,
-                "CURRENT_TIMESTAMP" if success else None,
+                1 if success else 0,
             ),
         )
 
@@ -457,7 +459,6 @@ class CompassAnalytics:
 
         for row in patterns:
             tools = json.loads(row["tool_sequence"])
-            row["sequence_hash"]
 
             # Generate chain name from tools
             chain_name = "_to_".join([t.split(":")[-1] for t in tools])[:50]

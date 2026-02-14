@@ -4,13 +4,13 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tool-compass"
-version = "2.0.2"
+version = "2.0.3"
 description = "Semantic MCP tool discovery gateway - find tools by intent, not memory"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [
-    { name = "Mikey Frilot" }
+    { name = "mcp-tool-shop", email = "64996768+mcp-tool-shop@users.noreply.github.com" }
 ]
 keywords = [
     "mcp",

@@ -29,7 +29,7 @@ This project follows the [Contributor Covenant](https://www.contributor-covenant
 
 ```bash
 # Clone the repository
-git clone https://github.com/mikeyfrilot/tool-compass.git
+git clone https://github.com/mcp-tool-shop-org/tool-compass.git
 cd tool-compass/tool_compass
 
 # Create virtual environment
@@ -302,9 +302,9 @@ async def get_instance() -> MyClass:
 
 ## Need Help?
 
-- **Questions**: Open a [Discussion](https://github.com/mikeyfrilot/tool-compass/discussions)
-- **Bugs**: Open an [Issue](https://github.com/mikeyfrilot/tool-compass/issues)
-- **Security**: Use [GitHub Security Advisories](https://github.com/mikeyfrilot/tool-compass/security/advisories/new) (do not open public issues)
+- **Questions**: Open a [Discussion](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
+- **Bugs**: Open an [Issue](https://github.com/mcp-tool-shop-org/tool-compass/issues)
+- **Security**: Use [GitHub Security Advisories](https://github.com/mcp-tool-shop-org/tool-compass/security/advisories/new) (do not open public issues)
 
 ---
 

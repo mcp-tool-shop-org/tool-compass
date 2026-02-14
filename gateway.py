@@ -22,6 +22,8 @@ import json
 import time
 from typing import Optional, List, Dict, Any
 
+from _version import __version__
+
 # MCP imports
 try:
     from mcp.server.fastmcp import FastMCP
@@ -47,9 +49,14 @@ logger = logging.getLogger(__name__)
 # Initialize MCP server
 mcp = FastMCP("tool-compass-gateway")
 
-# Global state with async locks for thread-safe singleton initialization
-# Pattern: Double-checked locking with asyncio.Lock
-# See: https://www.hevalhazalkurt.com/blog/implementing-singleton-with-asyncawait-in-python/
+# ---------------------------------------------------------------------------
+# Runtime assumptions (single-process MCP server):
+# - The gateway runs as a single process (FastMCP over stdio).
+# - Module-level singletons are initialized lazily with asyncio.Lock
+#   (double-checked locking) to handle concurrent coroutine access.
+# - NOT thread-safe by design — MCP servers are single-threaded async.
+# - For the Gradio UI (multi-threaded), see ui.py which uses threading.Lock.
+# ---------------------------------------------------------------------------
 _compass_index: Optional[CompassIndex] = None
 _backend_manager: Optional[BackendManager] = None
 _config: Optional[CompassConfig] = None
@@ -487,9 +494,7 @@ async def execute(
     # Connect to backend if needed
     if ":" in tool_name:
         server_name = tool_name.split(":")[0]
-        if server_name not in [
-            name for name, conn in manager._backends.items() if conn.is_connected
-        ]:
+        if not manager.is_backend_connected(server_name):
             logger.info(f"Connecting to backend: {server_name}")
             success = await manager.connect_backend(server_name)
             if not success:
@@ -805,7 +810,7 @@ async def compass_audit(
 
     audit = {
         "system": {
-            "version": "2.0",
+            "version": __version__,
             "total_tools": index_stats.get("total_tools", 0),
             "index_path": str(index.index_path),
             "db_path": str(index.db_path),
@@ -1026,24 +1031,28 @@ async def sync_from_backends():
 def categorize_tool(name: str, description: str) -> str:
     """Infer category from tool name and description."""
     name_lower = name.lower()
-    description.lower()
+    description_lower = (description or "").lower()
 
-    if any(x in name_lower for x in ["file", "read", "write", "directory", "path"]):
-        return "file"
-    if any(x in name_lower for x in ["git", "commit", "branch", "repo"]):
-        return "git"
-    if any(x in name_lower for x in ["db_", "sql", "database", "query"]):
-        return "database"
-    if any(x in name_lower for x in ["search", "find", "lookup"]):
-        return "search"
-    if any(x in name_lower for x in ["comfy", "image", "generate", "video"]):
-        return "ai"
-    if any(x in name_lower for x in ["scan", "analyze", "health", "report"]):
-        return "analysis"
-    if any(x in name_lower for x in ["project", "session", "content"]):
-        return "project"
-    if any(x in name_lower for x in ["status", "health", "service"]):
-        return "system"
+    # Category keywords checked against both name and description
+    categories = [
+        ("file", ["file", "read", "write", "directory", "path"]),
+        ("git", ["git", "commit", "branch", "repo"]),
+        ("database", ["db_", "sql", "database", "query"]),
+        ("search", ["search", "find", "lookup"]),
+        ("ai", ["comfy", "image", "generate", "video"]),
+        ("analysis", ["scan", "analyze", "health", "report"]),
+        ("project", ["project", "session", "content"]),
+        ("system", ["status", "health", "service"]),
+    ]
+
+    for category, keywords in categories:
+        if any(kw in name_lower for kw in keywords):
+            return category
+
+    # Fallback: check description when name yields no match
+    for category, keywords in categories:
+        if any(kw in description_lower for kw in keywords):
+            return category
 
     return "other"
 
@@ -1176,7 +1185,7 @@ Workflow:
   2. Then start the gateway for MCP clients to connect
   3. Use compass() -> describe() -> execute() pattern
 
-For more info, see: https://github.com/your-repo/tool-compass
+For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         """
     )
     parser.add_argument("--sync", action="store_true",

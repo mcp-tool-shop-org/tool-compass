@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any, List, TYPE_CHECKING
 if TYPE_CHECKING:
     from config import CompassConfig
     from indexer import CompassIndex
-    from backend_client import BackendManager
+    from backend_client_simple import SimpleBackendManager as BackendManager
 
 logger = logging.getLogger(__name__)
 
@@ -98,10 +98,7 @@ class SyncManager:
         Returns True if changes detected.
         """
         # Connect to backend if needed
-        if (
-            backend_name not in self.backends._backends
-            or not self.backends._backends[backend_name].is_connected
-        ):
+        if not self.backends.is_backend_connected(backend_name):
             success = await self.backends.connect_backend(backend_name)
             if not success:
                 logger.warning(

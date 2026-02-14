@@ -12,7 +12,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from backend_client import (
+from backend_client_mcp import (
     BackendConnection,
     BackendManager,
     ToolInfo,
@@ -144,13 +144,13 @@ class TestBackendConnection:
             )
         )
 
-        with patch("backend_client.stdio_client") as mock_stdio:
+        with patch("backend_client_mcp.stdio_client") as mock_stdio:
             mock_stdio.return_value.__aenter__ = AsyncMock(
                 return_value=(Mock(), Mock())
             )
             mock_stdio.return_value.__aexit__ = AsyncMock()
 
-            with patch("backend_client.ClientSession") as mock_client_session:
+            with patch("backend_client_mcp.ClientSession") as mock_client_session:
                 mock_client_session.return_value.__aenter__ = AsyncMock(
                     return_value=mock_session
                 )
@@ -253,7 +253,7 @@ class TestBackendManager:
 
     def test_manager_init_default_config(self):
         """Should use default config if not provided."""
-        with patch("backend_client.load_config") as mock_load:
+        with patch("backend_client_mcp.load_config") as mock_load:
             mock_load.return_value = CompassConfig(backends={})
             BackendManager()
             mock_load.assert_called_once()
@@ -471,12 +471,12 @@ class TestSingletonFunctions:
     @pytest.mark.asyncio
     async def test_get_backend_manager_creates_instance(self):
         """Should create manager on first call."""
-        import backend_client
+        import backend_client_mcp as backend_client
 
         # Reset singleton
         backend_client._manager = None
 
-        with patch("backend_client.load_config") as mock_load:
+        with patch("backend_client_mcp.load_config") as mock_load:
             mock_load.return_value = CompassConfig(backends={})
             manager = await get_backend_manager()
 
@@ -487,7 +487,7 @@ class TestSingletonFunctions:
     async def test_get_backend_manager_returns_same_instance(self):
         """Should return same instance on subsequent calls."""
 
-        with patch("backend_client.load_config") as mock_load:
+        with patch("backend_client_mcp.load_config") as mock_load:
             mock_load.return_value = CompassConfig(backends={})
 
             manager1 = await get_backend_manager()
@@ -498,11 +498,11 @@ class TestSingletonFunctions:
     @pytest.mark.asyncio
     async def test_init_backends_without_connect(self):
         """Should initialize without connecting."""
-        import backend_client
+        import backend_client_mcp as backend_client
 
         backend_client._manager = None
 
-        with patch("backend_client.load_config") as mock_load:
+        with patch("backend_client_mcp.load_config") as mock_load:
             mock_load.return_value = CompassConfig(backends={})
 
             manager = await init_backends(connect=False)
@@ -512,11 +512,11 @@ class TestSingletonFunctions:
     @pytest.mark.asyncio
     async def test_init_backends_with_connect(self):
         """Should connect all backends when requested."""
-        import backend_client
+        import backend_client_mcp as backend_client
 
         backend_client._manager = None
 
-        with patch("backend_client.load_config") as mock_load:
+        with patch("backend_client_mcp.load_config") as mock_load:
             mock_load.return_value = CompassConfig(backends={})
 
             with patch.object(
@@ -639,7 +639,7 @@ class TestBackendConnectionEdgeCases:
         """Should handle connection timeout gracefully."""
         conn = BackendConnection("test", mock_backend)
 
-        with patch("backend_client.stdio_client") as mock_stdio:
+        with patch("backend_client_mcp.stdio_client") as mock_stdio:
             mock_stdio.return_value.__aenter__ = AsyncMock(
                 side_effect=asyncio.TimeoutError()
             )
@@ -655,7 +655,7 @@ class TestBackendConnectionEdgeCases:
         """Should handle connection exceptions gracefully."""
         conn = BackendConnection("test", mock_backend)
 
-        with patch("backend_client.stdio_client") as mock_stdio:
+        with patch("backend_client_mcp.stdio_client") as mock_stdio:
             mock_stdio.return_value.__aenter__ = AsyncMock(
                 side_effect=RuntimeError("Connection refused")
             )

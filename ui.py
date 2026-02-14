@@ -12,11 +12,14 @@ import asyncio
 import json
 import logging
 import sys
+import threading
 from pathlib import Path
 from typing import Optional, List, Dict
 import argparse
 
 import gradio as gr
+
+from _version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -35,36 +38,47 @@ from config import load_config
 
 
 def run_async(coro):
-    """Run async coroutine in sync context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # Create new loop for nested async
-            import concurrent.futures
+    """Run an async coroutine from synchronous Gradio callbacks.
 
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                future = pool.submit(asyncio.run, coro)
-                return future.result()
-        else:
-            return loop.run_until_complete(coro)
+    Safe in two scenarios:
+    - No running loop → uses asyncio.run() directly.
+    - Inside a running loop (Gradio's event loop) → dispatches to a
+      worker thread with its own asyncio.run() to avoid nested-loop crashes.
+    """
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+        # Loop is already running — use a worker thread.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(asyncio.run, coro)
+            return future.result()
     except RuntimeError:
+        # No running loop — safe to call directly.
         return asyncio.run(coro)
 
 
 # =============================================================================
 # GLOBAL STATE
+# Gradio serves requests from a thread pool, so singletons need a
+# threading.Lock (not asyncio.Lock) for safe double-checked init.
 # =============================================================================
 
 _index: Optional[CompassIndex] = None
 _analytics: Optional[CompassAnalytics] = None
 _chain_indexer: Optional[ChainIndexer] = None
 _config = None
+_init_lock = threading.Lock()
 
 
 def get_index() -> CompassIndex:
-    """Get or initialize compass index."""
+    """Get or initialize compass index (thread-safe)."""
     global _index
-    if _index is None:
+    if _index is not None:
+        return _index
+    with _init_lock:
+        if _index is not None:
+            return _index
         _index = CompassIndex()
         if not _index.load_index():
             raise RuntimeError("Failed to load index. Run: python gateway.py --sync")
@@ -72,25 +86,30 @@ def get_index() -> CompassIndex:
 
 
 def get_analytics_instance() -> CompassAnalytics:
-    """Get or initialize analytics."""
+    """Get or initialize analytics (thread-safe)."""
     global _analytics
-    if _analytics is None:
+    if _analytics is not None:
+        return _analytics
+    with _init_lock:
+        if _analytics is not None:
+            return _analytics
         _analytics = get_analytics()
         run_async(_analytics.load_hot_cache_from_db())
     return _analytics
 
 
 def get_chain_indexer_instance() -> Optional[ChainIndexer]:
-    """Get or initialize chain indexer."""
+    """Get or initialize chain indexer (thread-safe)."""
     global _chain_indexer, _config
-    if _config is None:
-        _config = load_config()
+    with _init_lock:
+        if _config is None:
+            _config = load_config()
 
-    if _chain_indexer is None and _config.chain_indexing_enabled:
-        index = get_index()
-        analytics = get_analytics_instance()
-        _chain_indexer = get_chain_indexer(index.embedder, analytics)
-        run_async(_chain_indexer.load_chain_index())
+        if _chain_indexer is None and _config.chain_indexing_enabled:
+            index = get_index()
+            analytics = get_analytics_instance()
+            _chain_indexer = get_chain_indexer(index.embedder, analytics)
+            run_async(_chain_indexer.load_chain_index())
 
     return _chain_indexer
 
@@ -1132,10 +1151,10 @@ def create_ui() -> gr.Blocks:
 
                 status_btn.click(fn=get_system_status, inputs=[], outputs=[status_html])
 
-        gr.Markdown("""
+        gr.Markdown(f"""
         ---
         <div style="text-align: center; color: #666;">
-            Tool Compass v2.0 | Semantic tool discovery for MCP
+            Tool Compass v{__version__} | Semantic tool discovery for MCP
         </div>
         """)
 

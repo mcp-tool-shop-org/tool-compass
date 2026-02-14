@@ -165,7 +165,7 @@ class TestExecuteTool:
 
         # Mock backend manager
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.connect_backend = AsyncMock(return_value=True)
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": True, "data": "result"}
@@ -191,7 +191,7 @@ class TestExecuteTool:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {}
+        mock_manager.is_backend_connected = Mock(return_value=False)
         mock_manager.connect_backend = AsyncMock(return_value=False)
 
         gateway._backend_manager = mock_manager
@@ -213,7 +213,7 @@ class TestExecuteTool:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
@@ -1082,7 +1082,7 @@ class TestExecuteEdgeCases:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
@@ -1104,7 +1104,7 @@ class TestExecuteEdgeCases:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
@@ -1127,7 +1127,7 @@ class TestExecuteEdgeCases:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": False, "error": "Test error"}
         )
@@ -1236,7 +1236,7 @@ class TestExecuteToolAdditional:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {}
+        mock_manager.is_backend_connected = Mock(return_value=False)
         mock_manager.connect_backend = AsyncMock(return_value=False)
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": False, "error": "No backend"}
@@ -1258,7 +1258,7 @@ class TestExecuteToolAdditional:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         # Return failure instead of raising - the gateway wraps exceptions
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": False, "error": "Execution failed"}
@@ -1583,24 +1583,31 @@ class TestChainsEdgeCases:
 class TestCategorizeToolEdgeCases:
     """Additional categorize_tool() tests."""
 
-    def test_name_only_matching(self):
-        """categorize_tool only uses name, not description."""
+    def test_description_fallback(self):
+        """categorize_tool falls back to description when name has no keywords."""
         from gateway import categorize_tool
 
-        # The function only checks name, so generic names return "other"
+        # Generic name, but description has category keywords → description wins
         assert (
-            categorize_tool("generic_tool", "Execute a SQL database query") == "other"
+            categorize_tool("generic_tool", "Execute a SQL database query") == "database"
         )
-        # But names with keywords work
-        assert categorize_tool("db_query", "Execute a SQL database query") == "database"
+        assert categorize_tool("my_helper", "Search for documents") == "search"
+        assert categorize_tool("do_stuff", "Scan the codebase for issues") == "analysis"
 
-    def test_priority_order(self):
+    def test_name_takes_priority_over_description(self):
         """Name should be checked before description."""
         from gateway import categorize_tool
 
         # "file" in name should win even if description says "database"
         result = categorize_tool("read_file", "Query the database")
         assert result == "file"
+
+    def test_none_description_is_safe(self):
+        """None description should not raise."""
+        from gateway import categorize_tool
+
+        assert categorize_tool("db_query", None) == "database"
+        assert categorize_tool("unknown", None) == "other"
 
     def test_comfy_ai_category(self):
         """Comfy tools should be AI category."""
@@ -1624,17 +1631,9 @@ class TestExecuteBackendConnection:
         import gateway
 
         mock_manager = Mock()
-        mock_backend = Mock(is_connected=False)
-        mock_manager._backends = {"test": mock_backend}
+        mock_manager.is_backend_connected = Mock(return_value=False)
         mock_manager.connect_backend = AsyncMock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
-
-        # After connecting, mock that it's now connected
-        def update_connected(*args):
-            mock_backend.is_connected = True
-            return True
-
-        mock_manager.connect_backend.side_effect = update_connected
 
         gateway._backend_manager = mock_manager
         gateway._config = test_config
@@ -1652,7 +1651,7 @@ class TestExecuteBackendConnection:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
