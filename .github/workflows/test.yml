@@ -9,6 +9,7 @@ on:
     paths:
       - '*.py'
       - 'tests/**'
+      - 'scripts/**'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - 'Dockerfile'
@@ -18,6 +19,7 @@ on:
     paths:
       - '*.py'
       - 'tests/**'
+      - 'scripts/**'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - 'Dockerfile'
@@ -43,7 +45,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python-version: ['3.10', '3.11', '3.12']
+        python-version: ['3.10', '3.11', '3.12', '3.13']
 
     steps:
       - name: Checkout repository
@@ -77,6 +79,12 @@ jobs:
         with:
           file: coverage.xml
           fail_ci_if_error: false
+
+      - name: Audit dependencies for vulnerabilities
+        if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+        run: |
+          pip-audit -r requirements.txt
+        continue-on-error: true  # Warn-only until clean baseline established
 
   # Integration tests (requires Ollama)
   integration:
