@@ -4,12 +4,11 @@
 
 **Semantic navigator for MCP tools - Find the right tool by intent, not memory**
 
-[![Tests](https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/test.yml/badge.svg)](https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/test.yml)
-[![codecov](https://codecov.io/gh/mcp-tool-shop-org/tool-compass/graph/badge.svg)](https://codecov.io/gh/mcp-tool-shop-org/tool-compass)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg?logo=python&logoColor=white)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Docker](https://img.shields.io/badge/docker-ready-blue.svg?logo=docker&logoColor=white)](https://www.docker.com/)
-[![GitHub stars](https://img.shields.io/github/stars/mcp-tool-shop-org/tool-compass?style=social)](https://github.com/mcp-tool-shop-org/tool-compass)
+<a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/test.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/test.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+<a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
+<img src="https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
+<a href="LICENSE"><img src="https://img.shields.io/github/license/mcp-tool-shop-org/tool-compass?style=flat-square" alt="License"></a>
+<img src="https://img.shields.io/badge/docker-ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
 
 *95% fewer tokens. Find tools by describing what you want to do.*
 
