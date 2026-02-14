@@ -18,6 +18,8 @@ import argparse
 
 import gradio as gr
 
+from _version import __version__
+
 logger = logging.getLogger(__name__)
 
 # Add parent to path for imports
@@ -1132,10 +1134,10 @@ def create_ui() -> gr.Blocks:
 
                 status_btn.click(fn=get_system_status, inputs=[], outputs=[status_html])
 
-        gr.Markdown("""
+        gr.Markdown(f"""
         ---
         <div style="text-align: center; color: #666;">
-            Tool Compass v2.0 | Semantic tool discovery for MCP
+            Tool Compass v{__version__} | Semantic tool discovery for MCP
         </div>
         """)
 

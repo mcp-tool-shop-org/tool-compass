@@ -22,6 +22,8 @@ import json
 import time
 from typing import Optional, List, Dict, Any
 
+from _version import __version__
+
 # MCP imports
 try:
     from mcp.server.fastmcp import FastMCP
@@ -803,7 +805,7 @@ async def compass_audit(
 
     audit = {
         "system": {
-            "version": "2.0",
+            "version": __version__,
             "total_tools": index_stats.get("total_tools", 0),
             "index_path": str(index.index_path),
             "db_path": str(index.db_path),

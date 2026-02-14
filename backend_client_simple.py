@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from config import CompassConfig, StdioBackend, load_config
+from _version import __version__
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +135,7 @@ class SimpleBackendConnection:
                 self._send_request("initialize", {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "tool-compass", "version": "2.0"}
+                    "clientInfo": {"name": "tool-compass", "version": __version__}
                 }),
                 timeout=timeout
             )
