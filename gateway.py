@@ -487,9 +487,7 @@ async def execute(
     # Connect to backend if needed
     if ":" in tool_name:
         server_name = tool_name.split(":")[0]
-        if server_name not in [
-            name for name, conn in manager._backends.items() if conn.is_connected
-        ]:
+        if not manager.is_backend_connected(server_name):
             logger.info(f"Connecting to backend: {server_name}")
             success = await manager.connect_backend(server_name)
             if not success:

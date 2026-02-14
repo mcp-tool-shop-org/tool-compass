@@ -415,9 +415,13 @@ class SimpleBackendManager:
 
             return False
 
+    def is_backend_connected(self, name: str) -> bool:
+        """Check if a backend is currently connected."""
+        return name in self._backends and self._backends[name].is_connected
+
     async def ensure_connected(self, name: str) -> bool:
         """Ensure a backend is connected, reconnecting if necessary."""
-        if name in self._backends and self._backends[name].is_connected:
+        if self.is_backend_connected(name):
             return True
         return await self.connect_backend(name)
 

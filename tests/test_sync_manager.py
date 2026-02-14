@@ -272,6 +272,7 @@ class TestChangeDetection:
     @pytest.mark.asyncio
     async def test_check_backend_changes_not_connected(self, sync_manager):
         """Should try to connect if not connected."""
+        sync_manager.backends.is_backend_connected = Mock(return_value=False)
         sync_manager.backends.connect_backend = AsyncMock(return_value=False)
 
         result = await sync_manager.check_backend_changes("backend1")
@@ -282,7 +283,7 @@ class TestChangeDetection:
     @pytest.mark.asyncio
     async def test_check_backend_changes_no_tools(self, sync_manager):
         """Should return False when backend has no tools."""
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=[])
 
         result = await sync_manager.check_backend_changes("backend1")
@@ -292,7 +293,7 @@ class TestChangeDetection:
     @pytest.mark.asyncio
     async def test_check_backend_changes_first_sync(self, sync_manager):
         """Should detect changes on first sync (no stored hash)."""
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(
             return_value=[
                 ToolInfo("tool1", "backend1:tool1", "Tool 1", "backend1", {}),
@@ -320,7 +321,7 @@ class TestChangeDetection:
         )
         db.commit()
 
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=tools)
 
         result = await sync_manager.check_backend_changes("backend1")
@@ -347,7 +348,7 @@ class TestChangeDetection:
         )
         db.commit()
 
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=new_tools)
 
         result = await sync_manager.check_backend_changes("backend1")
@@ -661,7 +662,7 @@ class TestRebuildForBackends:
             ),
             ToolInfo("tool2", "backend1:tool2", "Tool 2", "backend1", {}),
         ]
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=tools)
         sync_manager.index.add_single_tool = AsyncMock()
 
@@ -682,7 +683,7 @@ class TestRebuildForBackends:
     @pytest.mark.asyncio
     async def test_rebuild_no_tools(self, sync_manager):
         """Should handle backend with no tools."""
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=[])
         sync_manager.index.add_single_tool = AsyncMock()
 
@@ -706,7 +707,7 @@ class TestRebuildForBackends:
                 },
             ),
         ]
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=tools)
         sync_manager.index.add_single_tool = AsyncMock()
 
@@ -721,7 +722,7 @@ class TestRebuildForBackends:
         tools = [
             ToolInfo("simple_tool", "simple_tool", "Simple tool", "backend1", {}),
         ]
-        sync_manager.backends._backends = {"backend1": Mock(is_connected=True)}
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=tools)
         sync_manager.index.add_single_tool = AsyncMock()
 

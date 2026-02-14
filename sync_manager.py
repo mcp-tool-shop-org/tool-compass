@@ -98,10 +98,7 @@ class SyncManager:
         Returns True if changes detected.
         """
         # Connect to backend if needed
-        if (
-            backend_name not in self.backends._backends
-            or not self.backends._backends[backend_name].is_connected
-        ):
+        if not self.backends.is_backend_connected(backend_name):
             success = await self.backends.connect_backend(backend_name)
             if not success:
                 logger.warning(

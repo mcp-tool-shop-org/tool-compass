@@ -165,7 +165,7 @@ class TestExecuteTool:
 
         # Mock backend manager
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.connect_backend = AsyncMock(return_value=True)
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": True, "data": "result"}
@@ -191,7 +191,7 @@ class TestExecuteTool:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {}
+        mock_manager.is_backend_connected = Mock(return_value=False)
         mock_manager.connect_backend = AsyncMock(return_value=False)
 
         gateway._backend_manager = mock_manager
@@ -213,7 +213,7 @@ class TestExecuteTool:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
@@ -1082,7 +1082,7 @@ class TestExecuteEdgeCases:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
@@ -1104,7 +1104,7 @@ class TestExecuteEdgeCases:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
@@ -1127,7 +1127,7 @@ class TestExecuteEdgeCases:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": False, "error": "Test error"}
         )
@@ -1236,7 +1236,7 @@ class TestExecuteToolAdditional:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {}
+        mock_manager.is_backend_connected = Mock(return_value=False)
         mock_manager.connect_backend = AsyncMock(return_value=False)
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": False, "error": "No backend"}
@@ -1258,7 +1258,7 @@ class TestExecuteToolAdditional:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         # Return failure instead of raising - the gateway wraps exceptions
         mock_manager.execute_tool = AsyncMock(
             return_value={"success": False, "error": "Execution failed"}
@@ -1631,17 +1631,9 @@ class TestExecuteBackendConnection:
         import gateway
 
         mock_manager = Mock()
-        mock_backend = Mock(is_connected=False)
-        mock_manager._backends = {"test": mock_backend}
+        mock_manager.is_backend_connected = Mock(return_value=False)
         mock_manager.connect_backend = AsyncMock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
-
-        # After connecting, mock that it's now connected
-        def update_connected(*args):
-            mock_backend.is_connected = True
-            return True
-
-        mock_manager.connect_backend.side_effect = update_connected
 
         gateway._backend_manager = mock_manager
         gateway._config = test_config
@@ -1659,7 +1651,7 @@ class TestExecuteBackendConnection:
         import gateway
 
         mock_manager = Mock()
-        mock_manager._backends = {"test": Mock(is_connected=True)}
+        mock_manager.is_backend_connected = Mock(return_value=True)
         mock_manager.execute_tool = AsyncMock(return_value={"success": True})
 
         gateway._backend_manager = mock_manager
