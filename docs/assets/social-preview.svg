@@ -1,3 +1,8 @@
+<!--
+  Social Preview for GitHub repository settings.
+  Hand-edited SVG — update the GitHub badge text below if the org/repo changes.
+  Export to PNG (1280x640) at docs/assets/social-preview.png for GitHub.
+-->
 <svg width="1280" height="640" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
