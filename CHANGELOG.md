@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-02-14
+
+### Fixed
+- Windows subprocess stability with `SimpleBackendManager` (#11)
+- Auto-fix lint issues with ruff (#13)
+
+### Changed
+- Migrated all repository URLs to `mcp-tool-shop-org` GitHub organization
+- Updated CI actions to latest major versions (checkout v6, setup-python v6, codecov v5)
+
+### Infrastructure
+- Added GHCR Docker publish workflow
+- Added `llms.txt` for LLM discoverability
+- Added social preview assets
+- Updated dependency version ranges (black, pytest, pytest-cov, isort, gradio)
+
 ## [2.0.1] - 2026-01-18
 
 ### Added
@@ -115,11 +131,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 2.0.2 | 2026-02-14 | Org migration, CI updates, Windows fix |
 | 2.0.0 | 2026-01-17 | Gradio UI, error handling, polish |
 | 1.1.0 | 2026-01-16 | Workflows, analytics, sync |
 | 1.0.0 | 2026-01-15 | Initial release |
 
-[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.1...HEAD
+[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.2...HEAD
+[2.0.2]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v1.1.0...v2.0.0
 [1.1.0]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v1.0.0...v1.1.0
