@@ -95,6 +95,6 @@ pip-audit
 
 ## Contact
 
-For security concerns: Use [GitHub Security Advisories](https://github.com/mikeyfrilot/tool-compass/security/advisories/new) (private)
+For security concerns: Use [GitHub Security Advisories](https://github.com/mcp-tool-shop-org/tool-compass/security/advisories/new) (private)
 
-For general questions: Open a [GitHub Discussion](https://github.com/mikeyfrilot/tool-compass/discussions)
+For general questions: Open a [GitHub Discussion](https://github.com/mcp-tool-shop-org/tool-compass/discussions)

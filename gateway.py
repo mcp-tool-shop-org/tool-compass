@@ -1176,7 +1176,7 @@ Workflow:
   2. Then start the gateway for MCP clients to connect
   3. Use compass() -> describe() -> execute() pattern
 
-For more info, see: https://github.com/your-repo/tool-compass
+For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         """
     )
     parser.add_argument("--sync", action="store_true",

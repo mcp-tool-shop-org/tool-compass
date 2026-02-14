@@ -51,7 +51,7 @@ Tool Compass uses **semantic search** to find relevant tools from a natural lang
 ollama pull nomic-embed-text
 
 # Clone and setup
-git clone https://github.com/mikeyfrilot/tool-compass.git
+git clone https://github.com/mcp-tool-shop-org/tool-compass.git
 cd tool-compass/tool_compass
 
 # Create virtual environment
@@ -75,7 +75,7 @@ python ui.py
 
 ```bash
 # Clone the repo
-git clone https://github.com/mikeyfrilot/tool-compass.git
+git clone https://github.com/mcp-tool-shop-org/tool-compass.git
 cd tool-compass/tool_compass
 
 # Start with Docker Compose (requires Ollama running locally)
@@ -233,10 +233,10 @@ python gateway.py --sync
 
 Part of the **Compass Suite** for AI-powered development:
 
-- [File Compass](https://github.com/mikeyfrilot/file-compass) - Semantic file search
-- [Integradio](https://github.com/mikeyfrilot/integradio) - Vector-embedded Gradio components
-- [Backpropagate](https://github.com/mikeyfrilot/backpropagate) - Headless LLM fine-tuning
-- [Comfy Headless](https://github.com/mikeyfrilot/comfy-headless) - ComfyUI without the complexity
+- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Semantic file search
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Vector-embedded Gradio components
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Headless LLM fine-tuning
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI without the complexity
 
 ## Contributing
 
@@ -271,6 +271,6 @@ For security vulnerabilities, please see [SECURITY.md](SECURITY.md). **Do not op
 
 Tool Compass reduces entropy in the MCP ecosystem by organizing tools by semantic meaning.
 
-**[Documentation](https://github.com/mikeyfrilot/tool-compass#readme)** • **[Issues](https://github.com/mikeyfrilot/tool-compass/issues)** • **[Discussions](https://github.com/mikeyfrilot/tool-compass/discussions)**
+**[Documentation](https://github.com/mcp-tool-shop-org/tool-compass#readme)** • **[Issues](https://github.com/mcp-tool-shop-org/tool-compass/issues)** • **[Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)**
 
 </div>

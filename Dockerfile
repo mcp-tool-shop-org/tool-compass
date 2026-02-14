@@ -27,7 +27,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # =============================================================================
 FROM python:3.11-slim as production
 
-LABEL maintainer="Tool Compass <github.com/your-org/tool-compass>"
+LABEL maintainer="Tool Compass <github.com/mcp-tool-shop-org/tool-compass>"
 LABEL description="Semantic search gateway for MCP tools"
 LABEL version="2.0"
 

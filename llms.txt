@@ -92,10 +92,10 @@ Environment variables:
 
 ## Links
 
-- Repository: https://github.com/mcp-tool-shop/tool-compass
+- Repository: https://github.com/mcp-tool-shop-org/tool-compass
 - PyPI: https://pypi.org/project/tool-compass/
-- Documentation: https://github.com/mcp-tool-shop/tool-compass#readme
-- Issues: https://github.com/mcp-tool-shop/tool-compass/issues
+- Documentation: https://github.com/mcp-tool-shop-org/tool-compass#readme
+- Issues: https://github.com/mcp-tool-shop-org/tool-compass/issues
 
 ## License
 
