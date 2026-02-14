@@ -459,7 +459,6 @@ class CompassAnalytics:
 
         for row in patterns:
             tools = json.loads(row["tool_sequence"])
-            row["sequence_hash"]
 
             # Generate chain name from tools
             chain_name = "_to_".join([t.split(":")[-1] for t in tools])[:50]
