@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/assets/tool-compass-logo-dark-bg.jpg" alt="Tool Compass Logo" width="200">
+
 # Tool Compass
 
 **Semantic navigator for MCP tools - Find the right tool by intent, not memory**
