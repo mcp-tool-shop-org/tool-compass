@@ -1583,24 +1583,31 @@ class TestChainsEdgeCases:
 class TestCategorizeToolEdgeCases:
     """Additional categorize_tool() tests."""
 
-    def test_name_only_matching(self):
-        """categorize_tool only uses name, not description."""
+    def test_description_fallback(self):
+        """categorize_tool falls back to description when name has no keywords."""
         from gateway import categorize_tool
 
-        # The function only checks name, so generic names return "other"
+        # Generic name, but description has category keywords → description wins
         assert (
-            categorize_tool("generic_tool", "Execute a SQL database query") == "other"
+            categorize_tool("generic_tool", "Execute a SQL database query") == "database"
         )
-        # But names with keywords work
-        assert categorize_tool("db_query", "Execute a SQL database query") == "database"
+        assert categorize_tool("my_helper", "Search for documents") == "search"
+        assert categorize_tool("do_stuff", "Scan the codebase for issues") == "analysis"
 
-    def test_priority_order(self):
+    def test_name_takes_priority_over_description(self):
         """Name should be checked before description."""
         from gateway import categorize_tool
 
         # "file" in name should win even if description says "database"
         result = categorize_tool("read_file", "Query the database")
         assert result == "file"
+
+    def test_none_description_is_safe(self):
+        """None description should not raise."""
+        from gateway import categorize_tool
+
+        assert categorize_tool("db_query", None) == "database"
+        assert categorize_tool("unknown", None) == "other"
 
     def test_comfy_ai_category(self):
         """Comfy tools should be AI category."""

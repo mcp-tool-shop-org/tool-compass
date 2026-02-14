@@ -1026,24 +1026,28 @@ async def sync_from_backends():
 def categorize_tool(name: str, description: str) -> str:
     """Infer category from tool name and description."""
     name_lower = name.lower()
-    description.lower()
+    description_lower = (description or "").lower()
 
-    if any(x in name_lower for x in ["file", "read", "write", "directory", "path"]):
-        return "file"
-    if any(x in name_lower for x in ["git", "commit", "branch", "repo"]):
-        return "git"
-    if any(x in name_lower for x in ["db_", "sql", "database", "query"]):
-        return "database"
-    if any(x in name_lower for x in ["search", "find", "lookup"]):
-        return "search"
-    if any(x in name_lower for x in ["comfy", "image", "generate", "video"]):
-        return "ai"
-    if any(x in name_lower for x in ["scan", "analyze", "health", "report"]):
-        return "analysis"
-    if any(x in name_lower for x in ["project", "session", "content"]):
-        return "project"
-    if any(x in name_lower for x in ["status", "health", "service"]):
-        return "system"
+    # Category keywords checked against both name and description
+    categories = [
+        ("file", ["file", "read", "write", "directory", "path"]),
+        ("git", ["git", "commit", "branch", "repo"]),
+        ("database", ["db_", "sql", "database", "query"]),
+        ("search", ["search", "find", "lookup"]),
+        ("ai", ["comfy", "image", "generate", "video"]),
+        ("analysis", ["scan", "analyze", "health", "report"]),
+        ("project", ["project", "session", "content"]),
+        ("system", ["status", "health", "service"]),
+    ]
+
+    for category, keywords in categories:
+        if any(kw in name_lower for kw in keywords):
+            return category
+
+    # Fallback: check description when name yields no match
+    for category, keywords in categories:
+        if any(kw in description_lower for kw in keywords):
+            return category
 
     return "other"
 
