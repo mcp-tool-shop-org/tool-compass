@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from sync_manager import SyncManager, get_sync_manager
 from config import CompassConfig, StdioBackend
-from backend_client import ToolInfo
+from backend_client_simple import ToolInfo
 
 
 # =============================================================================

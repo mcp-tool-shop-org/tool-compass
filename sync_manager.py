@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any, List, TYPE_CHECKING
 if TYPE_CHECKING:
     from config import CompassConfig
     from indexer import CompassIndex
-    from backend_client import BackendManager
+    from backend_client_simple import SimpleBackendManager as BackendManager
 
 logger = logging.getLogger(__name__)
 

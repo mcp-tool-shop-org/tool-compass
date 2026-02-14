@@ -1,6 +1,12 @@
 """
-Tool Compass - Backend Client Module
-Manages connections to MCP backend servers via stdio subprocess.
+Tool Compass - MCP SDK Backend Client (EXPERIMENTAL / NOT USED AT RUNTIME)
+
+This module uses the official MCP Python SDK (mcp.client.stdio) for backend
+connections. It is NOT used by the gateway — see backend_client_simple.py for
+the canonical runtime client, which uses direct subprocess JSON-RPC to avoid
+anyio task group conflicts when nested inside another MCP server.
+
+Kept for reference and potential future use when MCP SDK nesting is stable.
 """
 
 import asyncio
