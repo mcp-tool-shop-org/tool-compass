@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.3] - 2026-02-14
+
+### Fixed
+- `categorize_tool()` now falls back to description matching when name has no category keywords
+- `analytics.last_success_at` stores real timestamps instead of the literal string "CURRENT_TIMESTAMP"
+- `SyncEmbedder` no longer crashes when called from inside a running event loop (Gradio, FastMCP)
+- UI `run_async` helper replaced with deterministic loop detection (no more `RuntimeError` roulette)
+- Removed discarded `sequence_hash` read in chain detection
+
+### Changed
+- Private `_backends` dict access replaced with public `is_backend_connected()` API
+- `backend_client.py` renamed to `backend_client_mcp.py` (experimental; not used at runtime)
+- Version reporting unified via `_version.py` module (reads from `importlib.metadata` or `pyproject.toml`)
+- UI singletons protected with `threading.Lock` (Gradio is multi-threaded)
+- Runtime assumptions documented in `gateway.py`
+
+### Infrastructure
+- Python 3.13 added to CI test matrix (3.10–3.13, 12 matrix jobs)
+- `actions/checkout` normalized to v6 across all workflows
+- `pip-audit` dependency vulnerability scan added (warn-only)
+- `scripts/**` added to CI path triggers
+
+### Tests
+- 23 new tests: `backend_client_simple.py` API, `run_async` loop safety, `SyncEmbedder` loop safety, `_version.py` (387 → 410 tests)
+
 ## [2.0.2] - 2026-02-14
 
 ### Fixed
@@ -131,12 +156,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 | Version | Date | Highlights |
 |---------|------|------------|
+| 2.0.3 | 2026-02-14 | Bug fixes, async safety, CI hygiene, 410 tests |
 | 2.0.2 | 2026-02-14 | Org migration, CI updates, Windows fix |
 | 2.0.0 | 2026-01-17 | Gradio UI, error handling, polish |
 | 1.1.0 | 2026-01-16 | Workflows, analytics, sync |
 | 1.0.0 | 2026-01-15 | Initial release |
 
-[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.2...HEAD
+[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.3...HEAD
+[2.0.3]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.0...v2.0.1
 [2.0.0]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v1.1.0...v2.0.0
