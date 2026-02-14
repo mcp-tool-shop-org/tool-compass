@@ -246,6 +246,12 @@ We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 For security vulnerabilities, please see [SECURITY.md](SECURITY.md). **Do not open public issues for security bugs.**
 
+## Support
+
+- **Questions / help:** [Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
+- **Bug reports:** [Issues](https://github.com/mcp-tool-shop-org/tool-compass/issues)
+- **Security:** [SECURITY.md](SECURITY.md)
+
 ## License
 
 [MIT](LICENSE) - see LICENSE file for details.
