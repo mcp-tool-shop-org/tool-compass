@@ -1,0 +1,31 @@
+# See https://fly.io/docs/reference/configuration/
+app = "tool-compass-gateway"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+  target = "mcp-gateway"
+
+[env]
+  PORT = "8080"
+  PYTHONUNBUFFERED = "1"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ["app"]
+
+[[http_service.checks]]
+  grace_period = "15s"
+  interval = "30s"
+  method = "GET"
+  path = "/health"
+  timeout = "5s"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
