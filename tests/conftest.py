@@ -6,7 +6,6 @@ Based on FastMCP testing best practices:
 https://gofastmcp.com/patterns/testing
 """
 
-import asyncio
 import pytest
 import sys
 from pathlib import Path
@@ -18,19 +17,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config import CompassConfig, StdioBackend
 from tool_manifest import ToolDefinition
-
-
-# =============================================================================
-# Async Support
-# =============================================================================
-
-
-@pytest.fixture(scope="session")
-def event_loop():
-    """Create event loop for async tests."""
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
 
 
 # =============================================================================
