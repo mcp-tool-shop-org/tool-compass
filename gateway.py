@@ -1164,6 +1164,38 @@ async def async_main(args):
         await run_tests()
 
 
+def _run_http(port: int) -> None:
+    """Run the MCP gateway in HTTP mode with a /health endpoint for Fly.io."""
+    from starlette.routing import Route
+    from starlette.responses import JSONResponse
+
+    async def health(_request):
+        return JSONResponse({
+            "status": "ok",
+            "server": "tool-compass-gateway",
+            "version": __version__,
+        })
+
+    # Add health route to FastMCP's custom routes (included in streamable_http_app)
+    mcp._custom_starlette_routes.append(Route("/health", health, methods=["GET"]))
+
+    # Use FastMCP's built-in HTTP runner (handles lifespan + session manager init)
+    from mcp.server.transport_security import TransportSecuritySettings
+    mcp.settings.host = "0.0.0.0"
+    mcp.settings.port = port
+    # Allow Fly.io and Smithery proxy hosts
+    mcp.settings.transport_security = TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[
+            "tool-compass-gateway.fly.dev",
+            "tool-compass-gateway--mcp-tool-shop.run.tools",
+            "localhost",
+            "0.0.0.0",
+        ],
+    )
+    mcp.run(transport="streamable-http")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="gateway",
@@ -1227,7 +1259,16 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
             file=sys.stderr,
         )
         print("Workflow: compass() -> describe() -> execute()", file=sys.stderr)
-        mcp.run()
+
+        # Select transport: PORT env var → HTTP (Fly.io), else stdio (local)
+        import os
+        port = os.environ.get("PORT")
+        if port:
+            print(f"Transport: streamable-http on 0.0.0.0:{port}", file=sys.stderr)
+            _run_http(int(port))
+        else:
+            print("Transport: stdio", file=sys.stderr)
+            mcp.run()
 
 
 if __name__ == "__main__":

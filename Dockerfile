@@ -20,7 +20,8 @@ COPY requirements.txt .
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir uvicorn
 
 # =============================================================================
 # Stage 2: Production
@@ -77,7 +78,14 @@ CMD ["python", "ui.py"]
 # =============================================================================
 FROM production as mcp-gateway
 
-# MCP servers use stdio, not HTTP ports
-# This stage is for running as an MCP server in Claude Desktop
+# Override for HTTP mode (Fly.io / Smithery)
+ENV PORT=8080
+
+# Expose MCP HTTP port
+EXPOSE 8080
+
+# Health check via /health endpoint
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import httpx; r = httpx.get('http://localhost:8080/health'); r.raise_for_status()" || exit 1
 
 CMD ["python", "gateway.py"]
