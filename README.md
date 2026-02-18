@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/tool-compass-logo-dark-bg.jpg" alt="Tool Compass Logo" width="200">
+<img src="logo.png" alt="Tool Compass Logo" width="200">
 
 # Tool Compass
 
