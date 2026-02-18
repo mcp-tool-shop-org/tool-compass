@@ -26,6 +26,10 @@ on:
       - '.github/workflows/**'
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   lint:
     name: Org URL sanity check
