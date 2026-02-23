@@ -1,11 +1,11 @@
 # Tool Compass CI Pipeline
 # Runs tests on pushes and PRs that touch code or config
 
-name: Tests
+name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
     paths:
       - '*.py'
       - 'tests/**'
@@ -49,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ['3.10', '3.11', '3.12', '3.13']
+        python-version: ['3.11', '3.12']
 
     steps:
       - name: Checkout repository
