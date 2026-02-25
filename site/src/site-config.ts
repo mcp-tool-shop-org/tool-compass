@@ -72,7 +72,7 @@ export const config: SiteConfig = {
       id: 'tools',
       title: 'Gateway Tools',
       subtitle: 'Nine tools — one semantic entry point for your entire MCP ecosystem.',
-      headers: ['Tool', 'Description'],
+      columns: ['Tool', 'Description'],
       rows: [
         ['compass(intent)', 'Semantic search — find the right tool by describing your intent'],
         ['describe(tool)', 'Get full JSON schema for a specific tool before calling it'],
