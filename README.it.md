@@ -8,7 +8,7 @@
 
 # Tool Compass
 
-**Semantic navigator for MCP tools - Find the right tool by intent, not memory**
+**Navigatore semantico per strumenti MCP: trova lo strumento giusto in base all'intento, non alla memoria.**
 
 <a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
@@ -17,17 +17,17 @@
 <img src="https://img.shields.io/badge/docker-ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
 
-*95% fewer tokens. Find tools by describing what you want to do.*
+*95% in meno di token. Trova gli strumenti descrivendo cosa vuoi fare.*
 
-[Installation](#quick-start) • [Usage](#usage) • [Docker](#option-2-docker) • [Performance](#performance) • [Contributing](#contributing)
+[Installazione](#quick-start) • [Utilizzo](#usage) • [Docker](#option-2-docker) • [Prestazioni](#performance) • [Contributi](#contributing)
 
 </div>
 
 ---
 
-## The Problem
+## Il problema
 
-MCP servers expose dozens or hundreds of tools. Loading all tool definitions into context wastes tokens and slows down responses.
+I server MCP espongono decine o centinaia di strumenti. Caricare tutte le definizioni degli strumenti nel contesto spreca token e rallenta le risposte.
 
 ```
 Before: 77 tools × ~500 tokens = 38,500 tokens per request
@@ -36,9 +36,9 @@ After:  1 compass tool + 3 results = ~2,000 tokens per request
 Savings: 95%
 ```
 
-## The Solution
+## La soluzione
 
-Tool Compass uses **semantic search** to find relevant tools from a natural language description. Instead of loading all tools, Claude calls `compass()` with an intent and gets back only the relevant tools.
+Tool Compass utilizza la **ricerca semantica** per trovare gli strumenti pertinenti a partire da una descrizione in linguaggio naturale. Invece di caricare tutti gli strumenti, Claude chiama `compass()` con un intento e riceve solo gli strumenti pertinenti.
 
 <!--
 ## Demo
@@ -48,9 +48,9 @@ Tool Compass uses **semantic search** to find relevant tools from a natural lang
 </p>
 -->
 
-## Quick Start
+## Guida rapida
 
-### Option 1: Local Installation
+### Opzione 1: Installazione locale
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -77,7 +77,7 @@ python gateway.py
 python ui.py
 ```
 
-### Option 2: Docker
+### Opzione 2: Docker
 
 ```bash
 # Clone the repo
@@ -93,17 +93,17 @@ docker-compose --profile with-ollama up
 # Access the UI at http://localhost:7860
 ```
 
-## Features
+## Funzionalità
 
-- **Semantic Search** - Find tools by describing what you want to do
-- **Progressive Disclosure** - `compass()` → `describe()` → `execute()`
-- **Hot Cache** - Frequently used tools are pre-loaded
-- **Chain Detection** - Automatically discovers common tool workflows
-- **Analytics** - Track usage patterns and tool performance
-- **Cross-Platform** - Windows, macOS, Linux
-- **Docker Ready** - One-command deployment
+- **Ricerca semantica** - Trova gli strumenti descrivendo cosa vuoi fare
+- **Divulgazione progressiva** - `compass()` → `describe()` → `execute()`
+- **Cache dinamica** - Gli strumenti utilizzati frequentemente vengono precaricati
+- **Rilevamento delle catene** - Scopre automaticamente i flussi di lavoro comuni degli strumenti
+- **Analisi** - Monitora i modelli di utilizzo e le prestazioni degli strumenti
+- **Compatibilità multipiattaforma** - Windows, macOS, Linux
+- **Pronto per Docker** - Distribuzione con un solo comando
 
-## Architecture
+## Architettura
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -124,9 +124,9 @@ docker-compose --profile with-ollama up
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## Usage
+## Utilizzo
 
-### The `compass()` Tool
+### Lo strumento `compass()`
 
 ```python
 compass(
@@ -137,7 +137,7 @@ compass(
 )
 ```
 
-Returns:
+Restituisce:
 ```json
 {
   "matches": [
@@ -154,42 +154,42 @@ Returns:
 }
 ```
 
-### Available Tools
+### Strumenti disponibili
 
-| Tool | Description |
-|------|-------------|
-| `compass(intent)` | Semantic search for tools |
-| `describe(tool_name)` | Get full schema for a tool |
-| `execute(tool_name, args)` | Run a tool on its backend |
-| `compass_categories()` | List categories and servers |
-| `compass_status()` | System health and config |
-| `compass_analytics(timeframe)` | Usage statistics |
-| `compass_chains(action)` | Manage tool workflows |
-| `compass_sync(force)` | Rebuild index from backends |
-| `compass_audit()` | Full system report |
+| Tool | Descrizione |
+| ------ | ------------- |
+| `compass(intent)` | Ricerca semantica per strumenti |
+| `describe(tool_name)` | Ottieni lo schema completo di uno strumento |
+| `execute(tool_name, args)` | Esegui uno strumento sul suo backend |
+| `compass_categories()` | Elenca categorie e server |
+| `compass_status()` | Stato e configurazione del sistema |
+| `compass_analytics(timeframe)` | Statistiche di utilizzo |
+| `compass_chains(action)` | Gestisci i flussi di lavoro degli strumenti |
+| `compass_sync(force)` | Ricostruisci l'indice dai backend |
+| `compass_audit()` | Rapporto completo del sistema |
 
-## Configuration
+## Configurazione
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TOOL_COMPASS_BASE_PATH` | Project root | Auto-detected |
-| `TOOL_COMPASS_PYTHON` | Python executable | Auto-detected |
-| `TOOL_COMPASS_CONFIG` | Config file path | `./compass_config.json` |
-| `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
-| `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
+| Variabile | Descrizione | Valore predefinito |
+| ---------- | ------------- | --------- |
+| `TOOL_COMPASS_BASE_PATH` | Directory radice del progetto | Rilevata automaticamente |
+| `TOOL_COMPASS_PYTHON` | Eseguibile Python | Rilevato automaticamente |
+| `TOOL_COMPASS_CONFIG` | Percorso del file di configurazione | `./compass_config.json` |
+| `OLLAMA_URL` | URL del server Ollama | `http://localhost:11434` |
+| `COMFYUI_URL` | Server ComfyUI | `http://localhost:8188` |
 
-See [`.env.example`](.env.example) for all options.
+Consulta il file `[.env.example](.env.example)` per tutte le opzioni.
 
-## Performance
+## Prestazioni
 
-| Metric | Value |
-|--------|-------|
-| Index build time | ~5s for 44 tools |
-| Query latency | ~15ms (including embedding) |
-| Token savings | ~95% (38K → 2K) |
-| Accuracy@3 | ~95% (correct tool in top 3) |
+| Metrica | Value |
+| -------- | ------- |
+| Tempo di costruzione dell'indice | ~5 secondi per 44 strumenti |
+| Latenza delle query | ~15 ms (inclusi gli embedding) |
+| Risparmio di token | ~95% (38K → 2K) |
+| Precisione@3 | ~95% (strumento corretto tra i primi 3) |
 
-## Testing
+## Test
 
 ```bash
 # Run all tests
@@ -202,24 +202,24 @@ pytest --cov=. --cov-report=html
 pytest -m "not integration"
 ```
 
-## Troubleshooting
+## Risoluzione dei problemi
 
-### MCP Server Not Connecting
+### Impossibile connettersi al server MCP
 
-If Claude Desktop logs show JSON parse errors:
+Se i log di Claude Desktop mostrano errori di analisi JSON:
 ```
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**Cause**: `print()` statements corrupt JSON-RPC protocol.
+**Causa**: le istruzioni `print()` corrompono il protocollo JSON-RPC.
 
-**Fix**: Use logging or `file=sys.stderr`:
+**Soluzione**: utilizza il logging o `file=sys.stderr`:
 ```python
 import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Ollama Connection Failed
+### Connessione a Ollama non riuscita
 
 ```bash
 # Check Ollama is running
@@ -229,54 +229,54 @@ curl http://localhost:11434/api/tags
 ollama pull nomic-embed-text
 ```
 
-### Index Not Found
+### Indice non trovato
 
 ```bash
 python gateway.py --sync
 ```
 
-## Related Projects
+## Progetti correlati
 
-Part of the **Compass Suite** for AI-powered development:
+Parte della **Compass Suite** per lo sviluppo potenziato dall'intelligenza artificiale:
 
-- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Semantic file search
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Vector-embedded Gradio components
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Headless LLM fine-tuning
-- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI without the complexity
+- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Ricerca semantica di file
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Componenti Gradio con embedding vettoriale
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Fine-tuning headless di modelli linguistici
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI senza la complessità
 
-## Contributing
+## Contributi
 
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Accettiamo contributi! Consultare il file [CONTRIBUTING.md](CONTRIBUTING.md) per le linee guida.
 
-## Security
+## Sicurezza
 
-For security vulnerabilities, please see [SECURITY.md](SECURITY.md). **Do not open public issues for security bugs.**
+Per le vulnerabilità di sicurezza, consultare il file [SECURITY.md](SECURITY.md). **Non segnalare pubblicamente problemi di sicurezza.**
 
-## Support
+## Supporto
 
-- **Questions / help:** [Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
-- **Bug reports:** [Issues](https://github.com/mcp-tool-shop-org/tool-compass/issues)
-- **Security:** [SECURITY.md](SECURITY.md)
+- **Domande / assistenza:** [Discussioni](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
+- **Segnalazione di bug:** [Problemi](https://github.com/mcp-tool-shop-org/tool-compass/issues)
+- **Sicurezza:** [SECURITY.md](SECURITY.md)
 
-## License
+## Licenza
 
-[MIT](LICENSE) - see LICENSE file for details.
+[MIT](LICENSE) - consultare il file LICENSE per i dettagli.
 
-## Credits
+## Ringraziamenti
 
 - **HNSW**: Malkov & Yashunin, "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs" (2016)
-- **nomic-embed-text**: Nomic AI's open embedding model
-- **FastMCP**: Anthropic's MCP framework
-- **Gradio**: Hugging Face's ML web framework
+- **nomic-embed-text**: Modello di embedding open source di Nomic AI
+- **FastMCP**: Framework MCP di Anthropic
+- **Gradio**: Framework web per il machine learning di Hugging Face
 
 ---
 
 <div align="center">
 
-*"Syntropy above all else."*
+*"Sintropia al di sopra di tutto."*
 
-Tool Compass reduces entropy in the MCP ecosystem by organizing tools by semantic meaning.
+Tool Compass riduce l'entropia nell'ecosistema MCP organizzando gli strumenti in base al significato semantico.
 
-**[Documentation](https://github.com/mcp-tool-shop-org/tool-compass#readme)** • **[Issues](https://github.com/mcp-tool-shop-org/tool-compass/issues)** • **[Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)**
+**[Documentazione](https://github.com/mcp-tool-shop-org/tool-compass#readme)** • **[Problemi](https://github.com/mcp-tool-shop-org/tool-compass/issues)** • **[Discussioni](https://github.com/mcp-tool-shop-org/tool-compass/discussions)**
 
 </div>
