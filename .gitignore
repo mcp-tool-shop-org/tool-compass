@@ -96,3 +96,5 @@ tmpclaude-*
 
 # Archive (keep for reference but don't track)
 archive/
+site/.astro/
+site/node_modules/
