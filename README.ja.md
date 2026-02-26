@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<p align="center"><img src="assets/logo.png" alt="Tool Compass Logo" width="400"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
 
 # ツールコンパス
 
