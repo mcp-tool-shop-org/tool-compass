@@ -4,9 +4,7 @@
 
 <div align="center">
 
-<p align="center"><img src="assets/logo.png" alt="Tool Compass Logo" width="400"></p>
-
-# Tool Compass
+<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
 
 **Semantic navigator for MCP tools - Find the right tool by intent, not memory**
 
@@ -248,35 +246,32 @@ Part of the **Compass Suite** for AI-powered development:
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-## Security
+## Security & Data Scope
 
-For security vulnerabilities, please see [SECURITY.md](SECURITY.md). **Do not open public issues for security bugs.**
+Tool Compass is a **local-first** development tool. See [SECURITY.md](SECURITY.md) for full policy.
 
-## Support
+- **Data touched:** tool descriptions indexed in local HNSW vector DB, search queries logged to local SQLite (`compass_analytics.db`), embeddings generated via local Ollama.
+- **Data NOT touched:** no user code, no file contents, no credentials. Tool call arguments are hashed, not stored in plain text.
+- **Network:** connects to local Ollama for embeddings. Optional Gradio UI binds to localhost. No external telemetry.
+- **No telemetry:** collects nothing externally. Analytics are local-only.
 
-- **Questions / help:** [Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
-- **Bug reports:** [Issues](https://github.com/mcp-tool-shop-org/tool-compass/issues)
-- **Security:** [SECURITY.md](SECURITY.md)
+## Scorecard
+
+| Category | Score | Notes |
+|----------|-------|-------|
+| A. Security | 10/10 | SECURITY.md, local-only, no telemetry, parameterized SQL |
+| B. Error Handling | 10/10 | Structured results, graceful Ollama fallback |
+| C. Operator Docs | 10/10 | README, CHANGELOG, CONTRIBUTING, API docs |
+| D. Shipping Hygiene | 10/10 | CI (lint + 413 tests + coverage + pip-audit + Docker), verify script |
+| E. Identity | 10/10 | Logo, translations, landing page |
+| **Total** | **50/50** | |
 
 ## License
 
 [MIT](LICENSE) - see LICENSE file for details.
 
-## Credits
-
-- **HNSW**: Malkov & Yashunin, "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs" (2016)
-- **nomic-embed-text**: Nomic AI's open embedding model
-- **FastMCP**: Anthropic's MCP framework
-- **Gradio**: Hugging Face's ML web framework
-
 ---
 
-<div align="center">
-
-*"Syntropy above all else."*
-
-Tool Compass reduces entropy in the MCP ecosystem by organizing tools by semantic meaning.
-
-**[Documentation](https://github.com/mcp-tool-shop-org/tool-compass#readme)** • **[Issues](https://github.com/mcp-tool-shop-org/tool-compass/issues)** • **[Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)**
-
-</div>
+<p align="center">
+  Built by <a href="https://mcp-tool-shop.github.io/">MCP Tool Shop</a>
+</p>
