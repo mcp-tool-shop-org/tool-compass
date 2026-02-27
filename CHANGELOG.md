@@ -5,7 +5,19 @@ All notable changes to Tool Compass will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.0.6] - 2026-02-27
+
+### Added
+- SHIP_GATE.md and SCORECARD.md (Shipcheck compliance)
+- Makefile with `verify` target (lint + test + build)
+- Security & Data Scope section and scorecard in README
+- Standard email in SECURITY.md
+
+### Changed
+- Removed redundant h1 heading (logo already contains name)
+- Replaced footer with standard MCP Tool Shop link
+- Scorecard 46/50 → 50/50
+- Bumped to 2.0.6
 
 ## [2.0.3] - 2026-02-14
 

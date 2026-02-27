@@ -11,10 +11,12 @@
 
 We take security seriously. If you discover a security vulnerability in Tool Compass, please report it responsibly.
 
+**Email:** 64996768+mcp-tool-shop@users.noreply.github.com
+
 ### How to Report
 
 1. **Do NOT open a public GitHub issue** for security vulnerabilities
-2. Use [GitHub Security Advisories](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability) to report privately
+2. Email us or use [GitHub Security Advisories](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
