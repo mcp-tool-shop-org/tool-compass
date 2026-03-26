@@ -14,7 +14,7 @@ export const config: SiteConfig = {
     headlineAccent: 'intent, not memory.',
     description: 'Semantic search for MCP tools. Load 3 relevant tools instead of 77 — 95% fewer tokens, ~15ms latency, ~95% accuracy.',
     primaryCta: { href: '#quick-start', label: 'Quick Start' },
-    secondaryCta: { href: '#tools', label: 'API Reference' },
+    secondaryCta: { href: 'handbook/', label: 'Read the Handbook' },
     previews: [
       {
         label: 'Setup',
