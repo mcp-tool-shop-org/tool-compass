@@ -6,9 +6,7 @@
 
 <p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
 
-# ツールコンパス
-
-**MCPツール用セマンティックナビゲーター：記憶ではなく、意図に基づいて最適なツールを見つけましょう。**
+**MCPツール用のセマンティックナビゲーター - 記憶ではなく、意図に基づいて適切なツールを見つける**
 
 <a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
@@ -17,17 +15,17 @@
 <img src="https://img.shields.io/badge/docker-ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
 
-* トークンの使用量が95%削減されました。やりたいことを説明することで、最適なツールを見つけてください。*
+*トークン使用量が95%削減されます。実行したいことを説明することでツールを見つけることができます。*
 
-[インストール](#quick-start) • [使い方](#usage) • [Dockerの使用](#option-2-docker) • [パフォーマンス](#performance) • [貢献について](#contributing)
+[インストール](#quick-start) • [使い方](#usage) • [Docker](#option-2-docker) • [パフォーマンス](#performance) • [貢献](#contributing)
 
-</div>
+</div
 
 ---
 
 ## 問題点
 
-MCPサーバーは、数十から数百ものツールを提供しています。すべてのツールの定義をコンテキストに読み込むと、トークンを無駄にし、応答速度を低下させる可能性があります。
+MCPサーバーは数十から数百のツールを公開しています。すべてのツールの定義をコンテキストに読み込むと、トークンを消費し、応答速度が低下します。
 
 ```
 Before: 77 tools × ~500 tokens = 38,500 tokens per request
@@ -38,11 +36,9 @@ Savings: 95%
 
 ## 解決策
 
-Tool Compassは、**意味検索**を利用して、自然言語で記述された内容に基づいて関連するツールを検索します。すべてのツールを読み込む代わりに、Claudeは`compass()`関数を呼び出し、意図を伝え、その結果として関連するツールのみが返されます。
+Tool Compassは、**セマンティック検索**を使用して、自然言語による説明から関連するツールを見つけます。すべてのツールを読み込む代わりに、Claudeは`compass()`を呼び出し、関連するツールのみが返されます。
 
-```
-The company is committed to providing high-quality products and services.
-```
+<!--
 ## デモ
 
 <p align="center">
@@ -50,7 +46,7 @@ The company is committed to providing high-quality products and services.
 </p>
 -->
 
-## クイックスタートガイド
+## クイックスタート
 
 ### オプション1：ローカルインストール
 
@@ -79,7 +75,7 @@ python gateway.py
 python ui.py
 ```
 
-### オプション2：Docker（Dockerを使用する）
+### オプション2：Docker
 
 ```bash
 # Clone the repo
@@ -95,15 +91,15 @@ docker-compose --profile with-ollama up
 # Access the UI at http://localhost:7860
 ```
 
-## 特徴
+## 機能
 
-- **セマンティック検索:** どのような作業をしたいかを記述することで、ツールを見つけることができます。
-- **段階的な表示:** `compass()` → `describe()` → `execute()` のように、情報を段階的に表示します。
-- **ホットキャッシュ:** よく使用されるツールは、あらかじめ読み込まれています。
-- **チェーン検出:** 一般的なツールのワークフローを自動的に検出します。
-- **分析機能:** ツールの使用状況やパフォーマンスを追跡します。
-- **クロスプラットフォーム:** Windows、macOS、Linuxに対応しています。
-- **Docker対応:** 1つのコマンドでデプロイできます。
+- **セマンティック検索**：実行したいことを説明してツールを見つける
+- **段階的な表示**：`compass()` → `describe()` → `execute()`
+- **ホットキャッシュ**：頻繁に使用されるツールは事前に読み込まれている
+- **チェーン検出**：一般的なツールワークフローを自動的に検出
+- **分析**：使用パターンとツールのパフォーマンスを追跡
+- **クロスプラットフォーム**：Windows、macOS、Linux
+- **Docker対応**：ワンコマンドでデプロイ
 
 ## アーキテクチャ
 
@@ -126,9 +122,9 @@ docker-compose --profile with-ollama up
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 使用方法
+## 使い方
 
-### `compass()` ツールについて
+### `compass()`ツール
 
 ```python
 compass(
@@ -139,7 +135,7 @@ compass(
 )
 ```
 
-返品について：
+戻り値：
 ```json
 {
   "matches": [
@@ -158,53 +154,38 @@ compass(
 
 ### 利用可能なツール
 
-| Tool | 説明 |
-| 以下に翻訳します。
-```
-(No text provided for translation)
-``` | 以下に翻訳します。
--------------
-申し訳ありませんが、翻訳するテキストが提供されていません。テキストを入力してください。 |
-| `compass(intent)` | ツールの意味検索。 |
-| `describe(tool_name)` | ツールの完全なスキーマを取得します。 |
-| `execute(tool_name, args)` | そのシステムのバックエンドでツールを実行する。 |
-| `compass_categories()` | カテゴリとサーバーの一覧を表示します。 |
-| `compass_status()` | システムの状態と設定。 |
-| `compass_analytics(timeframe)` | 利用状況に関する統計データ。 |
-| `compass_chains(action)` | ツールのワークフローを管理する。 |
-| `compass_sync(force)` | バックエンドからインデックスを再構築します。 |
-| `compass_audit()` | システム全体のレポート。 |
+| ツール | 説明 |
+|------|-------------|
+| `compass(intent)` | ツールのセマンティック検索 |
+| `describe(tool_name)` | ツールの完全なスキーマを取得 |
+| `execute(tool_name, args)` | ツールのバックエンドを実行 |
+| `compass_categories()` | カテゴリとサーバーの一覧を表示 |
+| `compass_status()` | システムのヘルスと設定 |
+| `compass_analytics(timeframe)` | 使用状況統計 |
+| `compass_chains(action)` | ツールのワークフローを管理 |
+| `compass_sync(force)` | バックエンドからインデックスを再構築 |
+| `compass_audit()` | 完全なシステムレポート |
 
 ## 設定
 
-| 変数 | 説明 | デフォルト設定 |
-| 以下に翻訳します。
-----------
-The company is committed to providing high-quality products and services.
-(当社は、高品質な製品とサービスを提供することに尽力しています。) | 以下に翻訳します。
--------------
-申し訳ありませんが、翻訳するテキストが提供されていません。テキストを入力してください。 | 以下に翻訳します。
----------
-Please provide the English text you would like me to translate. |
-| `TOOL_COMPASS_BASE_PATH` | プロジェクトのルートディレクトリ。 | 自動検出されました。 |
-| `TOOL_COMPASS_PYTHON` | Python実行ファイル。 | 自動検出されました。 |
-| `TOOL_COMPASS_CONFIG` | 設定ファイルのパス。 | `./compass_config.json` |
-| `OLLAMA_URL` | OllamaサーバーのURL。 | `http://localhost:11434` |
+| 変数 | 説明 | デフォルト値 |
+|----------|-------------|---------|
+| `TOOL_COMPASS_BASE_PATH` | プロジェクトのルートディレクトリ | 自動検出 |
+| `TOOL_COMPASS_PYTHON` | Python実行可能ファイル | 自動検出 |
+| `TOOL_COMPASS_CONFIG` | 設定ファイルパス | `./compass_config.json` |
+| `OLLAMA_URL` | OllamaサーバーURL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUIサーバー | `http://localhost:8188` |
 
-すべてのオプションについては、`.env.example` ファイルを参照してください。
+すべてのオプションについては、[`.env.example`](.env.example)を参照してください。
 
 ## パフォーマンス
 
-| メートル法。 | Value |
-| 以下に翻訳します。
--------- | The company is committed to providing high-quality products and services.
-(会社は、高品質な製品とサービスを提供することに尽力しています。)
-------- |
-| インデックスのビルドにかかる時間。 | 約5秒で44種類のツールを使用可能。 |
-| クエリの応答時間。 | 約15ミリ秒（エンベディング処理を含む）。 |
-| トークンによる貯蓄. | 約95% (38,000 → 2,000) |
-| 精度@3 (または、精度：上位3件) | 約95%（上位3つのツールの中で、適切なツールが選択されている割合） |
+| 指標 | 値 |
+|--------|-------|
+| インデックス構築時間 | 44のツールで約5秒 |
+| クエリのレイテンシ | 約15ms（エンベディングを含む） |
+| トークン削減量 | 約95%（38K → 2K） |
+| 精度@3 | 約95%（上位3つのうち正しいツールが含まれる） |
 
 ## テスト
 
@@ -219,24 +200,24 @@ pytest --cov=. --cov-report=html
 pytest -m "not integration"
 ```
 
-## トラブルシューティング (問題解決)
+## トラブルシューティング
 
-### MCPサーバーに接続できません
+### MCPサーバーへの接続ができない
 
-もしClaude DesktopのログにJSONの解析エラーが表示される場合：
+Claude DesktopのログにJSON解析エラーが表示される場合：
 ```
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**原因**: `print()` 関数が JSON-RPC プロトコルを破壊している。
+**原因**: `print()`ステートメントがJSON-RPCプロトコルを破壊している。
 
-**修正方法:** ログ出力を使用するか、`file=sys.stderr` を指定してください。
+**解決策**: ログを使用するか、`file=sys.stderr`を使用する。
 ```python
 import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Ollamaとの接続に失敗しました
+### Ollamaへの接続が失敗する
 
 ```bash
 # Check Ollama is running
@@ -246,7 +227,7 @@ curl http://localhost:11434/api/tags
 ollama pull nomic-embed-text
 ```
 
-### インデックスが見つかりません
+### インデックスが見つからない
 
 ```bash
 python gateway.py --sync
@@ -254,46 +235,43 @@ python gateway.py --sync
 
 ## 関連プロジェクト
 
-AIを活用した開発を支援する**Compassスイート**の一部です。
+AIを活用した開発のための**Compass Suite**の一部：
 
-- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - 意味に基づいたファイル検索
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - ベクトル埋め込み技術を用いたGradioコンポーネント
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - ヘッドレス環境での大規模言語モデルのファインチューニング
-- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - 複雑さを取り除いたComfyUI
+- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - セマンティックファイル検索
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - ベクトル埋め込みGradioコンポーネント
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - ヘッドレスLLMファインチューニング
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - 複雑さを排除したComfyUI
 
-## 貢献する
+## 貢献
 
-貢献を歓迎します！詳細については、[CONTRIBUTING.md](CONTRIBUTING.md) をご参照ください。
+貢献を歓迎します！ガイドラインについては、[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
 
-## セキュリティ
+## セキュリティとデータ範囲
 
-セキュリティ上の脆弱性については、[SECURITY.md](SECURITY.md) をご参照ください。**セキュリティに関するバグは、公開の issue として報告しないでください。**
+Tool Compassは、**ローカルファースト**の開発ツールです。詳細については、[SECURITY.md](SECURITY.md)を参照してください。
 
-## サポート
+- **処理されるデータ:** ローカルのHNSWベクトルデータベースにインデックスされたツール記述、ローカルのSQLiteデータベース（`compass_analytics.db`）に記録される検索クエリ、ローカルのOllamaを使用して生成される埋め込みデータ。
+- **処理されないデータ:** ユーザーコード、ファイルの内容、認証情報。ツールの呼び出し引数はハッシュ化され、平文で保存されません。
+- **ネットワーク:** 埋め込みデータの生成にはローカルのOllamaに接続します。オプションで、Gradio UIがローカルホストにバインドされます。外部のテレメトリは送信されません。
+- **テレメトリ:** 外部へのデータ収集は一切行いません。分析はローカルでのみ行われます。
 
-- **質問 / ヘルプ:** [Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
-- **バグ報告:** [Issues](https://github.com/mcp-tool-shop-org/tool-compass/issues)
-- **セキュリティ:** [SECURITY.md](SECURITY.md)
+## 評価項目
+
+| カテゴリ | 評価 | 備考 |
+|----------|-------|-------|
+| A. セキュリティ | 10/10 | `SECURITY.md`、ローカルのみ、テレメトリなし、パラメータ化されたSQL |
+| B. エラー処理 | 10/10 | 構造化された結果、Ollamaの代替機能 |
+| C. 運用ドキュメント | 10/10 | `README`、`CHANGELOG`、`CONTRIBUTING`、APIドキュメント |
+| D. リリース時の品質管理 | 10/10 | CI（lint、413個のテスト、カバレッジ、`pip-audit`、Docker）、検証スクリプト |
+| E. 識別 | 10/10 | ロゴ、翻訳、ランディングページ |
+| **Total** | **50/50** | |
 
 ## ライセンス
 
-[MIT](LICENSE) - 詳細については、LICENSE ファイルをご参照ください。
-
-## クレジット
-
-- **HNSW**: Malkov & Yashunin, "Efficient and robust approximate nearest neighbor search using Hierarchical Navigable Small World graphs" (2016)
-- **nomic-embed-text**: Nomic AI のオープン埋め込みモデル
-- **FastMCP**: Anthropic の MCP フレームワーク
-- **Gradio**: Hugging Face の機械学習ウェブフレームワーク
+[MIT](LICENSE) - 詳細については、LICENSEファイルを参照してください。
 
 ---
 
-<div align="center">
-
-*"Syntropy above all else."*
-
-Tool Compass は、ツールを意味的な関連性で整理することで、MCP エコシステムにおけるエントロピーを低減します。
-
-**[ドキュメント](https://github.com/mcp-tool-shop-org/tool-compass#readme)** • **[Issue](https://github.com/mcp-tool-shop-org/tool-compass/issues)** • **[Discussions](https://github.com/mcp-tool-shop-org/tool-compass/discussions)**
-
-</div>
+<p align="center">
+  Built by <a href="https://mcp-tool-shop.github.io/">MCP Tool Shop</a>
+</p>

@@ -6,9 +6,7 @@
 
 <p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
 
-# Brújula de precisión
-
-**Navegador semántico para herramientas MCP: Encuentre la herramienta adecuada según su necesidad, no por memoria.**
+**Navegador semántico para herramientas MCP: Encuentra la herramienta adecuada según tu intención, no por memoria**
 
 <a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
@@ -17,17 +15,17 @@
 <img src="https://img.shields.io/badge/docker-ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
 
-*95% menos de elementos. Encuentre herramientas describiendo lo que desea hacer.*
+*95% menos de tokens. Encuentra herramientas describiendo lo que quieres hacer.*
 
 [Instalación](#quick-start) • [Uso](#usage) • [Docker](#option-2-docker) • [Rendimiento](#performance) • [Contribuciones](#contributing)
 
-</div>
+</div
 
 ---
 
 ## El problema
 
-Los servidores de MCP exponen decenas o incluso cientos de herramientas. Cargar todas las definiciones de herramientas en el contexto consume tokens y ralentiza las respuestas.
+Los servidores MCP exponen decenas o cientos de herramientas. Cargar todas las definiciones de herramientas en el contexto desperdicia tokens y ralentiza las respuestas.
 
 ```
 Before: 77 tools × ~500 tokens = 38,500 tokens per request
@@ -38,15 +36,9 @@ Savings: 95%
 
 ## La solución
 
-La herramienta Compass utiliza la **búsqueda semántica** para encontrar herramientas relevantes a partir de una descripción en lenguaje natural. En lugar de cargar todas las herramientas, Claude llama a la función `compass()` con una intención específica y solo recibe las herramientas relevantes.
+Tool Compass utiliza la **búsqueda semántica** para encontrar herramientas relevantes a partir de una descripción en lenguaje natural. En lugar de cargar todas las herramientas, Claude llama a `compass()` con una intención y recibe solo las herramientas relevantes.
 
-```text
-The company is committed to providing high-quality products and services.
-We are constantly working to improve our processes and meet the needs of our customers.
-Our team is made up of highly qualified professionals.
-We value innovation and creativity.
-We are committed to sustainability and environmental protection.
-```
+<!--
 ## Demostración
 
 <p align="center">
@@ -54,7 +46,7 @@ We are committed to sustainability and environmental protection.
 </p>
 -->
 
-## Inicio rápido
+## Comienzo rápido
 
 ### Opción 1: Instalación local
 
@@ -101,13 +93,13 @@ docker-compose --profile with-ollama up
 
 ## Características
 
-- **Búsqueda semántica:** Encuentre herramientas describiendo lo que desea hacer.
-- **Revelación progresiva:** `compass()` → `describe()` → `execute()`
-- **Caché dinámica:** Las herramientas de uso frecuente se cargan previamente.
-- **Detección de cadenas:** Descubre automáticamente los flujos de trabajo comunes de las herramientas.
-- **Analítica:** Realice un seguimiento de los patrones de uso y el rendimiento de las herramientas.
-- **Compatibilidad multiplataforma:** Windows, macOS, Linux.
-- **Listo para Docker:** Despliegue con un solo comando.
+- **Búsqueda semántica** - Encuentra herramientas describiendo lo que quieres hacer
+- **Revelación progresiva** - `compass()` → `describe()` → `execute()`
+- **Caché activa** - Las herramientas de uso frecuente se cargan previamente
+- **Detección de cadenas** - Descubre automáticamente los flujos de trabajo comunes de las herramientas
+- **Analítica** - Realiza un seguimiento de los patrones de uso y el rendimiento de las herramientas
+- **Multiplataforma** - Windows, macOS, Linux
+- **Listo para Docker** - Despliegue con un solo comando
 
 ## Arquitectura
 
@@ -143,7 +135,7 @@ compass(
 )
 ```
 
-Devoluciones:
+Devuelve:
 ```json
 {
   "matches": [
@@ -162,59 +154,38 @@ Devoluciones:
 
 ### Herramientas disponibles
 
-| Tool | Descripción. |
-| Translate the following English text into Spanish:
-"The company is committed to providing high-quality products and services. We strive to meet and exceed customer expectations. Our team is dedicated to innovation and continuous improvement. We value integrity, transparency, and respect in all our interactions."
-"La empresa está comprometida con la provisión de productos y servicios de alta calidad. Nos esforzamos por satisfacer y superar las expectativas de nuestros clientes. Nuestro equipo está dedicado a la innovación y la mejora continua. Valoramos la integridad, la transparencia y el respeto en todas nuestras interacciones." | Please provide the English text you would like me to translate. I am ready to translate it into Spanish. |
-| `compass(intent)` | Búsqueda semántica de herramientas. |
-| `describe(tool_name)` | Obtener el esquema completo de una herramienta. |
-| `execute(tool_name, args)` | Ejecute una herramienta en su parte posterior. |
-| `compass_categories()` | Enumere las categorías y los servidores. |
-| `compass_status()` | Estado y configuración del sistema. |
-| `compass_analytics(timeframe)` | Estadísticas de uso. |
-| `compass_chains(action)` | Gestionar los flujos de trabajo de las herramientas. |
-| `compass_sync(force)` | Reconstruir el índice a partir de las fuentes de datos. |
-| `compass_audit()` | Informe completo del sistema. |
+| Herramienta | Descripción |
+|------|-------------|
+| `compass(intent)` | Búsqueda semántica de herramientas |
+| `describe(tool_name)` | Obtén el esquema completo de una herramienta |
+| `execute(tool_name, args)` | Ejecuta una herramienta en su backend |
+| `compass_categories()` | Lista categorías y servidores |
+| `compass_status()` | Estado y configuración del sistema |
+| `compass_analytics(timeframe)` | Estadísticas de uso |
+| `compass_chains(action)` | Administra los flujos de trabajo de las herramientas |
+| `compass_sync(force)` | Reconstruye el índice a partir de los backends |
+| `compass_audit()` | Informe completo del sistema |
 
 ## Configuración
 
-| Variable. | Descripción. | Predeterminado. |
-| Please provide the English text you would like me to translate. I am ready to translate it into Spanish. | Please provide the English text you would like me to translate. I am ready to translate it into Spanish. | Please provide the English text you would like me to translate. I am ready to translate it into Spanish. |
-| `TOOL_COMPASS_BASE_PATH` | Directorio raíz del proyecto. | Detectado automáticamente. |
-| `TOOL_COMPASS_PYTHON` | Ejecutable de Python. | Detectado automáticamente. |
-| `TOOL_COMPASS_CONFIG` | Ruta del archivo de configuración. | `./compass_config.json` |
-| `OLLAMA_URL` | URL del servidor Ollama. | `http://localhost:11434` |
-| `COMFYUI_URL` | Servidor de ComfyUI. | `http://localhost:8188` |
+| Variable | Descripción | Valor predeterminado |
+|----------|-------------|---------|
+| `TOOL_COMPASS_BASE_PATH` | Raíz del proyecto | Detectado automáticamente |
+| `TOOL_COMPASS_PYTHON` | Ejecutable de Python | Detectado automáticamente |
+| `TOOL_COMPASS_CONFIG` | Ruta del archivo de configuración | `./compass_config.json` |
+| `OLLAMA_URL` | URL del servidor Ollama | `http://localhost:11434` |
+| `COMFYUI_URL` | Servidor ComfyUI | `http://localhost:8188` |
 
-Consulte el archivo [` .env.example`](.env.example) para ver todas las opciones disponibles.
+Consulta [`.env.example`](.env.example) para todas las opciones.
 
 ## Rendimiento
 
-| Métrica. | Value |
-| "The company is committed to providing high-quality products and services."
-
-"We are looking for a motivated and experienced candidate."
-
-"The meeting will be held on Tuesday at 10:00 AM."
-
-"Please submit your application by the end of the week."
-
-"We offer a competitive salary and benefits package."
---------
-
-"La empresa está comprometida a ofrecer productos y servicios de alta calidad."
-
-"Estamos buscando un candidato motivado y con experiencia."
-
-"La reunión se llevará a cabo el martes a las 10:00 AM."
-
-"Por favor, envíe su solicitud antes de que finalice la semana."
-
-"Ofrecemos un salario competitivo y un paquete de beneficios." | Please provide the English text you would like me to translate. I am ready to translate it into Spanish. |
-| Tiempo de creación del índice. | Aproximadamente 5 segundos para 44 herramientas. |
-| Latencia de las consultas. | Aproximadamente 15 ms (incluyendo el proceso de incrustación). |
-| Ahorro en tokens. | Aproximadamente el 95% (de 38.000 a 2.000). |
-| Precisión a 3. | Aproximadamente el 95% (la herramienta correcta está entre las 3 mejores). |
+| Métrica | Valor |
+|--------|-------|
+| Tiempo de construcción del índice | ~5 segundos para 44 herramientas |
+| Latencia de la consulta | ~15 ms (incluyendo la incrustación) |
+| Ahorro de tokens | ~95% (38K → 2K) |
+| Precisión@3 | ~95% (herramienta correcta en los 3 primeros) |
 
 ## Pruebas
 
@@ -231,7 +202,7 @@ pytest -m "not integration"
 
 ## Solución de problemas
 
-### El servidor MCP no se está conectando
+### El servidor MCP no se conecta
 
 Si los registros de Claude Desktop muestran errores de análisis JSON:
 ```
@@ -240,13 +211,13 @@ Unexpected token 'S', "Starting T"... is not valid JSON
 
 **Causa**: Las sentencias `print()` corrompen el protocolo JSON-RPC.
 
-**Solución:** Utilice el registro de eventos o la opción `file=sys.stderr`.
+**Solución**: Utiliza el registro o `file=sys.stderr`:
 ```python
 import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Error de conexión con Ollama
+### Conexión a Ollama fallida
 
 ```bash
 # Check Ollama is running
@@ -264,46 +235,43 @@ python gateway.py --sync
 
 ## Proyectos relacionados
 
-Parte de la **suite Compass**, diseñada para el desarrollo impulsado por inteligencia artificial:
+Parte de la **Suite Compass** para el desarrollo impulsado por IA:
 
-- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Búsqueda semántica de archivos.
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Componentes de Gradio con incrustaciones vectoriales.
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de modelos de lenguaje grandes (LLM) sin interfaz gráfica.
-- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sin la complejidad asociada.
+- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Búsqueda semántica de archivos
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Componentes de Gradio con incrustaciones vectoriales
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de LLM sin cabeza
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sin la complejidad
 
-## Contribuyendo
+## Contribuciones
 
-¡Aceptamos contribuciones! Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para obtener las pautas.
+¡Aceptamos contribuciones! Consulta [CONTRIBUTING.md](CONTRIBUTING.md) para obtener pautas.
 
-## Seguridad
+## Seguridad y alcance de los datos
 
-Para las vulnerabilidades de seguridad, consulte [SECURITY.md](SECURITY.md). **No abra problemas públicos para los errores de seguridad.**
+Tool Compass es una herramienta de desarrollo **local-first**. Consulta [SECURITY.md](SECURITY.md) para obtener la política completa.
 
-## Soporte
+- **Datos que se utilizan:** descripciones de herramientas indexadas en una base de datos vectorial local HNSW, consultas de búsqueda registradas en una base de datos SQLite local (`compass_analytics.db`), incrustaciones generadas mediante Ollama local.
+- **Datos que NO se utilizan:** no se utiliza ningún código del usuario, ni el contenido de ningún archivo, ni credenciales. Los argumentos de las llamadas a las herramientas se codifican, no se almacenan en texto plano.
+- **Red:** se conecta a Ollama local para generar incrustaciones. Una interfaz de usuario Gradio opcional se vincula a localhost. No se recopila telemetría externa.
+- **Sin telemetría:** no se recopila nada externamente. Los análisis son solo locales.
 
-- **Preguntas / ayuda:** [Discusiones](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
-- **Informes de errores:** [Problemas](https://github.com/mcp-tool-shop-org/tool-compass/issues)
-- **Seguridad:** [SECURITY.md](SECURITY.md)
+## Cuadro de evaluación
+
+| Categoría | Puntuación | Notas |
+|----------|-------|-------|
+| A. Seguridad | 10/10 | `SECURITY.md`, solo local, sin telemetría, SQL parametrizado. |
+| B. Manejo de errores | 10/10 | Resultados estructurados, alternativa elegante con Ollama. |
+| C. Documentación para operadores | 10/10 | `README`, `CHANGELOG`, `CONTRIBUTING`, documentación de la API. |
+| D. Higiene en el despliegue | 10/10 | CI (análisis de código + 413 pruebas + cobertura + `pip-audit` + Docker), script de verificación. |
+| E. Identidad | 10/10 | Logotipo, traducciones, página de inicio. |
+| **Total** | **50/50** | |
 
 ## Licencia
 
-[MIT](LICENSE) - consulte el archivo LICENSE para obtener más detalles.
-
-## Créditos
-
-- **HNSW**: Malkov & Yashunin, "Búsqueda eficiente y robusta de vecinos más cercanos aproximados utilizando gráficos de Pequeño Mundo Jerárquicos" (2016)
-- **nomic-embed-text**: Modelo de incrustación de código abierto de Nomic AI
-- **FastMCP**: Marco MCP de Anthropic
-- **Gradio**: Marco web de aprendizaje automático de Hugging Face
+[MIT](LICENSE) - consulte el archivo `LICENSE` para obtener más detalles.
 
 ---
 
-<div align="center">
-
-*"La sintropía por encima de todo."*
-
-Tool Compass reduce la entropía en el ecosistema MCP al organizar las herramientas por significado semántico.
-
-**[Documentación](https://github.com/mcp-tool-shop-org/tool-compass#readme)** • **[Problemas](https://github.com/mcp-tool-shop-org/tool-compass/issues)** • **[Discusiones](https://github.com/mcp-tool-shop-org/tool-compass/discussions)**
-
-</div>
+<p align="center">
+  Built by <a href="https://mcp-tool-shop.github.io/">MCP Tool Shop</a>
+</p>
