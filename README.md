@@ -175,8 +175,9 @@ Returns:
 | `TOOL_COMPASS_CONFIG` | Config file path | `./compass_config.json` |
 | `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
+| `PORT` | Set to enable HTTP transport (e.g., for Fly.io) | unset (stdio) |
 
-See [`.env.example`](.env.example) for all options.
+See [`compass_config.example.json`](compass_config.example.json) for all options.
 
 ## Performance
 

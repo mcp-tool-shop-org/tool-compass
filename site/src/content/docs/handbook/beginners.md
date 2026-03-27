@@ -58,6 +58,15 @@ python gateway.py
 
 If you prefer Docker, see the [Getting Started](/tool-compass/handbook/getting-started/) page for Docker Compose instructions.
 
+To explore tools interactively in a browser, launch the Gradio UI instead:
+
+```bash
+pip install "tool-compass[ui]"
+python ui.py
+```
+
+This opens a web interface at `http://localhost:7860` where you can search, browse categories, and view analytics.
+
 ## Core concepts
 
 Tool Compass is built around three ideas:
@@ -153,3 +162,9 @@ compass_sync(force=True)
 | **Progressive disclosure** | The three-step pattern: `compass()` then `describe()` then `execute()` |
 | **Qualified name** | A tool name in `server:tool` format (e.g., `bridge:read_file`) |
 | **Sync** | The process of discovering tools from backends and rebuilding the search index |
+
+## What's next
+
+- **[Tools reference](/tool-compass/handbook/tools/)** — Detailed parameter tables for all 9 gateway tools
+- **[Architecture](/tool-compass/handbook/architecture/)** — How the HNSW index, embedder, sync manager, and analytics engine work together
+- **[Configuration](/tool-compass/handbook/configuration/)** — All config file options, environment variables, Docker setup, and troubleshooting
