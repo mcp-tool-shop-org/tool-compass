@@ -24,7 +24,7 @@ ollama pull nomic-embed-text
 
 # Clone and setup
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
-cd tool-compass/tool_compass
+cd tool-compass
 
 # Create virtual environment
 python -m venv venv
@@ -44,7 +44,7 @@ python gateway.py
 
 ```bash
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
-cd tool-compass/tool_compass
+cd tool-compass
 
 # Start with Docker Compose (requires Ollama running locally)
 docker-compose up
