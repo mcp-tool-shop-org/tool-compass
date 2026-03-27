@@ -209,6 +209,7 @@ The `hint` field in compass results guides this flow, suggesting when to use `de
 | `TOOL_COMPASS_DATA_DIR` | Data directory | Platform-specific (see below) |
 | `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
+| `PORT` | Set to enable HTTP transport (e.g., for Fly.io) | unset (stdio) |
 
 **Default data directories:**
 - **Windows:** `%LOCALAPPDATA%\tool-compass\`
