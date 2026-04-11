@@ -15,6 +15,7 @@
 <img src="https://img.shields.io/badge/docker-ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
 
+
 *95% fewer tokens. Find tools by describing what you want to do.*
 
 [Installation](#quick-start) • [Usage](#usage) • [Docker](#option-2-docker) • [Performance](#performance) • [Contributing](#contributing)
@@ -56,6 +57,7 @@ ollama pull nomic-embed-text
 
 # Clone and setup
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
+
 cd tool-compass/tool_compass
 
 # Create virtual environment
@@ -80,6 +82,7 @@ python ui.py
 ```bash
 # Clone the repo
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
+
 cd tool-compass/tool_compass
 
 # Start with Docker Compose (requires Ollama running locally)
@@ -166,15 +169,53 @@ Returns:
 | `compass_sync(force)` | Rebuild index from backends |
 | `compass_audit()` | Full system report |
 
+### Progressive Disclosure Pattern
+
+Tool Compass uses a three-step progressive disclosure pattern to minimize token usage:
+
+```
+1. compass("your intent")     → Get tool name + short description (~100 tokens)
+2. describe("tool:name")      → Get full parameter schema (~500 tokens)
+3. execute("tool:name", args) → Run the tool
+```
+
+**Why this matters:**
+- Loading 77 tools upfront = ~38,500 tokens
+- Progressive disclosure = ~600 tokens per tool used
+- Savings: **95%+ for typical workflows**
+
+**Example workflow:**
+
+```python
+# Step 1: Find the right tool
+compass("generate an image from text")
+# Returns: comfy:comfy_generate (confidence: 0.91)
+
+# Step 2: Get the schema (only if needed)
+describe("comfy:comfy_generate")
+# Returns: Full parameter definitions, types, examples
+
+# Step 3: Execute
+execute("comfy:comfy_generate", {"prompt": "a sunset over mountains"})
+```
+
+The `hint` field in compass results guides this flow, suggesting when to use `describe()`.
+
 ## Configuration
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `TOOL_COMPASS_BASE_PATH` | Project root | Auto-detected |
 | `TOOL_COMPASS_PYTHON` | Python executable | Auto-detected |
-| `TOOL_COMPASS_CONFIG` | Config file path | `./compass_config.json` |
+| `TOOL_COMPASS_CONFIG` | Config file path | `~/.config/tool-compass/compass_config.json` |
+| `TOOL_COMPASS_DATA_DIR` | Data directory | Platform-specific (see below) |
 | `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
+
+**Default data directories:**
+- **Windows:** `%LOCALAPPDATA%\tool-compass\`
+- **macOS:** `~/Library/Application Support/tool-compass/`
+- **Linux:** `~/.config/tool-compass/` (or `$XDG_CONFIG_HOME/tool-compass/`)
 
 See [`.env.example`](.env.example) for all options.
 
@@ -275,3 +316,4 @@ Tool Compass is a **local-first** development tool. See [SECURITY.md](SECURITY.m
 <p align="center">
   Built by <a href="https://mcp-tool-shop.github.io/">MCP Tool Shop</a>
 </p>
+
