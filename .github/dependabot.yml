@@ -6,13 +6,8 @@ updates:
       interval: "monthly"
     open-pull-requests-limit: 3
     groups:
-      python-deps:
-        patterns:
-          - "*"
-    labels:
-      - "dependencies"
-    commit-message:
-      prefix: "deps"
+      all-pip:
+        patterns: ["*"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -20,10 +15,5 @@ updates:
       interval: "monthly"
     open-pull-requests-limit: 3
     groups:
-      actions:
-        patterns:
-          - "*"
-    labels:
-      - "ci"
-    commit-message:
-      prefix: "ci"
+      all-github-actions:
+        patterns: ["*"]
