@@ -368,26 +368,35 @@ def get_user_config_dir() -> Path:
        - Windows: %LOCALAPPDATA%/tool-compass
        - macOS: ~/Library/Application Support/tool-compass
        - Linux: ~/.config/tool-compass (or $XDG_CONFIG_HOME/tool-compass)
+    3. Fallback: .tool-compass in current working directory (if HOME unavailable)
     """
     env_dir = os.environ.get("TOOL_COMPASS_DATA_DIR")
     if env_dir:
         return Path(env_dir).resolve()
+
+    def _safe_home() -> Path:
+        """Get home directory with fallback for CI environments."""
+        try:
+            return Path.home()
+        except (RuntimeError, KeyError):
+            # HOME/USERPROFILE not set (common in CI)
+            return Path.cwd()
 
     if sys.platform == "win32":
         # Windows: use LOCALAPPDATA
         local_app_data = os.environ.get("LOCALAPPDATA")
         if local_app_data:
             return Path(local_app_data) / "tool-compass"
-        return Path.home() / "AppData" / "Local" / "tool-compass"
+        return _safe_home() / "AppData" / "Local" / "tool-compass"
     elif sys.platform == "darwin":
         # macOS: use Application Support
-        return Path.home() / "Library" / "Application Support" / "tool-compass"
+        return _safe_home() / "Library" / "Application Support" / "tool-compass"
     else:
         # Linux/Unix: use XDG_CONFIG_HOME or ~/.config
         xdg_config = os.environ.get("XDG_CONFIG_HOME")
         if xdg_config:
             return Path(xdg_config) / "tool-compass"
-        return Path.home() / ".config" / "tool-compass"
+        return _safe_home() / ".config" / "tool-compass"
 
 
 def get_config_path() -> Path:

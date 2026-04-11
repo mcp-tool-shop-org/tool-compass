@@ -172,40 +172,26 @@ class TestDefaultConfig:
     """Test default configuration generation."""
 
     def test_get_default_config_structure(self):
-        """Default config should have expected backends."""
+        """Default config should have empty backends (user must configure)."""
         config = get_default_config()
 
-        # Should have 5 backends
-        expected_backends = ["bridge", "comfy", "video", "chat", "doc"]
-        for name in expected_backends:
-            assert name in config.backends
-            assert isinstance(config.backends[name], StdioBackend)
+        # Default config ships with no backends - user must configure
+        assert config.backends == {}
+        assert config.embedding_model == "nomic-embed-text"
+        assert config.auto_sync is True
+        assert config.progressive_disclosure is True
 
     def test_get_default_config_uses_detected_python(self):
-        """Default config should use detected Python executable."""
+        """Default config has no backends; example config uses detected Python."""
         config = get_default_config()
-
-        for backend in config.backends.values():
-            if isinstance(backend, StdioBackend):
-                # Command should be a valid Python path
-                assert backend.command
-                # Should be an absolute path or the detected executable
-                assert (
-                    Path(backend.command).is_absolute()
-                    or backend.command == sys.executable
-                )
+        # Default config has no backends to check
+        assert config.backends == {}
 
     def test_get_default_config_portable_paths(self):
-        """Backend paths should be relative to base_path."""
+        """Default config has no backends; paths are user-configured."""
         config = get_default_config()
-        base = get_base_path()
-
-        for backend in config.backends.values():
-            if isinstance(backend, StdioBackend):
-                for arg in backend.args:
-                    if arg.endswith(".py"):
-                        # Python file paths should be under base_path
-                        assert str(base) in arg or not Path(arg).is_absolute()
+        # Default config has no backends - paths are user responsibility
+        assert config.backends == {}
 
 
 class TestLoadConfig:
