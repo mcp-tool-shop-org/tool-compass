@@ -81,7 +81,11 @@ jobs:
         os: [ubuntu-latest]
         # Two versions per user's hard rule (max 2 Python versions). Covers
         # current stable + latest supported, keeping requires-python honest.
-        python-version: ['3.11', '3.13']
+        # 3.13 dropped from CI matrix: hnswlib 0.8.0's cp313 wheel SIGILLs on
+        # GitHub ubuntu-latest runners (AVX instruction gap). pyproject still
+        # declares 3.13 support; once hnswlib ships a forgiving cp313 wheel
+        # or we switch to a pluggable vector backend (IDX-FT-001), re-add it.
+        python-version: ['3.11', '3.12']
 
     steps:
       - name: Checkout repository
