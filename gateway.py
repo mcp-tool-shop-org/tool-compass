@@ -13,6 +13,21 @@ Usage:
     python gateway.py --sync       # Sync tools from backends and rebuild index
     python gateway.py --test       # Run test queries
     python gateway.py --config     # Show current configuration
+
+HTTP mode (PORT env var set) exposes three operational endpoints:
+
+    GET /health   — Liveness probe. Always 200 while the process is up.
+                    Returns ``{status, server, version}``.
+    GET /ready    — Deep readiness probe (GW-FT-003). 200 only when the index
+                    is loaded, Ollama is reachable (or the circuit breaker is
+                    closed), and at least one configured backend is connected.
+                    Otherwise 503 with per-check detail. Result is cached for
+                    30s so load-balancer polling cannot DoS Ollama.
+    GET /metrics  — Prometheus text format (GW-FT-003). Exposes counters and
+                    gauges for search volume, Ollama availability, per-backend
+                    health, embedder p95 latency / failures, and index age /
+                    orphaned-vector counts. No ``prometheus_client`` dep — the
+                    text is emitted manually.
 """
 
 import asyncio
@@ -1414,7 +1429,7 @@ async def async_main(args):
 
 
 def _run_http(port: int) -> None:
-    """Run the MCP gateway in HTTP mode with a /health endpoint for Fly.io.
+    """Run the MCP gateway in HTTP mode with /health, /ready, /metrics.
 
     SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
     Binding to a non-loopback interface exposes RCE-class surface. The HOST env
@@ -1423,7 +1438,12 @@ def _run_http(port: int) -> None:
     """
     import os
     from starlette.routing import Route
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, PlainTextResponse
+
+    # GW-FT-003: cache /ready result for 30s so LB polling can't hammer
+    # Ollama or the backend pool. Keyed by time only — a single shared slot.
+    _ready_cache: Dict[str, Any] = {"at": 0.0, "status_code": 0, "body": None}
+    _READY_CACHE_TTL = 30.0
 
     async def health(_request):
         return JSONResponse({
@@ -1432,8 +1452,201 @@ def _run_http(port: int) -> None:
             "version": __version__,
         })
 
-    # Add health route to FastMCP's custom routes (included in streamable_http_app)
+    async def ready(_request):
+        """Deep readiness probe — 200 iff all dependencies are usable."""
+        now = time.time()
+        if _ready_cache["body"] is not None and (now - _ready_cache["at"]) < _READY_CACHE_TTL:
+            return JSONResponse(_ready_cache["body"], status_code=_ready_cache["status_code"])
+
+        checks: Dict[str, Any] = {}
+
+        # Index check — don't force a load here, just inspect current state.
+        index_ok = False
+        try:
+            idx = _compass_index
+            index_ok = idx is not None and getattr(idx, "db", None) is not None
+            checks["index"] = {"ok": index_ok}
+            if not index_ok:
+                checks["index"]["reason"] = "not loaded"
+        except Exception as e:  # defensive
+            checks["index"] = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+
+        # Ollama check — honour breaker state too. Breaker "closed" means
+        # healthy; "open" means known-down; "half_open" means probing.
+        ollama_ok = bool(_health_state.get("ollama_available"))
+        breaker_state = None
+        try:
+            idx = _compass_index
+            if idx is not None and getattr(idx, "embedder", None) is not None:
+                breaker_state = idx.embedder.circuit_breaker_state
+                if breaker_state == "closed":
+                    ollama_ok = True
+        except Exception:
+            pass
+        checks["ollama"] = {
+            "ok": ollama_ok,
+            "breaker": breaker_state,
+            "last_error": _health_state.get("last_ollama_error"),
+        }
+
+        # Backend check — at least one connected backend (and the manager exists).
+        backend_ok = False
+        connected_backends: List[str] = []
+        configured_backends: List[str] = []
+        try:
+            mgr = _backend_manager
+            if mgr is not None:
+                configured_backends = list(mgr.config.backends.keys())
+                for name in configured_backends:
+                    if mgr.is_backend_connected(name):
+                        connected_backends.append(name)
+                backend_ok = bool(connected_backends) or not configured_backends
+        except Exception as e:
+            checks["backends"] = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+        else:
+            checks["backends"] = {
+                "ok": backend_ok,
+                "connected": connected_backends,
+                "configured": configured_backends,
+            }
+            if not backend_ok:
+                checks["backends"]["reason"] = (
+                    "no backends connected" if configured_backends else "manager not initialized"
+                )
+
+        all_ok = index_ok and ollama_ok and backend_ok
+        body = {
+            "status": "ready" if all_ok else "not_ready",
+            "checks": checks,
+        }
+        status_code = 200 if all_ok else 503
+        _ready_cache["at"] = now
+        _ready_cache["status_code"] = status_code
+        _ready_cache["body"] = body
+        return JSONResponse(body, status_code=status_code)
+
+    async def metrics(_request):
+        """Prometheus text format — no prometheus_client dep."""
+
+        def _escape_label(v: str) -> str:
+            # Prometheus label-value escaping: \, ", newline.
+            return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+        lines: List[str] = []
+
+        # Search counter from analytics.
+        search_total: Optional[int] = None
+        try:
+            analytics = _analytics
+            if analytics is not None:
+                summary = await analytics.get_analytics_summary("24h")
+                # get_analytics_summary returns a dict; tolerate shape drift.
+                if isinstance(summary, dict):
+                    stats = summary.get("search_stats") or summary
+                    # Try common keys.
+                    for k in ("total_searches", "total", "count"):
+                        v = stats.get(k) if isinstance(stats, dict) else None
+                        if isinstance(v, (int, float)):
+                            search_total = int(v)
+                            break
+        except Exception as e:
+            logger.debug(f"metrics: analytics read failed: {e}")
+
+        lines.append("# HELP tool_compass_search_total Total number of compass() searches (24h window).")
+        lines.append("# TYPE tool_compass_search_total counter")
+        lines.append(f"tool_compass_search_total {search_total if search_total is not None else 0}")
+
+        # Ollama availability gauge — 1 closed, 0 otherwise.
+        ollama_val = 1 if _health_state.get("ollama_available") else 0
+        try:
+            idx = _compass_index
+            if idx is not None and getattr(idx, "embedder", None) is not None:
+                ollama_val = 1 if idx.embedder.circuit_breaker_state == "closed" else 0
+        except Exception:
+            pass
+        lines.append("# HELP tool_compass_ollama_available 1 if the Ollama circuit breaker is closed, else 0.")
+        lines.append("# TYPE tool_compass_ollama_available gauge")
+        lines.append(f"tool_compass_ollama_available {ollama_val}")
+
+        # Per-backend gauges + call counters.
+        lines.append("# HELP tool_compass_backend_up 1 if the named backend is connected, else 0.")
+        lines.append("# TYPE tool_compass_backend_up gauge")
+        lines.append("# HELP tool_compass_backend_call_total Backend tool-call counter, labelled by status.")
+        lines.append("# TYPE tool_compass_backend_call_total counter")
+        try:
+            mgr = _backend_manager
+            if mgr is not None:
+                stats = mgr.get_stats()
+                configured = stats.get("configured_backends") or list(mgr.config.backends.keys())
+                connected = set(stats.get("connected_backends") or [])
+                per_backend = stats.get("stats") or {}
+                for name in configured:
+                    label = _escape_label(name)
+                    up = 1 if name in connected else 0
+                    lines.append(f'tool_compass_backend_up{{name="{label}"}} {up}')
+                    entry = per_backend.get(name, {}) if isinstance(per_backend, dict) else {}
+                    total = int(entry.get("total_calls", 0) or 0)
+                    failed = int(entry.get("failed_calls", 0) or 0)
+                    success = max(0, total - failed)
+                    lines.append(
+                        f'tool_compass_backend_call_total{{name="{label}",status="success"}} {success}'
+                    )
+                    lines.append(
+                        f'tool_compass_backend_call_total{{name="{label}",status="error"}} {failed}'
+                    )
+        except Exception as e:
+            logger.debug(f"metrics: backend stats failed: {e}")
+
+        # Embedder p95 + failures.
+        embed_p95 = 0.0
+        embed_failures = 0
+        try:
+            idx = _compass_index
+            if idx is not None and getattr(idx, "embedder", None) is not None:
+                es = idx.embedder.get_stats()
+                embed_p95 = float(es.get("p95_latency_ms", 0.0) or 0.0)
+                embed_failures = int(es.get("total_failures", 0) or 0)
+        except Exception as e:
+            logger.debug(f"metrics: embedder stats failed: {e}")
+
+        lines.append("# HELP tool_compass_embed_latency_p95_ms p95 embed latency in ms from the bounded sample window.")
+        lines.append("# TYPE tool_compass_embed_latency_p95_ms gauge")
+        lines.append(f"tool_compass_embed_latency_p95_ms {embed_p95}")
+
+        lines.append("# HELP tool_compass_embed_failures_total Total embed failures across the process lifetime.")
+        lines.append("# TYPE tool_compass_embed_failures_total counter")
+        lines.append(f"tool_compass_embed_failures_total {embed_failures}")
+
+        # Index age + orphaned vectors.
+        index_age = 0.0
+        orphaned = 0
+        try:
+            idx = _compass_index
+            if idx is not None:
+                istats = idx.get_stats()
+                age = istats.get("index_age_seconds")
+                if isinstance(age, (int, float)):
+                    index_age = float(age)
+                orphaned = int(istats.get("orphaned_vector_count", 0) or 0)
+        except Exception as e:
+            logger.debug(f"metrics: index stats failed: {e}")
+
+        lines.append("# HELP tool_compass_index_age_seconds Seconds since the index was last built (0 if unknown).")
+        lines.append("# TYPE tool_compass_index_age_seconds gauge")
+        lines.append(f"tool_compass_index_age_seconds {index_age}")
+
+        lines.append("# HELP tool_compass_orphaned_vectors HNSW entries with no DB mapping.")
+        lines.append("# TYPE tool_compass_orphaned_vectors gauge")
+        lines.append(f"tool_compass_orphaned_vectors {orphaned}")
+
+        body = "\n".join(lines) + "\n"
+        return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+
+    # Add health / ready / metrics routes to FastMCP's custom routes
+    # (included in streamable_http_app).
     mcp._custom_starlette_routes.append(Route("/health", health, methods=["GET"]))
+    mcp._custom_starlette_routes.append(Route("/ready", ready, methods=["GET"]))
+    mcp._custom_starlette_routes.append(Route("/metrics", metrics, methods=["GET"]))
 
     # Use FastMCP's built-in HTTP runner (handles lifespan + session manager init)
     from mcp.server.transport_security import TransportSecuritySettings

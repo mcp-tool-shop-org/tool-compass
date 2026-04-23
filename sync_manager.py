@@ -161,6 +161,26 @@ class SyncManager:
 
             return results
 
+    def _get_backend_tool_names(self, backend_name: str) -> set:
+        """Return set of currently-indexed tool names for a backend.
+
+        Used by diffing sync (IDX-FT-004) to compute which tools disappeared
+        since the last rebuild so we can remove them instead of only adding.
+        """
+        names: set = set()
+        idx_db = getattr(self.index, "db", None)
+        if idx_db is None:
+            return names
+        try:
+            cursor = idx_db.execute(
+                "SELECT name FROM tools WHERE server = ?", (backend_name,)
+            )
+            for row in cursor.fetchall():
+                names.add(row["name"])
+        except Exception as e:
+            logger.debug(f"_get_backend_tool_names({backend_name}) failed: {e}")
+        return names
+
     async def _rebuild_for_backends(self, backend_names: List[str]):
         """Rebuild index for specified backends."""
         from tool_manifest import ToolDefinition
@@ -169,10 +189,30 @@ class SyncManager:
         all_tools = []
         db = self._get_db()
 
+        # Per-backend diff counters (IDX-FT-004).
+        diff_stats: Dict[str, Dict[str, int]] = {}
+
         for backend_name in backend_names:
             tools = self.backends.get_backend_tools(backend_name)
             if not tools:
                 continue
+
+            # Diff: old names in this backend vs. new names — anything
+            # that vanished is removed from the index (IDX-FT-004).
+            old_names = self._get_backend_tool_names(backend_name)
+            new_names = {t.qualified_name for t in tools}
+            removed = old_names - new_names
+            removed_count = 0
+            for name in removed:
+                ok = await self.index.remove_tool(name)
+                if ok:
+                    removed_count += 1
+
+            diff_stats[backend_name] = {
+                "added": len(new_names - old_names),
+                "updated": len(new_names & old_names),
+                "removed": removed_count,
+            }
 
             # Convert to ToolDefinition format
             for tool in tools:
@@ -229,6 +269,13 @@ class SyncManager:
 
         db.commit()
 
+        # Per-backend diff summary (IDX-FT-004).
+        for bname, stats in diff_stats.items():
+            logger.info(
+                f"Sync diff for {bname}: {stats['added']} added, "
+                f"{stats['updated']} updated, {stats['removed']} removed"
+            )
+
         # Rebuild index with new tools
         if all_tools:
             # For now, do incremental add (HNSW supports this)
@@ -278,6 +325,22 @@ class SyncManager:
             all_tools = []
             db = self._get_db()
 
+            # Pre-compute the OLD name-set across ALL backends so we can log
+            # the diff after build_index clears the old rows (IDX-FT-004).
+            # build_index already truncates the tools table, so we capture
+            # baseline before it runs.
+            old_all_names: set = set()
+            idx_db = getattr(self.index, "db", None)
+            if idx_db is not None:
+                try:
+                    cursor = idx_db.execute("SELECT name, server FROM tools")
+                    old_all_names = {row["name"] for row in cursor.fetchall()}
+                except Exception as e:
+                    logger.debug(f"full_sync: baseline fetch failed: {e}")
+
+            # Per-backend diff counters (IDX-FT-004).
+            diff_stats: Dict[str, Dict[str, int]] = {}
+
             for backend_name, connected in connect_results.items():
                 if not connected:
                     logger.warning(f"Skipping {backend_name} - not connected")
@@ -286,6 +349,15 @@ class SyncManager:
                 tools = self.backends.get_backend_tools(backend_name)
                 if not tools:
                     continue
+
+                # Diff this backend's old vs. new names.
+                old_names = self._get_backend_tool_names(backend_name)
+                new_names = {t.qualified_name for t in tools}
+                diff_stats[backend_name] = {
+                    "added": len(new_names - old_names),
+                    "updated": len(new_names & old_names),
+                    "removed": len(old_names - new_names),
+                }
 
                 # Convert to ToolDefinition
                 for tool in tools:
@@ -335,6 +407,21 @@ class SyncManager:
                 )
 
             db.commit()
+
+            # Emit diff summary per backend (IDX-FT-004).
+            for bname, stats in diff_stats.items():
+                logger.info(
+                    f"Sync diff for {bname}: {stats['added']} added, "
+                    f"{stats['updated']} updated, {stats['removed']} removed"
+                )
+            # Also note globally removed tools (backends that vanished entirely).
+            new_all_names = {t.name for t in all_tools}
+            globally_removed = old_all_names - new_all_names
+            if globally_removed:
+                logger.info(
+                    f"Full sync will drop {len(globally_removed)} tool(s) "
+                    f"from removed/disconnected backends"
+                )
 
             # Rebuild entire index
             if all_tools:

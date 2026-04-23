@@ -11,7 +11,7 @@ Each tool has:
 """
 
 from dataclasses import dataclass, field
-from typing import List, Dict
+from typing import List, Dict, Optional
 import json
 
 
@@ -26,6 +26,12 @@ class ToolDefinition:
     parameters: Dict = field(default_factory=dict)
     examples: List[str] = field(default_factory=list)
     is_core: bool = False
+    # MCC-FT-002: deprecation metadata. `deprecated_aliases` lists old names
+    # that should transparently resolve to this tool's canonical `name` for
+    # analytics + lookup. `deprecated_since` is the version string at which
+    # this tool itself was deprecated (None = not deprecated).
+    deprecated_aliases: List[str] = field(default_factory=list)
+    deprecated_since: Optional[str] = None
 
     def embedding_text(self) -> str:
         """
@@ -57,6 +63,8 @@ class ToolDefinition:
             "parameters": self.parameters,
             "examples": self.examples,
             "is_core": self.is_core,
+            "deprecated_aliases": self.deprecated_aliases,
+            "deprecated_since": self.deprecated_since,
         }
 
     @classmethod
@@ -790,6 +798,63 @@ def get_categories() -> List[str]:
 def get_servers() -> List[str]:
     """Get unique servers."""
     return list(set(t.server for t in TOOLS))
+
+
+# =============================================================================
+# MCC-FT-002: deprecated-alias resolution
+# =============================================================================
+
+# Module-level map: any known name (canonical OR alias) -> canonical name.
+# Built once at import from TOOLS. Tests that mutate TOOLS directly can call
+# _rebuild_alias_map() to refresh. Kept small + private so consumers go
+# through get_canonical_name() for forward-compat.
+_ALIAS_TO_CANONICAL: Dict[str, str] = {}
+
+
+def _rebuild_alias_map() -> None:
+    """(Re)build the alias -> canonical lookup from TOOLS.
+
+    Exposed for tests that monkeypatch TOOLS; production code should not
+    need to call this directly.
+    """
+    _ALIAS_TO_CANONICAL.clear()
+    for tool in TOOLS:
+        # Canonical name maps to itself so a single lookup always works.
+        _ALIAS_TO_CANONICAL[tool.name] = tool.name
+        for alias in tool.deprecated_aliases:
+            # Last-writer-wins on alias collisions; log would belong here if
+            # we ever see a real one. For now the TOOLS list is curated.
+            _ALIAS_TO_CANONICAL[alias] = tool.name
+
+
+def get_canonical_name(name: str) -> str:
+    """Return the canonical tool name for a given name or alias.
+
+    Unknown names pass through unchanged — the caller may be recording a
+    call for a dynamically-discovered backend tool that isn't in TOOLS.
+    """
+    return _ALIAS_TO_CANONICAL.get(name, name)
+
+
+def is_deprecated(name: str) -> bool:
+    """True iff `name` is a known deprecated alias OR a canonical tool with
+    `deprecated_since` set. Unknown names are not deprecated.
+    """
+    canonical = _ALIAS_TO_CANONICAL.get(name)
+    if canonical is None:
+        return False
+    # Name was a deprecated alias (maps to a DIFFERENT canonical name).
+    if canonical != name:
+        return True
+    # Name matched a canonical tool — check its deprecated_since field.
+    for tool in TOOLS:
+        if tool.name == name:
+            return tool.deprecated_since is not None
+    return False
+
+
+# Build alias map at import so first get_canonical_name() call is O(1).
+_rebuild_alias_map()
 
 
 def export_manifest(filepath: str):

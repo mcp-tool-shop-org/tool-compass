@@ -72,6 +72,20 @@ Running `python gateway.py` with no flags starts the MCP server in stdio mode by
 PORT=8080 python gateway.py
 ```
 
+## Fast local loop
+
+If you've cloned the repo and just want to iterate, the Makefile has two
+one-shot targets that install + run in a single command:
+
+```bash
+make dev        # Install + start gateway in HTTP mode (PORT=8000)
+make dev-ui     # Install + launch the Gradio UI
+```
+
+`make dev` warns (but doesn't hard-fail) if Ollama isn't reachable at
+`http://localhost:11434` — start it with `ollama serve` when you need
+real embedding queries.
+
 ## Gradio UI
 
 Tool Compass includes a Gradio web interface for interactive exploration:

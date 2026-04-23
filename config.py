@@ -562,6 +562,20 @@ def doctor() -> dict:
     # stdlib paths and to keep import-time cost low on the hot path.
     from _version import __version__
 
+    # MCC-FT-002 bonus: include deprecated tool count in the diagnostic dump
+    # so bug reports surface stale tools without a separate introspection
+    # step. Defensive — tool_manifest should always import, but if it breaks
+    # we still want doctor() to succeed for the user.
+    deprecated_tools_count: Optional[int] = None
+    try:
+        from tool_manifest import get_all_tools
+
+        deprecated_tools_count = sum(
+            1 for t in get_all_tools() if t.deprecated_since is not None
+        )
+    except Exception as e:
+        logger.debug(f"doctor(): could not count deprecated tools: {e}")
+
     cfg_path = get_config_path()
     cfg = load_config()
     cfg_dict = _redact_config(cfg.to_dict())
@@ -619,6 +633,7 @@ def doctor() -> dict:
         "analytics_schema_version": analytics_schema_version,
         "ollama_url": cfg.ollama_url,
         "ollama_reachable": _ollama_reachable(cfg.ollama_url),
+        "deprecated_tools": deprecated_tools_count,
     }
 
 

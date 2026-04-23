@@ -197,13 +197,15 @@ def mock_embedder():
         vec = np.random.randn(768).astype(np.float32)
         return vec / np.linalg.norm(vec)  # Normalize
 
-    async def async_embed(text: str) -> np.ndarray:
+    # Accept **kwargs so Stage C's trace_id propagation + IDX-FT-003 cache
+    # keying on provider metadata both work against this mock.
+    async def async_embed(text: str, **kwargs) -> np.ndarray:
         return mock_embed(text)
 
-    async def async_embed_batch(texts: list[str]) -> np.ndarray:
+    async def async_embed_batch(texts: list[str], **kwargs) -> np.ndarray:
         return np.array([mock_embed(t) for t in texts])
 
-    async def async_embed_query(query: str) -> np.ndarray:
+    async def async_embed_query(query: str, **kwargs) -> np.ndarray:
         return mock_embed(f"search_query: {query}")
 
     async def health_check() -> bool:
@@ -214,6 +216,10 @@ def mock_embedder():
     embedder.embed_query = AsyncMock(side_effect=async_embed_query)
     embedder.health_check = AsyncMock(side_effect=health_check)
     embedder.close = AsyncMock()
+    # IDX-FT-003: indexer._cache_put binds provider metadata into sqlite;
+    # these must be real strings, not Mock attributes.
+    embedder.base_url = "mock://embedder"
+    embedder.model = "mock-embed-test"
 
     return embedder
 

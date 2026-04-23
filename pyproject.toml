@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tool-compass"
-version = "2.0.7"
+version = "2.2.0"
 description = "Semantic MCP tool discovery gateway - find tools by intent, not memory"
 readme = "README.md"
 license = "MIT"
@@ -68,9 +68,11 @@ Issues = "https://github.com/mcp-tool-shop-org/tool-compass/issues"
 Changelog = "https://github.com/mcp-tool-shop-org/tool-compass/blob/main/CHANGELOG.md"
 
 [project.scripts]
-# Flat-layout: modules live at the repo root (gateway.py, ui.py), not in a
-# tool_compass/ subpackage. Entry points reference the top-level modules.
-tool-compass = "gateway:main"
+# Flat-layout: modules live at the repo root (gateway.py, ui.py, cli.py), not
+# in a tool_compass/ subpackage. Entry points reference the top-level modules.
+# v2.2.0: `tool-compass` now targets cli:main — a subcommand shell that dispatches
+# to gateway/ui/doctor/etc. Legacy `python gateway.py` entry still works.
+tool-compass = "cli:main"
 tool-compass-ui = "ui:main"
 
 [tool.hatch.build.targets.wheel]
@@ -81,6 +83,7 @@ packages = ["."]
 only-include = [
     "gateway.py",
     "ui.py",
+    "cli.py",
     "indexer.py",
     "embedder.py",
     "chain_indexer.py",
@@ -163,6 +166,9 @@ omit = [
 ]
 
 [tool.coverage.report]
+# TST-FT-001: conservative 60% floor gates regressions without blocking
+# routine humanization work. Ratchet up as coverage improves.
+fail_under = 60
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

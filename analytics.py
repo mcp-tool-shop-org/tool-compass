@@ -363,6 +363,19 @@ class CompassAnalytics:
         """
         if self._degraded:
             return
+
+        # MCC-FT-002: resolve deprecated aliases BEFORE the DB insert so all
+        # analytics (call counts, success rates, hot cache, chain detection)
+        # stay consistent across renames. Wrapped defensively — analytics
+        # must still work in test isolation where tool_manifest may be absent
+        # or monkeypatched away.
+        try:
+            from tool_manifest import get_canonical_name
+
+            tool_name = get_canonical_name(tool_name)
+        except ImportError:
+            pass
+
         try:
             db = self._get_db()
 

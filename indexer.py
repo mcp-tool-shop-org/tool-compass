@@ -7,6 +7,8 @@ import hnswlib
 import sqlite3
 import json
 import asyncio
+import hashlib
+import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -62,8 +64,92 @@ class CompassIndex:
         self.db: Optional[sqlite3.Connection] = None
         self._id_to_name: Dict[int, str] = {}
 
+        # Embedding cache counters (IDX-FT-003).
+        self._cache_hits = 0
+        self._cache_misses = 0
+
         # Ensure db directory exists
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _compute_text_hash(self, text: str) -> str:
+        """Compute stable cache key from (text, provider, model).
+
+        Combining text+provider+model avoids cross-model contamination when
+        the embedding backend swaps (e.g., nomic-embed-text → different dim).
+        """
+        provider = getattr(self.embedder, "base_url", "unknown")
+        model = getattr(self.embedder, "model", "unknown")
+        payload = f"{text}||{provider}||{model}".encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    def _cache_get(self, text_hash: str) -> Optional[np.ndarray]:
+        """Return cached float32 vector or None.
+
+        On dim mismatch (e.g., stale row from old model), treat as miss and
+        delete the bad row so it gets re-populated with the current model.
+        """
+        if self.db is None:
+            return None
+        try:
+            row = self.db.execute(
+                "SELECT vector, dim FROM embedding_cache WHERE text_hash = ?",
+                (text_hash,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            # Table may not exist yet on a freshly-opened legacy DB.
+            return None
+        if row is None:
+            return None
+        dim = int(row["dim"])
+        if dim != EMBEDDING_DIM:
+            # Stale entry from a different-dim model — drop and miss.
+            self.db.execute(
+                "DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,)
+            )
+            self.db.commit()
+            return None
+        vector = np.frombuffer(row["vector"], dtype=np.float32).reshape(dim)
+        # frombuffer returns a read-only view; copy so hnswlib can use it.
+        return vector.copy()
+
+    def _cache_put(
+        self, text_hash: str, vector: np.ndarray, dim: int, provider: str
+    ) -> None:
+        """BLOB-encode and store a vector. No-op if DB is unavailable."""
+        if self.db is None:
+            return
+        vec_f32 = np.asarray(vector, dtype=np.float32).reshape(-1)
+        try:
+            self.db.execute(
+                """
+                INSERT OR REPLACE INTO embedding_cache (text_hash, vector, dim, provider)
+                VALUES (?, ?, ?, ?)
+                """,
+                (text_hash, vec_f32.tobytes(), int(dim), provider),
+            )
+            self.db.commit()
+        except sqlite3.OperationalError as e:
+            logger.debug(f"embedding_cache put failed: {e}")
+
+    def get_cache_stats(self) -> Dict:
+        """Return embedding-cache hit/miss/size stats (IDX-FT-003)."""
+        size = 0
+        if self.db is not None:
+            try:
+                row = self.db.execute(
+                    "SELECT COUNT(*) AS c FROM embedding_cache"
+                ).fetchone()
+                size = int(row["c"]) if row else 0
+            except sqlite3.OperationalError:
+                size = 0
+        total = self._cache_hits + self._cache_misses
+        hit_rate = (self._cache_hits / total) if total > 0 else 0.0
+        return {
+            "hits": self._cache_hits,
+            "misses": self._cache_misses,
+            "size": size,
+            "hit_rate": hit_rate,
+        }
 
     def _init_db(self):
         """Initialize SQLite database for tool metadata."""
@@ -92,20 +178,42 @@ class CompassIndex:
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                text_hash TEXT PRIMARY KEY,
+                vector BLOB NOT NULL,
+                dim INTEGER NOT NULL,
+                provider TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
         """)
         self.db.commit()
+
+        # Runtime cache hit/miss counters (IDX-FT-003). Reset only on process
+        # lifetime — persisted cache entries live across runs.
+        if not hasattr(self, "_cache_hits"):
+            self._cache_hits = 0
+        if not hasattr(self, "_cache_misses"):
+            self._cache_misses = 0
 
     def _load_id_mapping(self):
         """Load ID to name mapping from database."""
         cursor = self.db.execute("SELECT id, name FROM tools")
         self._id_to_name = {row["id"]: row["name"] for row in cursor.fetchall()}
 
-    async def build_index(self, tools: Optional[List[ToolDefinition]] = None):
+    async def build_index(
+        self,
+        tools: Optional[List[ToolDefinition]] = None,
+        use_cache: bool = True,
+    ):
         """
         Build HNSW index from tool definitions.
 
         Args:
             tools: List of tools to index. Uses manifest if not provided.
+            use_cache: When True (default), reuse cached embeddings for any
+                tool whose embedding_text (+ provider+model) has been seen
+                before. Set False to force a fresh Ollama pass.
         """
         if tools is None:
             tools = get_all_tools()
@@ -175,12 +283,65 @@ class CompassIndex:
 
             logger.info(f"Inserted {len(tools)} tools into database (uncommitted)")
 
-            # Generate embeddings
-            logger.info("Generating embeddings via Ollama...")
+            # Partition into cache hits vs. misses (IDX-FT-003). When cache is
+            # disabled, everything is a "miss" and gets embedded fresh.
+            provider = getattr(self.embedder, "base_url", "unknown")
+            hashes: List[str] = []
+            cached_vecs: Dict[int, np.ndarray] = {}
+            miss_indices: List[int] = []
+            miss_texts: List[str] = []
+
+            for i, text in enumerate(embedding_texts):
+                h = self._compute_text_hash(text) if use_cache else ""
+                hashes.append(h)
+                hit = self._cache_get(h) if use_cache else None
+                if hit is not None:
+                    cached_vecs[i] = hit
+                    self._cache_hits += 1
+                else:
+                    miss_indices.append(i)
+                    miss_texts.append(text)
+                    if use_cache:
+                        self._cache_misses += 1
+
+            logger.info(
+                f"Embedding cache: {len(cached_vecs)} hits, {len(miss_texts)} misses"
+            )
+
+            # Generate embeddings only for misses
             embed_start = time.time()
-            embeddings = await self.embedder.embed_batch(embedding_texts)
+            if miss_texts:
+                logger.info(
+                    f"Generating {len(miss_texts)} embeddings via Ollama..."
+                )
+                miss_embeddings = await self.embedder.embed_batch(miss_texts)
+                if miss_embeddings.shape != (len(miss_texts), EMBEDDING_DIM):
+                    raise RuntimeError(
+                        f"Embedding shape mismatch: got {miss_embeddings.shape}, "
+                        f"expected ({len(miss_texts)}, {EMBEDDING_DIM})"
+                    )
+                # Populate cache for misses
+                if use_cache:
+                    for j, mi in enumerate(miss_indices):
+                        self._cache_put(
+                            hashes[mi],
+                            miss_embeddings[j],
+                            EMBEDDING_DIM,
+                            provider,
+                        )
+            else:
+                miss_embeddings = np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
             embed_time = time.time() - embed_start
-            logger.info(f"Generated {len(embeddings)} embeddings in {embed_time:.2f}s")
+
+            # Stitch the full embedding matrix back together
+            embeddings = np.zeros((len(tools), EMBEDDING_DIM), dtype=np.float32)
+            for i, vec in cached_vecs.items():
+                embeddings[i] = vec
+            for j, mi in enumerate(miss_indices):
+                embeddings[mi] = miss_embeddings[j]
+            logger.info(
+                f"Assembled {len(embeddings)} embeddings in {embed_time:.2f}s"
+            )
 
             # Validate shape before add_items to fail fast on partial embeds.
             if embeddings.shape != (len(tools), EMBEDDING_DIM):
@@ -519,7 +680,16 @@ class CompassIndex:
         try:
             # Generate embedding FIRST — if Ollama fails we never touched the DB.
             embedding_text = tool.embedding_text()
-            embedding = await self.embedder.embed(embedding_text)
+            # Consult embedding cache (IDX-FT-003) — skip Ollama on hit.
+            text_hash = self._compute_text_hash(embedding_text)
+            embedding = self._cache_get(text_hash)
+            if embedding is not None:
+                self._cache_hits += 1
+            else:
+                self._cache_misses += 1
+                embedding = await self.embedder.embed(embedding_text)
+                provider = getattr(self.embedder, "base_url", "unknown")
+                self._cache_put(text_hash, embedding, EMBEDDING_DIM, provider)
 
             # Now do DB write + HNSW add inside a single transaction.
             # Check if tool already exists

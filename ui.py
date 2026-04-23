@@ -331,6 +331,20 @@ def search_tools(
         safe_server = html.escape(r.tool.server, quote=True)
         safe_category = html.escape(r.tool.category, quote=True)
 
+        # MCC-FT-002: show a deprecation badge when the tool has
+        # `deprecated_since` set. Defensive getattr — dynamically-discovered
+        # tools that pre-date this field should render unchanged.
+        deprecated_since = getattr(r.tool, "deprecated_since", None)
+        deprecated_badge = ""
+        if deprecated_since:
+            safe_dep_ver = html.escape(str(deprecated_since), quote=True)
+            deprecated_badge = (
+                f'<span class="deprecated" role="status" aria-label="deprecated" '
+                f'style="background: #5c2c2c; color: #ffb4b4; padding: 2px 8px; '
+                f'border-radius: 4px; font-size: 0.8em;">'
+                f'Deprecated since v{safe_dep_ver}</span>'
+            )
+
         html_parts.append(f"""
         <div role="article" aria-label="{safe_name_short} result" style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a1a2e;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
@@ -338,9 +352,10 @@ def search_tools(
                 <span style="color: {confidence_color};" title="{conf_label} match ({confidence_pct}%)">{stars} {conf_label} ({confidence_pct}%)</span>
             </div>
             <p style="margin: 8px 0; color: #ccc;" title="{safe_desc}">{safe_desc_short}</p>
-            <div style="display: flex; gap: 12px; font-size: 0.9em; color: #888; flex-wrap: wrap;">
+            <div style="display: flex; gap: 12px; font-size: 0.9em; color: #888; flex-wrap: wrap; align-items: center;">
                 <span><span role="img" aria-label="server">📦</span> {safe_server}</span>
                 <span><span role="img" aria-label="category">🏷️</span> {safe_category}</span>
+                {deprecated_badge}
             </div>
         </div>
         """)
