@@ -5,6 +5,16 @@ All notable changes to Tool Compass will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1] - 2026-04-23
+
+Patch release. Fixes the v2.2.0 release-smoke defect.
+
+### Fixed
+- `tool-compass --version` now prints the version and exits. v2.2.0's new
+  CLI subcommand shell (MCC-FT-001) forgot to wire `--version` on the root
+  parser, so the publish-time release-smoke check failed even though the
+  artifacts themselves were valid. Purely a CLI ergonomics fix.
+
 ## [2.2.0] - 2026-04-23
 
 Dogfood swarm release: Stage A bug/security health pass + Stage B/C humanization

@@ -31,6 +31,17 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="tool-compass",
         description="Semantic MCP tool discovery gateway",
     )
+    # --version lives on the root parser (not a subcommand) so release-smoke
+    # and `tool-compass --version` work out of the box.
+    try:
+        from _version import __version__ as _tc_version
+    except ImportError:  # pragma: no cover — defensive fallback
+        _tc_version = "unknown"
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"tool-compass {_tc_version}",
+    )
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     # doctor — environment snapshot (delegates to config.doctor()).
