@@ -1,6 +1,18 @@
 """
 Tool Compass - Analytics Module
 Tracks usage patterns, manages hot tool cache, and detects tool chains.
+
+Schema migration pattern (MCC-B-003):
+    The analytics DB tracks its version in the `schema_meta` table under the
+    key `schema_version`. Current version: 1. When a future change alters
+    table shape, bump the version constant below and add a handler to
+    `_run_migrations` like::
+
+        if current_version < 2:
+            db.executescript("ALTER TABLE ... ADD COLUMN ...")
+            db.execute("UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'")
+
+    Migrations must be idempotent — `_run_migrations` runs on every open.
 """
 
 import sqlite3
@@ -19,6 +31,10 @@ logger = logging.getLogger(__name__)
 
 # Database path
 ANALYTICS_DB_PATH = Path(__file__).parent / "db" / "compass_analytics.db"
+
+# Current analytics schema version. Bump + add a block to _run_migrations
+# whenever the table shape changes. See module docstring for the pattern.
+CURRENT_SCHEMA_VERSION = 1
 
 
 @dataclass
@@ -80,6 +96,13 @@ class CompassAnalytics:
 
         self.db: Optional[sqlite3.Connection] = None
         self._hot_cache: Dict[str, HotToolEntry] = {}
+
+        # MCC-B-005: analytics is observability, not core function. If SQLite
+        # writes start failing, degrade gracefully — log ONCE, set this flag,
+        # and silently no-op future writes rather than bubbling exceptions
+        # up through every tool call.
+        self._degraded: bool = False
+        self._degraded_logged: bool = False
 
         # Lock for all DB mutations (sqlite3 connection is shared across threads
         # via check_same_thread=False; we serialize writes ourselves).
@@ -205,9 +228,82 @@ class CompassAnalytics:
                 last_sync_at TIMESTAMP,
                 sync_status TEXT DEFAULT 'unknown'
             );
+
+            -- Schema version tracking (MCC-B-003). Future table shape changes
+            -- bump schema_version and add a migration in _run_migrations so
+            -- analytics state survives upgrades instead of silently breaking.
+            CREATE TABLE IF NOT EXISTS schema_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
         """)
+        db.execute(
+            "INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', ?)",
+            (str(CURRENT_SCHEMA_VERSION),),
+        )
         db.commit()
+        self._run_migrations()
         logger.info(f"Analytics database initialized at {self.db_path}")
+
+    def get_schema_version(self) -> int:
+        """Return the current analytics DB schema version (MCC-B-003)."""
+        db = self._get_db()
+        row = db.execute(
+            "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return 0
+        try:
+            return int(row["value"])
+        except (KeyError, TypeError, ValueError):
+            return 0
+
+    def _run_migrations(self) -> None:
+        """Apply any pending schema migrations.
+
+        Schema version 1 is the initial shape; there is nothing to migrate
+        yet. The hook exists so future changes (new columns, new tables,
+        value backfills) can land without scattering conditional logic
+        across the codebase. See module docstring for the pattern.
+        """
+        current = self.get_schema_version()
+        if current == CURRENT_SCHEMA_VERSION:
+            logger.debug(
+                f"Analytics schema version {current}; no migrations needed"
+            )
+            return
+        # No migrations registered yet. Future versions add blocks here
+        # in strict ascending order and bump schema_meta at the end.
+        logger.warning(
+            f"Analytics DB at schema v{current}, code expects v{CURRENT_SCHEMA_VERSION}; "
+            "no migrations registered yet."
+        )
+
+    def _note_degraded(self, method: str, error: Exception) -> None:
+        """Mark analytics as degraded and log once per session (MCC-B-005)."""
+        self._degraded = True
+        if not self._degraded_logged:
+            logger.warning(
+                f"Analytics write failed ({method}): {error}. "
+                "Analytics degraded — subsequent writes disabled this session."
+            )
+            self._degraded_logged = True
+
+    def get_health(self) -> Dict[str, Any]:
+        """Report whether analytics is recording or running in degraded mode.
+
+        MCC-B-005: lets the UI / status tab distinguish "everything fine"
+        from "analytics sqlite broke; tool calls still work but metrics are
+        not being recorded."
+        """
+        return {
+            "degraded": self._degraded,
+            "reason": (
+                "sqlite write failure — see earlier log line for details"
+                if self._degraded
+                else None
+            ),
+        }
 
     async def record_search(
         self,
@@ -218,34 +314,40 @@ class CompassAnalytics:
         server_filter: Optional[str] = None,
     ):
         """Record a search query for analytics."""
-        db = self._get_db()
+        if self._degraded:
+            return
+        try:
+            db = self._get_db()
 
-        query_hash = hashlib.sha256(query.lower().encode()).hexdigest()[:32]
-        top_result = results[0].tool.name if results else None
-        result_count = len(results)
+            query_hash = hashlib.sha256(query.lower().encode()).hexdigest()[:32]
+            top_result = results[0].tool.name if results else None
+            result_count = len(results)
 
-        with self._lock:
-            db.execute(
-                """
-                INSERT INTO search_queries
-                (query, query_hash, top_result, result_count, latency_ms, category_filter, server_filter)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    query,
-                    query_hash,
-                    top_result,
-                    result_count,
-                    latency_ms,
-                    category_filter,
-                    server_filter,
-                ),
+            with self._lock:
+                db.execute(
+                    """
+                    INSERT INTO search_queries
+                    (query, query_hash, top_result, result_count, latency_ms, category_filter, server_filter)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        query,
+                        query_hash,
+                        top_result,
+                        result_count,
+                        latency_ms,
+                        category_filter,
+                        server_filter,
+                    ),
+                )
+                db.commit()
+
+            logger.debug(
+                f"Recorded search: '{query[:50]}...' -> {top_result} ({latency_ms:.1f}ms)"
             )
-            db.commit()
-
-        logger.debug(
-            f"Recorded search: '{query[:50]}...' -> {top_result} ({latency_ms:.1f}ms)"
-        )
+        except sqlite3.Error as e:
+            # MCC-B-005: swallow — analytics failures must not break searches.
+            self._note_degraded("record_search", e)
 
     async def record_tool_call(
         self,
@@ -259,67 +361,74 @@ class CompassAnalytics:
         Record a tool execution.
         Updates usage stats, hot cache tracking, and chain detection.
         """
-        db = self._get_db()
+        if self._degraded:
+            return
+        try:
+            db = self._get_db()
 
-        # Parse server from tool name
-        server = tool_name.split(":")[0] if ":" in tool_name else "unknown"
+            # Parse server from tool name
+            server = tool_name.split(":")[0] if ":" in tool_name else "unknown"
 
-        # Hash arguments for pattern detection. Hash the full key/value payload
-        # (sorted for stability) so different argument values produce different
-        # hashes — earlier revisions hashed only keys and collided on every call.
-        args_hash = None
-        if arguments:
-            args_hash = hashlib.sha256(
-                json.dumps(arguments, sort_keys=True, default=str).encode()
-            ).hexdigest()[:16]
+            # Hash arguments for pattern detection. Hash the full key/value payload
+            # (sorted for stability) so different argument values produce different
+            # hashes — earlier revisions hashed only keys and collided on every call.
+            args_hash = None
+            if arguments:
+                args_hash = hashlib.sha256(
+                    json.dumps(arguments, sort_keys=True, default=str).encode()
+                ).hexdigest()[:16]
 
-        with self._lock:
-            # Insert call record
-            db.execute(
-                """
-                INSERT INTO tool_calls
-                (tool_name, server, success, error_message, latency_ms, arguments_hash)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """,
-                (
-                    tool_name,
-                    server,
-                    1 if success else 0,
-                    error_message,
-                    latency_ms,
-                    args_hash,
-                ),
-            )
+            with self._lock:
+                # Insert call record
+                db.execute(
+                    """
+                    INSERT INTO tool_calls
+                    (tool_name, server, success, error_message, latency_ms, arguments_hash)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        tool_name,
+                        server,
+                        1 if success else 0,
+                        error_message,
+                        latency_ms,
+                        args_hash,
+                    ),
+                )
 
-            # Update aggregated stats.
-            # NOTE: SET-clause ordering is load-bearing — SQLite evaluates SET
-            # clauses left-to-right (see https://sqlite.org/lang_update.html),
-            # so the avg_latency_ms computation MUST come BEFORE call_count is
-            # incremented. Reversing these lines introduces an off-by-one that
-            # drifts the rolling mean.
-            db.execute(
-                """
-                INSERT INTO tool_usage_stats (tool_name, call_count, success_count, failure_count, avg_latency_ms, last_called_at, last_success_at)
-                VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
-                ON CONFLICT(tool_name) DO UPDATE SET
-                    avg_latency_ms = (avg_latency_ms * call_count + excluded.avg_latency_ms) / (call_count + 1),
-                    call_count = call_count + 1,
-                    success_count = success_count + excluded.success_count,
-                    failure_count = failure_count + excluded.failure_count,
-                    last_called_at = CURRENT_TIMESTAMP,
-                    last_success_at = CASE WHEN excluded.success_count > 0 THEN CURRENT_TIMESTAMP ELSE last_success_at END,
-                    updated_at = CURRENT_TIMESTAMP
-            """,
-                (
-                    tool_name,
-                    1 if success else 0,
-                    0 if success else 1,
-                    latency_ms,
-                    1 if success else 0,
-                ),
-            )
+                # Update aggregated stats.
+                # NOTE: SET-clause ordering is load-bearing — SQLite evaluates SET
+                # clauses left-to-right (see https://sqlite.org/lang_update.html),
+                # so the avg_latency_ms computation MUST come BEFORE call_count is
+                # incremented. Reversing these lines introduces an off-by-one that
+                # drifts the rolling mean.
+                db.execute(
+                    """
+                    INSERT INTO tool_usage_stats (tool_name, call_count, success_count, failure_count, avg_latency_ms, last_called_at, last_success_at)
+                    VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+                    ON CONFLICT(tool_name) DO UPDATE SET
+                        avg_latency_ms = (avg_latency_ms * call_count + excluded.avg_latency_ms) / (call_count + 1),
+                        call_count = call_count + 1,
+                        success_count = success_count + excluded.success_count,
+                        failure_count = failure_count + excluded.failure_count,
+                        last_called_at = CURRENT_TIMESTAMP,
+                        last_success_at = CASE WHEN excluded.success_count > 0 THEN CURRENT_TIMESTAMP ELSE last_success_at END,
+                        updated_at = CURRENT_TIMESTAMP
+                """,
+                    (
+                        tool_name,
+                        1 if success else 0,
+                        0 if success else 1,
+                        latency_ms,
+                        1 if success else 0,
+                    ),
+                )
 
-            db.commit()
+                db.commit()
+        except sqlite3.Error as e:
+            # MCC-B-005: analytics failure must not break tool execution.
+            self._note_degraded("record_tool_call", e)
+            return
 
         # Track for chain detection. The deque is bounded (maxlen=20) so appends
         # silently drop the OLDEST item — never middle items. Save patterns on
@@ -341,39 +450,55 @@ class CompassAnalytics:
         """Save current tool sequence as a pattern for chain detection."""
         if len(self._session_tool_sequence) < 2:
             return
+        if self._degraded:
+            return
 
-        db = self._get_db()
+        try:
+            db = self._get_db()
 
-        # Snapshot the deque as a list for subsequence slicing.
-        sequence = list(self._session_tool_sequence)
+            # Snapshot the deque as a list for subsequence slicing.
+            sequence = list(self._session_tool_sequence)
 
-        with self._lock:
-            # Find subsequences of length 2-5
-            for length in range(2, min(6, len(sequence) + 1)):
-                for i in range(len(sequence) - length + 1):
-                    subseq = sequence[i : i + length]
-                    seq_json = json.dumps(subseq)
-                    seq_hash = hashlib.sha256(seq_json.encode()).hexdigest()[:32]
+            with self._lock:
+                # Find subsequences of length 2-5
+                for length in range(2, min(6, len(sequence) + 1)):
+                    for i in range(len(sequence) - length + 1):
+                        subseq = sequence[i : i + length]
+                        seq_json = json.dumps(subseq)
+                        seq_hash = hashlib.sha256(seq_json.encode()).hexdigest()[:32]
 
-                    # Upsert pattern
-                    db.execute(
-                        """
-                        INSERT INTO chain_patterns (session_id, tool_sequence, sequence_hash, occurrence_count)
-                        VALUES (?, ?, ?, 1)
-                        ON CONFLICT(sequence_hash) DO UPDATE SET
-                            occurrence_count = occurrence_count + 1,
-                            last_seen_at = CURRENT_TIMESTAMP
-                    """,
-                        (self._session_id, seq_json, seq_hash),
-                    )
+                        # Upsert pattern
+                        db.execute(
+                            """
+                            INSERT INTO chain_patterns (session_id, tool_sequence, sequence_hash, occurrence_count)
+                            VALUES (?, ?, ?, 1)
+                            ON CONFLICT(sequence_hash) DO UPDATE SET
+                                occurrence_count = occurrence_count + 1,
+                                last_seen_at = CURRENT_TIMESTAMP
+                        """,
+                            (self._session_id, seq_json, seq_hash),
+                        )
 
-            db.commit()
+                db.commit()
+        except sqlite3.Error as e:
+            # MCC-B-005: chain pattern save failure degrades analytics only.
+            self._note_degraded("_save_chain_pattern", e)
 
     async def refresh_hot_cache(self, embedder=None, index=None):
         """
         Update the hot cache with top N most used tools.
         Optionally load embeddings and schemas if embedder/index provided.
         """
+        if self._degraded:
+            return []
+        try:
+            return await self._refresh_hot_cache_impl(embedder, index)
+        except sqlite3.Error as e:
+            self._note_degraded("refresh_hot_cache", e)
+            return []
+
+    async def _refresh_hot_cache_impl(self, embedder=None, index=None):
+        """Inner implementation; raises sqlite3.Error — caller wraps."""
         db = self._get_db()
 
         # Get top tools by call count
@@ -466,6 +591,16 @@ class CompassAnalytics:
         Analyze chain_patterns to find common tool sequences.
         Promotes patterns with enough occurrences to tool_chains.
         """
+        if self._degraded:
+            return []
+        try:
+            return await self._detect_chains_impl()
+        except sqlite3.Error as e:
+            self._note_degraded("detect_chains", e)
+            return []
+
+    async def _detect_chains_impl(self) -> List[Dict[str, Any]]:
+        """Inner implementation; raises sqlite3.Error — caller wraps."""
         db = self._get_db()
 
         # Find patterns with enough occurrences

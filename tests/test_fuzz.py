@@ -34,6 +34,7 @@ class TestSecurityFuzzing:
         "{{constructor.constructor('return this')()}}",
     ]
 
+    @pytest.mark.slow  # max_examples=200 (TST-B-006)
     @given(st.text(min_size=0, max_size=1000))
     @settings(max_examples=200)
     def test_search_query_sanitization(self, text):
@@ -83,6 +84,7 @@ class TestSecurityFuzzing:
 
         assert tool.category == payload
 
+    @pytest.mark.slow  # max_examples=200 (TST-B-006)
     @given(
         st.text(
             min_size=0,
@@ -178,6 +180,7 @@ class TestInputValidationFuzzing:
         text = tool.embedding_text()
         assert isinstance(text, str)
 
+    @pytest.mark.slow  # max_examples=100 (TST-B-006)
     @given(st.text(min_size=0, max_size=100))
     @settings(max_examples=100)
     def test_server_filter_arbitrary(self, server):
@@ -210,6 +213,10 @@ class TestJSONSchemaFuzzing:
             max_leaves=20,
         )
     )
+    @pytest.mark.slow  # max_examples=100 (TST-B-006)
+    # dev/nightly profiles already suppress HealthCheck.too_slow; keep the
+    # explicit suppression so CI (which has a deadline) doesn't flap on
+    # particularly deep recursive trees.
     @settings(max_examples=100, suppress_health_check=[HealthCheck.too_slow])
     def test_arbitrary_json_as_params(self, data):
         """Tool params should handle arbitrary JSON structures.
@@ -329,6 +336,7 @@ class TestAnalyticsFuzzing:
     saving are actually exercised.
     """
 
+    @pytest.mark.slow  # max_examples=100, DB I/O (TST-B-006)
     @given(st.text(min_size=0, max_size=200))
     @settings(max_examples=100, deadline=None)
     def test_record_search_arbitrary_query(self, fuzz_query):
@@ -475,6 +483,7 @@ class TestStressFuzzing:
         text = tool.embedding_text()
         assert isinstance(text, str)
 
+    @pytest.mark.slow  # constructs 1000 tools (TST-B-006)
     def test_many_tools_in_batch(self):
         """Handle large batches of tool definitions."""
         from tool_manifest import ToolDefinition
@@ -497,6 +506,7 @@ class TestStressFuzzing:
             assert isinstance(text, str)
             assert tool.name in text
 
+    @pytest.mark.slow  # max_examples=100 (TST-B-006)
     @given(
         st.text(
             alphabet=st.characters(blacklist_categories=("Cs",)),

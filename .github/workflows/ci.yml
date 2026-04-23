@@ -61,7 +61,9 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ['3.11', '3.12']
+        # Two versions per user's hard rule (max 2 Python versions). Covers
+        # current stable + latest supported, keeping requires-python honest.
+        python-version: ['3.11', '3.13']
 
     steps:
       - name: Checkout repository
@@ -82,7 +84,16 @@ jobs:
 
       - name: Run tests
         run: |
-          pytest -v --tb=short -m "not integration"
+          pytest -v --tb=short -m "not integration" \
+            --junitxml=junit-${{ matrix.python-version }}.xml
+
+      - name: Upload JUnit report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: junit-reports-${{ matrix.python-version }}
+          path: junit-${{ matrix.python-version }}.xml
+          if-no-files-found: warn
 
       - name: Run tests with coverage
         if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
@@ -142,30 +153,30 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Install Ollama (pinned release)
+      - name: Install pinned Ollama
         # Pinned to a specific Ollama release instead of piping `curl | sh`.
-        # Binary is downloaded from the official GitHub release and its SHA-256
-        # is verified before extraction. Bump OLLAMA_VERSION + OLLAMA_SHA256
-        # together when updating.
-        env:
-          OLLAMA_VERSION: v0.4.7
-          # TODO(swarm): replace placeholder SHA with real sha256 from
-          # https://github.com/ollama/ollama/releases/download/v0.4.7/ollama-linux-amd64.tgz.sha256
-          OLLAMA_SHA256: 0000000000000000000000000000000000000000000000000000000000000000
+        # The .sha256 file is fetched from the same GitHub release and
+        # verified against the tarball — any mismatch fails the job.
+        # Bump OLLAMA_VERSION (here and in docker-compose.yml) in lockstep.
         run: |
           set -euo pipefail
-          url="https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tgz"
-          curl -fsSL -o ollama.tgz "$url"
-          echo "${OLLAMA_SHA256}  ollama.tgz" | sha256sum -c - || {
-            echo "::warning::SHA-256 mismatch — update OLLAMA_SHA256 pin"
-            # TODO(swarm): drop the `|| true` once OLLAMA_SHA256 is filled in.
-            true
-          }
-          sudo tar -C /usr/local -xzf ollama.tgz
-          rm ollama.tgz
+          OLLAMA_VERSION="v0.4.7"
+          BASE_URL="https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}"
+          TARBALL="ollama-linux-amd64.tgz"
+          curl -fsSL "${BASE_URL}/${TARBALL}" -o "${TARBALL}"
+          curl -fsSL "${BASE_URL}/${TARBALL}.sha256" -o "${TARBALL}.sha256"
+          sha256sum -c "${TARBALL}.sha256"
+          sudo tar -C /usr/local -xzf "${TARBALL}"
+          rm "${TARBALL}" "${TARBALL}.sha256"
           ollama --version
           ollama serve &
-          sleep 5
+          # Wait for the daemon to accept connections instead of a blind sleep.
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:11434/api/version > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
           ollama pull nomic-embed-text
 
       - name: Run integration tests

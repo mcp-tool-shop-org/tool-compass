@@ -19,7 +19,9 @@ import asyncio
 import argparse
 import logging
 import json
+import sqlite3
 import time
+import uuid
 from typing import Optional, List, Dict, Any
 
 from _version import __version__
@@ -65,6 +67,31 @@ _sync_manager: Optional[SyncManager] = None
 _chain_indexer: Optional[ChainIndexer] = None
 _startup_sync_done: bool = False
 
+# GW-B-001 / GW-B-009: runtime health state surfaced via compass_status().
+# The gateway degrades gracefully when a dependency is down — compass() falls
+# back to lexical search, describe() falls back to the backend path — and
+# every response envelope tells the user *why* results look different.
+_health_state: Dict[str, Any] = {
+    "ollama_available": True,
+    "last_ollama_check": 0.0,
+    "last_ollama_error": None,
+    "index_available": True,
+    "last_index_error": None,
+}
+
+
+def _mark_ollama_down(err: BaseException) -> None:
+    """Record an Ollama failure so status + hints can surface it."""
+    _health_state["ollama_available"] = False
+    _health_state["last_ollama_check"] = time.time()
+    _health_state["last_ollama_error"] = f"{type(err).__name__}: {err}"
+
+
+def _mark_ollama_up() -> None:
+    _health_state["ollama_available"] = True
+    _health_state["last_ollama_check"] = time.time()
+    _health_state["last_ollama_error"] = None
+
 # Async locks to prevent race conditions during singleton initialization
 _index_lock = asyncio.Lock()
 _backend_lock = asyncio.Lock()
@@ -87,6 +114,12 @@ async def get_index() -> CompassIndex:
 
     Uses double-checked locking pattern with asyncio.Lock to prevent
     race conditions when multiple coroutines call this concurrently.
+
+    GW-B-001: If Ollama is unreachable, we still return a usable CompassIndex
+    provided a prior ``db/compass.hnsw`` + ``db/tools.db`` exist on disk. The
+    index won't be able to service semantic ``search()`` calls, but callers
+    (compass(), describe()) can fall back to a lexical LIKE query against
+    ``index.db`` and keep serving users instead of raising opaquely.
     """
     global _compass_index
 
@@ -103,17 +136,35 @@ async def get_index() -> CompassIndex:
         index = CompassIndex()
 
         # Try to load existing index
-        if not index.load_index():
-            logger.warning("No existing index found. Building from manifest...")
+        if index.load_index():
+            _compass_index = index
+            return _compass_index
 
-            # Check Ollama
-            if not await index.embedder.health_check():
-                raise RuntimeError(
-                    "Ollama not available. Start Ollama and run: ollama pull nomic-embed-text"
-                )
+        logger.warning("No existing index found. Building from manifest...")
 
-            # Build index from static manifest
-            await index.build_index()
+        # Check Ollama — building needs embeddings, so this is non-negotiable here.
+        try:
+            ollama_ok = await index.embedder.health_check()
+        except Exception as e:
+            _mark_ollama_down(e)
+            raise RuntimeError(
+                "Ollama not available and no cached index found at "
+                f"{index.index_path}. Start Ollama (ollama serve) and run: "
+                "ollama pull nomic-embed-text"
+            ) from e
+
+        if not ollama_ok:
+            _mark_ollama_down(RuntimeError("health_check returned False"))
+            raise RuntimeError(
+                "Ollama not available and no cached index found at "
+                f"{index.index_path}. Start Ollama (ollama serve) and run: "
+                "ollama pull nomic-embed-text"
+            )
+
+        _mark_ollama_up()
+
+        # Build index from static manifest
+        await index.build_index()
 
         _compass_index = index
 
@@ -264,6 +315,77 @@ async def maybe_startup_sync():
 
 
 # =============================================================================
+# GW-B-001: lexical fallback for when semantic search is unavailable.
+# Simple LIKE query against the tools table — matches the same metadata fields
+# the semantic index covers (name, description, category, server). No FTS5
+# setup required.
+# =============================================================================
+
+
+def _lexical_search_fallback(
+    index: CompassIndex,
+    query: str,
+    top_k: int,
+    category: Optional[str],
+    server: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Return up to ``top_k`` tool matches via a case-insensitive LIKE scan.
+
+    Each match is already in the response-envelope shape (``tool``,
+    ``description``, ``server``, ``category``, ``confidence``, ``degraded``).
+    Confidence is a coarse heuristic: 0.6 for name match, 0.4 for description
+    match — enough to produce a sensible ordering without pretending it's a
+    real similarity score.
+    """
+    if not index or not getattr(index, "db", None):
+        return []
+
+    needle = f"%{query.strip()}%"
+    where = [
+        "(lower(name) LIKE lower(?) OR lower(description) LIKE lower(?))"
+    ]
+    params: List[Any] = [needle, needle]
+    if category:
+        where.append("category = ?")
+        params.append(category)
+    if server:
+        where.append("server = ?")
+        params.append(server)
+
+    sql = (
+        "SELECT name, description, category, server "
+        "FROM tools WHERE " + " AND ".join(where) + " LIMIT ?"
+    )
+    params.append(max(1, top_k * 3))
+
+    rows = index.db.execute(sql, params).fetchall()
+    q_lower = query.strip().lower()
+
+    scored: List[Dict[str, Any]] = []
+    for row in rows:
+        name_lower = (row["name"] or "").lower()
+        desc_lower = (row["description"] or "").lower()
+        if q_lower in name_lower:
+            confidence = 0.6
+        elif q_lower in desc_lower:
+            confidence = 0.4
+        else:
+            # Matched via per-token LIKE but not a direct substring — neutral score
+            confidence = 0.3
+        scored.append({
+            "tool": row["name"],
+            "description": row["description"],
+            "server": row["server"],
+            "category": row["category"],
+            "confidence": confidence,
+            "degraded": True,
+        })
+
+    scored.sort(key=lambda m: m["confidence"], reverse=True)
+    return scored[:top_k]
+
+
+# =============================================================================
 # MCP TOOLS - The Gateway Interface
 # =============================================================================
 
@@ -304,57 +426,100 @@ async def compass(
         Use describe() to get full schemas, execute() to run tools.
     """
     start_time = time.time()
+    trace_id = uuid.uuid4().hex[:8]
     config = get_config()
     top_k = max(1, min(10, top_k))
     min_confidence = max(0.0, min(1.0, min_confidence))
+
+    warnings: List[str] = []
+    degraded = False
+
+    logger.info(
+        f"[compass] [{trace_id}] intent={intent!r} top_k={top_k} "
+        f"category={category} server={server} min_conf={min_confidence}"
+    )
 
     # Check for sync on first call
     await maybe_startup_sync()
 
     index = await get_index()
 
-    # Search tools
-    results: List[SearchResult] = await index.search(
-        query=intent, top_k=top_k, category_filter=category, server_filter=server
-    )
+    # Search tools — on embedder/Ollama failure fall back to lexical LIKE
+    # over the existing tools table so users keep getting results.
+    results: List[SearchResult] = []
+    fallback_matches: List[Dict[str, Any]] = []
+    try:
+        results = await index.search(
+            query=intent, top_k=top_k, category_filter=category, server_filter=server
+        )
+        _mark_ollama_up()
+        # Filter by confidence
+        results = [r for r in results if r.score >= min_confidence]
+    except Exception as e:
+        _mark_ollama_down(e)
+        degraded = True
+        logger.warning(
+            f"[compass] [{trace_id}] semantic search failed ({type(e).__name__}: {e}); "
+            "falling back to lexical search"
+        )
+        warnings.append(
+            "Semantic search unavailable: Ollama is unreachable at "
+            f"{config.ollama_url}. Try: ollama serve. "
+            "Showing keyword-based results instead."
+        )
+        fallback_matches = _lexical_search_fallback(
+            index, intent, top_k, category, server
+        )
 
-    # Filter by confidence
-    results = [r for r in results if r.score >= min_confidence]
-
-    # Search chains if enabled
+    # Search chains if enabled — chain search also relies on embeddings,
+    # so a semantic outage will usually take this path down too. Don't let
+    # that kill the whole response.
     chain_matches = []
-    if include_chains and config.chain_indexing_enabled:
+    if include_chains and config.chain_indexing_enabled and not degraded:
         chain_indexer = await get_chain_indexer_instance()
         if chain_indexer:
-            chain_results = await chain_indexer.search_chains(
-                intent, top_k=3, min_confidence=min_confidence
-            )
-            for cr in chain_results:
-                chain_matches.append({
-                    "name": cr.chain.name,
-                    "tools": cr.chain.tools,
-                    "description": cr.chain.description,
-                    "confidence": float(round(cr.score, 3)),
-                    "use_count": cr.chain.use_count,
-                })
+            try:
+                chain_results = await chain_indexer.search_chains(
+                    intent, top_k=3, min_confidence=min_confidence
+                )
+                for cr in chain_results:
+                    chain_matches.append({
+                        "name": cr.chain.name,
+                        "tools": cr.chain.tools,
+                        "description": cr.chain.description,
+                        "confidence": float(round(cr.score, 3)),
+                        "use_count": cr.chain.use_count,
+                    })
+            except Exception as e:
+                logger.warning(
+                    f"[compass] [{trace_id}] chain search failed "
+                    f"({type(e).__name__}: {e}); skipping chain matches"
+                )
+                warnings.append(
+                    "Chain search skipped: embedding service unavailable."
+                )
 
     # Build response - progressive disclosure means we only return summaries
-    matches = []
-    for r in results:
-        match_data = {
-            "tool": r.tool.name,
-            "description": r.tool.description,
-            "server": r.tool.server,
-            "category": r.tool.category,
-            "confidence": float(round(r.score, 3)),
-        }
+    matches: List[Dict[str, Any]] = []
+    if fallback_matches:
+        # Lexical fallback path — fallback_matches is already shaped correctly.
+        matches = fallback_matches
+    else:
+        for r in results:
+            match_data = {
+                "tool": r.tool.name,
+                "description": r.tool.description,
+                "server": r.tool.server,
+                "category": r.tool.category,
+                "confidence": float(round(r.score, 3)),
+            }
 
-        # Only include full schema if progressive disclosure is disabled
-        if not config.progressive_disclosure:
-            match_data["parameters"] = r.tool.parameters
-            match_data["examples"] = r.tool.examples
+            # Only include full schema if progressive disclosure is disabled
+            if not config.progressive_disclosure:
+                match_data["parameters"] = r.tool.parameters
+                match_data["examples"] = r.tool.examples
 
-        matches.append(match_data)
+            matches.append(match_data)
 
     # Stats
     stats = index.get_stats()
@@ -391,6 +556,7 @@ async def compass(
             hint = f"Found {len(matches)} tools. Top: {top_name} ({matches[0]['confidence']:.0%}). Use execute() to run."
 
     response = {
+        "trace_id": trace_id,
         "matches": matches,
         "total_indexed": total_tools,
         "tokens_saved": max(0, (total_tools - len(matches)) * 500),
@@ -398,11 +564,15 @@ async def compass(
         "workflow": "compass() -> describe() -> execute()"
         if config.progressive_disclosure
         else "compass() -> execute()",
+        "degraded": degraded,
     }
 
     # Include chains if any found
     if chain_matches:
         response["chains"] = chain_matches
+
+    if warnings:
+        response["warnings"] = warnings
 
     return response
 
@@ -421,21 +591,37 @@ async def describe(tool_name: str) -> Dict[str, Any]:
     Returns:
         Full tool schema including all parameters, types, and descriptions.
     """
+    trace_id = uuid.uuid4().hex[:8]
+    logger.info(f"[describe] [{trace_id}] tool_name={tool_name!r}")
+
     index = await get_index()
 
-    # Try to find in index first (from manifest)
+    # Try to find in index first (from manifest).
+    # GW-B-009: trap sqlite errors so the user sees "index unhealthy" + a
+    # fallthrough to the backend lookup path instead of an opaque stack.
     if index.db:
-        cursor = index.db.execute(
-            "SELECT name, description, category, server, parameters, examples FROM tools WHERE name = ?",
-            (tool_name,),
-        )
-        row = cursor.fetchone()
+        try:
+            cursor = index.db.execute(
+                "SELECT name, description, category, server, parameters, examples FROM tools WHERE name = ?",
+                (tool_name,),
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.error(
+                f"[describe] [{trace_id}] index DB error: {type(e).__name__}: {e}"
+            )
+            _health_state["index_available"] = False
+            _health_state["last_index_error"] = f"{type(e).__name__}: {e}"
+            row = None
+        else:
+            _health_state["index_available"] = True
 
         if row:
             params = json.loads(row["parameters"]) if row["parameters"] else {}
             examples = json.loads(row["examples"]) if row["examples"] else []
 
             return {
+                "trace_id": trace_id,
                 "tool": row["name"],
                 "description": row["description"],
                 "server": row["server"],
@@ -449,15 +635,29 @@ async def describe(tool_name: str) -> Dict[str, Any]:
     manager = await get_backends()
     schema = manager.get_tool_schema(tool_name)
     if schema:
-        return {
+        response: Dict[str, Any] = {
+            "trace_id": trace_id,
             **schema,
             "hint": f"Use execute('{tool_name}', {{...}}) to run this tool.",
         }
+        if not _health_state.get("index_available", True):
+            response["warnings"] = [
+                "Index database unhealthy — served schema from backend directly. "
+                "Try compass_sync(force=True) to rebuild the index."
+            ]
+        return response
 
-    return {
+    response = {
+        "trace_id": trace_id,
         "error": f"Tool not found: {tool_name}",
         "hint": "Use compass() to search for available tools.",
     }
+    if not _health_state.get("index_available", True):
+        response["warnings"] = [
+            "Index database unhealthy — lookup may be incomplete. "
+            "Try compass_sync(force=True) to rebuild the index."
+        ]
+    return response
 
 
 @mcp.tool()
@@ -478,6 +678,8 @@ async def execute(
         The tool's response or an error message.
     """
     start_time = time.time()
+    trace_id = uuid.uuid4().hex[:8]
+    logger.info(f"[execute] [{trace_id}] tool_name={tool_name!r}")
 
     if arguments is None:
         arguments = {}
@@ -507,7 +709,11 @@ async def execute(
                         latency_ms=latency_ms,
                         error_message=f"Failed to connect to backend: {server_name}",
                     )
+                logger.warning(
+                    f"[execute] [{trace_id}] backend connect failed: {server_name}"
+                )
                 return {
+                    "trace_id": trace_id,
                     "success": False,
                     "error": f"Failed to connect to backend: {server_name}",
                     "hint": "Check that the backend server is configured correctly.",
@@ -542,6 +748,18 @@ async def execute(
             arguments=arguments,
         )
 
+    # GW-B-003: stamp trace_id into both success and failure envelopes so the
+    # user can paste it into a bug report.
+    if isinstance(result, dict):
+        result.setdefault("trace_id", trace_id)
+        if not success:
+            logger.warning(
+                f"[execute] [{trace_id}] tool={tool_name!r} failed: {error_msg}"
+            )
+        else:
+            logger.info(
+                f"[execute] [{trace_id}] tool={tool_name!r} ok in {latency_ms:.1f}ms"
+            )
     return result
 
 
@@ -578,7 +796,11 @@ async def compass_status() -> Dict[str, Any]:
     index_stats = index.get_stats()
     backend_stats = manager.get_stats()
 
+    trace_id = uuid.uuid4().hex[:8]
+    logger.info(f"[compass_status] [{trace_id}]")
+
     response = {
+        "trace_id": trace_id,
         "index": {
             "total_tools": index_stats.get("total_tools", 0),
             "by_category": index_stats.get("by_category", {}),
@@ -591,6 +813,19 @@ async def compass_status() -> Dict[str, Any]:
             "embedding_model": config.embedding_model,
             "analytics_enabled": config.analytics_enabled,
             "chain_indexing_enabled": config.chain_indexing_enabled,
+        },
+        # GW-B-001 / GW-B-009: expose degraded-mode flags so users / operators
+        # can tell at a glance when compass() is serving lexical fallbacks or
+        # when the index DB has gone sour.
+        "health": {
+            "ollama_available": _health_state["ollama_available"],
+            "last_ollama_error": _health_state["last_ollama_error"],
+            "index_available": _health_state["index_available"],
+            "last_index_error": _health_state["last_index_error"],
+            "degraded_mode": (
+                not _health_state["ollama_available"]
+                or not _health_state["index_available"]
+            ),
         },
     }
 

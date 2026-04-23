@@ -247,6 +247,14 @@ class CompassIndex:
         """
         Load existing index from disk.
 
+        Integrity checks (IDX-B-001):
+        - Compare persisted embedding_dim to the code's EMBEDDING_DIM and
+          raise RuntimeError on mismatch, so the gateway can degrade to
+          lexical search instead of crashing searches silently with bad
+          vectors.
+        - After load, warn (don't crash) if HNSW count and DB row count
+          disagree — user sees degraded recall but the server still runs.
+
         Returns:
             True if loaded successfully, False otherwise.
         """
@@ -259,14 +267,50 @@ class CompassIndex:
             self._init_db()
             self._load_id_mapping()
 
+            # Pre-load integrity check: read persisted dim/M from index_meta.
+            cursor = self.db.execute(
+                "SELECT key, value FROM index_meta WHERE key IN ('embedding_dim', 'hnsw_m')"
+            )
+            meta = {row["key"]: row["value"] for row in cursor.fetchall()}
+            saved_dim = meta.get("embedding_dim")
+            if saved_dim is not None:
+                try:
+                    saved_dim_int = int(saved_dim)
+                except (TypeError, ValueError):
+                    saved_dim_int = None
+                if saved_dim_int is not None and saved_dim_int != EMBEDDING_DIM:
+                    msg = (
+                        f"Index file uses {saved_dim}-dim vectors but code "
+                        f"expects {EMBEDDING_DIM}. The embedding model likely "
+                        f"changed. Delete {self.index_path} and run sync to "
+                        f"rebuild."
+                    )
+                    logger.error(msg)
+                    raise RuntimeError(msg)
+
             # Load HNSW index
             self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
             self.index.load_index(str(self.index_path))
             self.index.set_ef(HNSW_EF_SEARCH)
 
+            # Post-load sanity: HNSW count vs DB mapping. A mismatch hurts
+            # recall but isn't fatal — warn and continue. Rebuild via sync
+            # will heal this.
+            hnsw_count = self.index.get_current_count()
+            db_count = len(self._id_to_name)
+            if hnsw_count != db_count:
+                logger.warning(
+                    f"Index integrity: HNSW has {hnsw_count} vectors but DB "
+                    f"has {db_count} tools. Search quality may be degraded — "
+                    f"rebuild the index to resolve."
+                )
+
             logger.info(f"Loaded index with {len(self._id_to_name)} tools")
             return True
 
+        except RuntimeError:
+            # Dim mismatch is a hard error the gateway needs to see.
+            raise
         except Exception as e:
             logger.error(f"Failed to load index: {e}")
             return False
@@ -411,13 +455,49 @@ class CompassIndex:
         cursor = self.db.execute("SELECT key, value FROM index_meta")
         stats["index_meta"] = {row["key"]: row["value"] for row in cursor.fetchall()}
 
+        # Index age + orphan counts (IDX-B-008).
+        # build_time is stored as seconds-elapsed during build, NOT a wall
+        # timestamp — so we read it as-is and expose it under last_build_at
+        # for callers that already understand the meta layout. index_age is
+        # left blank when we don't have a wall timestamp to compute against.
+        build_time_raw = stats["index_meta"].get("build_time")
+        stats["last_build_at"] = build_time_raw
+        try:
+            # If build_time happens to be a unix timestamp (future rev), this
+            # branch gives a real age. Otherwise it's a build-duration and
+            # the "age" is effectively undefined — leave as None.
+            bt = float(build_time_raw) if build_time_raw is not None else None
+            if bt is not None and bt > 1_000_000_000:  # past 2001 → unix ts
+                stats["index_age_seconds"] = max(0.0, time.time() - bt)
+            else:
+                stats["index_age_seconds"] = None
+        except (TypeError, ValueError):
+            stats["index_age_seconds"] = None
+
         # HNSW stats
         if self.index:
+            hnsw_count = self.index.get_current_count()
             stats["hnsw"] = {
-                "current_count": self.index.get_current_count(),
+                "current_count": hnsw_count,
                 "max_elements": self.index.get_max_elements(),
                 "ef": self.index.ef,
             }
+            # Orphaned vectors = HNSW has entries that aren't in the DB
+            # mapping. Clamp at 0 — DB can legitimately have rows not yet
+            # loaded into the id mapping, and we don't want a negative count
+            # confusing operators.
+            stats["orphaned_vector_count"] = max(
+                0, hnsw_count - len(self._id_to_name)
+            )
+        else:
+            stats["orphaned_vector_count"] = 0
+
+        # Embedder metrics (IDX-B-003 + IDX-B-008 surface).
+        try:
+            stats["embedder_stats"] = self.embedder.get_stats()
+        except Exception as e:  # defensive — never let stats crash
+            logger.debug(f"embedder.get_stats failed: {e}")
+            stats["embedder_stats"] = None
 
         return stats
 

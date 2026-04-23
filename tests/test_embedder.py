@@ -317,7 +317,9 @@ class TestEmbed:
             mock_client.post = AsyncMock(return_value=mock_response)
             mock_get_client.return_value = mock_client
 
-            with pytest.raises(RuntimeError, match="Embedding failed"):
+            # Stage C: retry-wrapped embedder surfaces "HTTP 500" on the final
+            # attempt. Match the status code rather than the old error string.
+            with pytest.raises(RuntimeError, match="HTTP 500"):
                 await embedder.embed("Test text")
 
 
@@ -387,8 +389,9 @@ class TestEmbedBatch:
 
         texts = ["text 1", "text 2", "text 3"]
 
-        # Mock individual embed calls
-        async def mock_embed(text):
+        # Mock individual embed calls. Accept **kwargs so the Stage C
+        # trace_id propagation doesn't break the signature.
+        async def mock_embed(text, **kwargs):
             return np.random.randn(EMBEDDING_DIM).astype(np.float32)
 
         with patch.object(embedder, "embed", new=mock_embed):
@@ -402,7 +405,7 @@ class TestEmbedBatch:
         """Should handle empty list gracefully or raise clear error."""
         embedder = Embedder()
 
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             return np.random.randn(EMBEDDING_DIM).astype(np.float32)
 
         with patch.object(embedder, "embed", new=mock_embed):
@@ -417,7 +420,7 @@ class TestEmbedBatch:
 
         call_times = []
 
-        async def mock_embed(text):
+        async def mock_embed(text, **kwargs):
             import time
 
             call_times.append(time.time())

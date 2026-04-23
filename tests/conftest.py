@@ -6,15 +6,81 @@ Based on FastMCP testing best practices:
 https://gofastmcp.com/patterns/testing
 
 Note: pythonpath is configured in pyproject.toml to allow direct imports.
+
+Fast-loop invocation — skip slow + integration tests for tight iteration:
+
+    pytest -m "not slow and not integration"
+
+Full local run (default dev profile, 50 Hypothesis examples):
+
+    pytest
+
+CI run (200 examples, strict 2s deadline):
+
+    HYPOTHESIS_PROFILE=ci pytest
+
+Nightly run (1000 examples, no deadline):
+
+    HYPOTHESIS_PROFILE=nightly pytest
+
+`pytest-timeout` is picked up automatically from pyproject.toml when
+installed. It is NOT a hard dependency — install it locally (or in CI)
+to benefit. TODO(ci-docs-site agent): add `pytest-timeout>=2.3.0` to
+[project.optional-dependencies].dev in pyproject.toml so this is always
+available. This file deliberately does not touch pyproject.toml — that
+is the ci-docs-site agent's domain.
 """
 
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
 import numpy as np
 
+from hypothesis import settings as hyp_settings, HealthCheck
+
 from config import CompassConfig, StdioBackend
 from tool_manifest import ToolDefinition
+
+
+# =============================================================================
+# Hypothesis Profiles (TST-B-005)
+# =============================================================================
+# Three profiles so dev loops stay snappy while CI gets real coverage and
+# nightly can hammer on pathological inputs. Select with the
+# HYPOTHESIS_PROFILE env var; default is "dev".
+
+hyp_settings.register_profile(
+    "dev",
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+hyp_settings.register_profile(
+    "ci",
+    max_examples=200,
+    deadline=2000,
+)
+hyp_settings.register_profile(
+    "nightly",
+    max_examples=1000,
+    deadline=None,
+)
+hyp_settings.load_profile(os.environ.get("HYPOTHESIS_PROFILE", "dev"))
+
+
+# =============================================================================
+# pytest-timeout soft import (TST-B-007)
+# =============================================================================
+# If pytest-timeout is installed, it auto-registers and reads its config
+# from pyproject.toml. We don't want the absence of the plugin to be a
+# hard import error — this makes the suite usable without it while still
+# picking up protections when it's present.
+try:  # pragma: no cover - import probe only
+    import pytest_timeout  # noqa: F401
+    _HAS_PYTEST_TIMEOUT = True
+except ImportError:  # pragma: no cover
+    _HAS_PYTEST_TIMEOUT = False
 
 
 # =============================================================================
@@ -195,9 +261,13 @@ async def test_index(temp_index_path, temp_db_path, mock_embedder, sample_tools)
 
     await index.build_index(sample_tools)
 
-    yield index
-
-    await index.close()
+    try:
+        yield index
+    finally:
+        # try/finally so KeyboardInterrupt / test timeout still releases
+        # SQLite+HNSW handles — matters on Windows where unreleased
+        # sqlite files block tmp_path cleanup. (TST-B-010)
+        await index.close()
 
 
 # =============================================================================
@@ -222,9 +292,12 @@ def test_analytics(temp_analytics_db):
         chain_min_occurrences=2,
     )
 
-    yield analytics
-
-    analytics.close()
+    try:
+        yield analytics
+    finally:
+        # See TST-B-010 — ensure the sqlite handle is released even on
+        # KeyboardInterrupt / test timeout.
+        analytics.close()
 
 
 # =============================================================================
@@ -304,8 +377,11 @@ def test_chain_indexer(mock_embedder, temp_chain_db, temp_db_dir):
                     analytics=None,
                     top_chains_cache_size=5,
                 )
-                yield indexer
-                indexer.close()
+                try:
+                    yield indexer
+                finally:
+                    # TST-B-010 — guaranteed close on interrupt/timeout.
+                    indexer.close()
 
 
 # =============================================================================
@@ -346,8 +422,11 @@ def test_sync_manager(
             index=index,
             backends=mock_backend_manager,
         )
-        yield manager
-        manager.close()
+        try:
+            yield manager
+        finally:
+            # TST-B-010 — guaranteed close on interrupt/timeout.
+            manager.close()
 
 
 # =============================================================================

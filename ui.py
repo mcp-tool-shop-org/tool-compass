@@ -150,14 +150,50 @@ def confidence_label(score: float) -> str:
         return "Low"
 
 
+def _check_ollama_banner() -> str:
+    """Return an Ollama-down banner (markdown) or empty string (MCC-B-007).
+
+    Runs a fast 2s health_check. If unreachable, surfaces a prominent banner
+    at the top of the Search tab so the user understands WHY semantic search
+    is returning poor results — rather than silently degrading.
+    """
+    try:
+        from embedder import Embedder
+
+        cfg = _config if _config is not None else load_config()
+        ollama_url = getattr(cfg, "ollama_url", "http://localhost:11434")
+        embedder = Embedder(base_url=ollama_url, timeout=2.0)
+        is_healthy = run_async(embedder.health_check())
+        run_async(embedder.close())
+        if is_healthy:
+            return ""
+        return (
+            f"⚠️ **Ollama unavailable** at {ollama_url}. "
+            "Start it with `ollama serve` to enable semantic search. "
+            "Showing keyword-based fallback results."
+        )
+    except Exception as e:
+        # Keep the banner check itself non-fatal — if probing fails, assume
+        # down and warn rather than letting the UI crash.
+        logger.debug(f"Ollama banner check failed: {e}")
+        return (
+            "⚠️ **Ollama unavailable**. Start it with `ollama serve` to enable "
+            "semantic search."
+        )
+
+
 def format_error(error: Exception, context: str = "") -> str:
     """Format error message for user display."""
     error_type = type(error).__name__
 
+    # MCC-B-008: error banners get role="alert" so screen readers announce
+    # them immediately; warning emoji gets an aria-label so it isn't read as
+    # mystery punctuation.
+    warn_icon = '<span role="img" aria-label="warning">⚠️</span>'
     if "Connection" in error_type or "refused" in str(error).lower():
-        return """
-        <div style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
-            <div style="color: #ef5350; font-weight: bold;">⚠️ Service Unavailable</div>
+        return f"""
+        <div role="alert" style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
+            <div style="color: #ef5350; font-weight: bold;">{warn_icon} Service Unavailable</div>
             <p style="color: #ccc; margin: 8px 0;">
                 Cannot connect to Ollama embeddings service. Please ensure Ollama is running.
             </p>
@@ -165,9 +201,9 @@ def format_error(error: Exception, context: str = "") -> str:
         </div>
         """
     elif "index" in str(error).lower() or "not loaded" in str(error).lower():
-        return """
-        <div style="border: 1px solid #ffb74d; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a2a1a;">
-            <div style="color: #ffb74d; font-weight: bold;">⚠️ Index Not Ready</div>
+        return f"""
+        <div role="alert" style="border: 1px solid #ffb74d; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a2a1a;">
+            <div style="color: #ffb74d; font-weight: bold;">{warn_icon} Index Not Ready</div>
             <p style="color: #ccc; margin: 8px 0;">
                 Tool index not found. Please build the index first.
             </p>
@@ -176,8 +212,8 @@ def format_error(error: Exception, context: str = "") -> str:
         """
     else:
         return f"""
-        <div style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
-            <div style="color: #ef5350; font-weight: bold;">⚠️ Error</div>
+        <div role="alert" style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
+            <div style="color: #ef5350; font-weight: bold;">{warn_icon} Error:</div>
             <p style="color: #ccc; margin: 8px 0;">{context or "An error occurred"}</p>
             <details style="color: #888; font-size: 0.85em;">
                 <summary>Technical details</summary>
@@ -275,8 +311,9 @@ def search_tools(
     for r in results:
         confidence_pct = int(r.score * 100)
         conf_label = confidence_label(r.score)
+        # MCC-B-008: brighter palette for higher contrast on the dark theme.
         confidence_color = (
-            "#81c784" if r.score > 0.7 else "#ffb74d" if r.score > 0.5 else "#9e9e9e"
+            "#a5d6a7" if r.score > 0.7 else "#ffcc80" if r.score > 0.5 else "#e0e0e0"
         )
 
         # Stars based on confidence
@@ -295,15 +332,15 @@ def search_tools(
         safe_category = html.escape(r.tool.category, quote=True)
 
         html_parts.append(f"""
-        <div style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a1a2e;">
+        <div role="article" aria-label="{safe_name_short} result" style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a1a2e;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
                 <span style="font-size: 1.1em; font-weight: bold; color: #4fc3f7;" title="{safe_name}">{safe_name_short}</span>
                 <span style="color: {confidence_color};" title="{conf_label} match ({confidence_pct}%)">{stars} {conf_label} ({confidence_pct}%)</span>
             </div>
             <p style="margin: 8px 0; color: #ccc;" title="{safe_desc}">{safe_desc_short}</p>
             <div style="display: flex; gap: 12px; font-size: 0.9em; color: #888; flex-wrap: wrap;">
-                <span>📦 {safe_server}</span>
-                <span>🏷️ {safe_category}</span>
+                <span><span role="img" aria-label="server">📦</span> {safe_server}</span>
+                <span><span role="img" aria-label="category">🏷️</span> {safe_category}</span>
             </div>
         </div>
         """)
@@ -378,8 +415,9 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
     for cr in results:
         confidence_pct = int(cr.score * 100)
         conf_label = confidence_label(cr.score)
+        # MCC-B-008: higher-contrast badge palette.
         confidence_color = (
-            "#81c784" if cr.score > 0.7 else "#ffb74d" if cr.score > 0.5 else "#9e9e9e"
+            "#a5d6a7" if cr.score > 0.7 else "#ffcc80" if cr.score > 0.5 else "#e0e0e0"
         )
         tool_flow = " → ".join([t.split(":")[-1] for t in cr.chain.tools])
         safe_chain_name = html.escape(cr.chain.name, quote=True)
@@ -389,7 +427,7 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
         safe_desc = html.escape(truncate_text(cr.chain.description or "", 100), quote=True)
 
         html_parts.append(f"""
-        <div style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a2e1a;">
+        <div role="article" aria-label="{safe_chain_name_short} workflow result" style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a2e1a;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
                 <span style="font-size: 1.1em; font-weight: bold; color: #81c784;" title="{safe_chain_name}">{safe_chain_name_short}</span>
                 <span style="color: {confidence_color};" title="{conf_label} match ({confidence_pct}%)">{conf_label} ({confidence_pct}%)</span>
@@ -833,7 +871,7 @@ def get_system_status() -> str:
         analytics = get_analytics_instance()
         hot_cache_size = len(analytics._hot_cache)
     except Exception as e:
-        analytics_status = f"⚠️ Error: {truncate_text(str(e), 50)}"
+        analytics_status = f'<span role="img" aria-label="warning">⚠️</span> Error: {truncate_text(str(e), 50)}'
 
     # Check Ollama
     ollama_status = "❓ Not checked"
@@ -975,6 +1013,17 @@ def create_ui() -> gr.Blocks:
             with gr.Tab("🔍 Search", id="search"):
                 gr.Markdown(
                     "Search tools using natural language. Describe what you want to do."
+                )
+
+                # MCC-B-007: Ollama-down banner. Empty string if Ollama is fine,
+                # actionable markdown banner if it's unreachable. The user can
+                # click Refresh to re-probe after starting Ollama.
+                ollama_banner = gr.Markdown(value=_check_ollama_banner())
+                refresh_status_btn = gr.Button(
+                    "Refresh Ollama status", size="sm", variant="secondary"
+                )
+                refresh_status_btn.click(
+                    fn=_check_ollama_banner, inputs=[], outputs=[ollama_banner]
                 )
 
                 with gr.Row():
@@ -1241,13 +1290,32 @@ def main():
         )
 
     demo = create_ui()
-    demo.launch(
-        server_name=args.host,
-        server_port=args.port,
-        share=args.share,
-        auth=auth,
-        show_error=True,
-    )
+    try:
+        demo.launch(
+            server_name=args.host,
+            server_port=args.port,
+            share=args.share,
+            auth=auth,
+            show_error=True,
+        )
+    except OSError as e:
+        # MCC-B-006: a port collision used to dump a bare traceback. Surface
+        # an actionable one-liner and exit with the argparse-style usage code
+        # so shell scripts can distinguish "user error" from "crash."
+        msg = str(e).lower()
+        if "address already in use" in msg or "eaddrinuse" in msg or e.errno in (
+            48,  # macOS
+            98,  # Linux
+            10048,  # Windows
+        ):
+            print(
+                f"Port {args.port} is already in use. Try:\n"
+                f"  python ui.py --port {args.port + 1}\n"
+                f"Or free the port and retry.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        raise
 
 
 if __name__ == "__main__":

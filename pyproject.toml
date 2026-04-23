@@ -8,7 +8,7 @@ version = "2.0.7"
 description = "Semantic MCP tool discovery gateway - find tools by intent, not memory"
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 authors = [
     { name = "mcp-tool-shop", email = "64996768+mcp-tool-shop@users.noreply.github.com" }
 ]
@@ -53,6 +53,7 @@ dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
     "pytest-cov>=4.1.0",
+    "pytest-timeout>=2.3.0",
     "hypothesis>=6.100.0",
 ]
 all = [
@@ -137,6 +138,10 @@ python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short --strict-markers -ra"
+# Default per-test timeout (TST-B-007). Thread method so even blocking C
+# extensions (hnswlib, numpy) can be interrupted.
+timeout = 30
+timeout_method = "thread"
 markers = [
     "integration: marks tests requiring external services (Ollama, backends)",
     "slow: marks tests that take a long time to run",

@@ -26,7 +26,7 @@ Findings covered:
 import asyncio
 import threading
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import numpy as np
 import pytest
