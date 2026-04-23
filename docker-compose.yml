@@ -9,7 +9,8 @@
 #   - Ollama running locally (or update OLLAMA_URL)
 #   - Run `ollama pull nomic-embed-text` first
 
-version: '3.8'
+# Note: the top-level `version:` key is obsolete in Compose v2+ and is
+# intentionally omitted (CDS-A-010).
 
 services:
   # ==========================================================================
@@ -45,7 +46,8 @@ services:
   # Optional: Ollama (if not running locally)
   # ==========================================================================
   ollama:
-    image: ollama/ollama:latest
+    # Pinned to match CI OLLAMA_VERSION — bump both in lockstep.
+    image: ollama/ollama:0.4.7
     container_name: tool-compass-ollama
     profiles:
       - with-ollama
@@ -62,12 +64,11 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    # Pull nomic-embed-text on startup
+    # Start the server, wait for it to actually accept connections, then
+    # pull the embedding model and hand off to `wait` so the container
+    # stays alive on the serve PID (replaces `tail -f /dev/null`).
     entrypoint: >
-      sh -c "ollama serve &
-             sleep 5 &&
-             ollama pull nomic-embed-text &&
-             tail -f /dev/null"
+      sh -c "ollama serve & until curl -sf http://localhost:11434/api/version > /dev/null; do sleep 1; done; ollama pull nomic-embed-text && wait"
 
   # ==========================================================================
   # Development Tools

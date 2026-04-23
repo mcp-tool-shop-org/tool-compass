@@ -4,7 +4,7 @@
 # =============================================================================
 # Stage 1: Builder
 # =============================================================================
-FROM python:3.11-slim as builder
+FROM python:3.11-slim AS builder
 
 WORKDIR /build
 
@@ -26,12 +26,12 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # =============================================================================
 # Stage 2: Production
 # =============================================================================
-FROM python:3.11-slim as production
+FROM python:3.11-slim AS production
 
 LABEL maintainer="Tool Compass <github.com/mcp-tool-shop-org/tool-compass>"
 LABEL description="Semantic search gateway for MCP tools"
 # Keep in sync with pyproject.toml [project] version
-LABEL version="2.0.3"
+LABEL version="2.0.7"
 
 # Security: Run as non-root user
 RUN groupadd -r compass && useradd -r -g compass compass
@@ -76,7 +76,7 @@ CMD ["python", "ui.py"]
 # =============================================================================
 # Stage 3: MCP Gateway (alternative entrypoint)
 # =============================================================================
-FROM production as mcp-gateway
+FROM production AS mcp-gateway
 
 # Override for HTTP mode (Fly.io / Smithery)
 ENV PORT=8080

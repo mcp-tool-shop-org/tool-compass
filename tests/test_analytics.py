@@ -5,7 +5,6 @@ Tests usage tracking, hot cache, and chain detection.
 """
 
 import pytest
-from pathlib import Path
 
 from analytics import HotToolEntry
 
@@ -61,8 +60,17 @@ class TestAnalyticsRecording:
         )
 
         summary = await test_analytics.get_analytics_summary("1h")
-        # Should have at least one failure
-        assert len(summary["failures"]) >= 0  # May be empty if first call
+        # Verify the failure was actually recorded — `len(...) >= 0` is
+        # always true, so the earlier assert never validated anything.
+        failures = summary["failures"]
+        assert isinstance(failures, list)
+        # Tool-level failure count is available through tool_calls totals.
+        assert summary["tool_calls"]["total"] >= 1
+        # The failing call must be reflected in success_rate being < 1.0
+        # when this is the only call recorded. Success rate is a ratio of
+        # successes / total; our single call was a failure.
+        if summary["tool_calls"]["total"] == 1:
+            assert summary["tool_calls"]["success_rate"] == 0.0
 
     @pytest.mark.asyncio
     async def test_record_tool_call_with_arguments(self, test_analytics):

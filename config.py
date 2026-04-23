@@ -19,9 +19,15 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Literal
 from pathlib import Path
 import json
+import logging
 import os
+import platform as _platform
+import shutil
 import sys
 import re
+import time
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -94,9 +100,30 @@ class CompassConfig:
 
     @classmethod
     def from_file(cls, path: Path) -> "CompassConfig":
-        """Load config from JSON file with variable substitution."""
-        with open(path) as f:
-            data = json.load(f)
+        """Load config from JSON file with variable substitution.
+
+        On corrupt/unreadable config (MCC-B-001), backs up the bad file
+        alongside the original and falls back to default config rather than
+        crashing startup. User gets an actionable log line with the backup
+        path and reset instructions.
+        """
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            backup_path = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
+            try:
+                shutil.copy2(path, backup_path)
+            except OSError:
+                # If even the backup copy fails (e.g. path vanished), still
+                # fall back rather than crash — the user needs a working tool.
+                backup_path = None
+            logger.error(
+                f"Config file at {path} is corrupt: {e}.\n"
+                f"Backup saved to {backup_path}.\n"
+                f"Falling back to default config. Edit {path} or delete it to reset."
+            )
+            return get_default_config()
 
         # Get defaults for variable substitution
         defaults = data.get("defaults", {})
@@ -182,7 +209,64 @@ class CompassConfig:
             "top_chains_cache_size", config.top_chains_cache_size
         )
 
+        # MCC-B-002: clamp out-of-range values rather than letting them slip
+        # through and silently produce weird search/cache behavior downstream.
+        config.validate_and_clamp()
+
         return config
+
+    def validate_and_clamp(self) -> None:
+        """Clamp config fields to safe ranges, logging each clamp.
+
+        Silent acceptance of out-of-range values was causing debugging pain
+        (e.g. negative polling intervals, hot_cache_size=0). Clamp here so
+        the surface is always sane even with a hand-edited config file.
+        """
+        # min_confidence: [0.0, 1.0]
+        if not 0.0 <= self.min_confidence <= 1.0:
+            original = self.min_confidence
+            clamped = max(0.0, min(1.0, float(self.min_confidence)))
+            logger.warning(
+                f"Config value min_confidence clamped from {original} to {clamped}"
+            )
+            self.min_confidence = clamped
+
+        # default_top_k: [1, 50]
+        if not 1 <= self.default_top_k <= 50:
+            original = self.default_top_k
+            clamped = max(1, min(50, int(self.default_top_k)))
+            logger.warning(
+                f"Config value default_top_k clamped from {original} to {clamped}"
+            )
+            self.default_top_k = clamped
+
+        # sync_polling_interval: max(0, value). 0 disables polling by design.
+        if self.sync_polling_interval < 0:
+            original = self.sync_polling_interval
+            clamped = max(0, int(self.sync_polling_interval))
+            logger.warning(
+                f"Config value sync_polling_interval clamped from {original} to {clamped}"
+            )
+            self.sync_polling_interval = clamped
+
+        # hot_cache_size: max(1, value). Zero would disable the cache silently.
+        if self.hot_cache_size < 1:
+            original = self.hot_cache_size
+            clamped = max(1, int(self.hot_cache_size))
+            logger.warning(
+                f"Config value hot_cache_size clamped from {original} to {clamped}"
+            )
+            self.hot_cache_size = clamped
+
+        # chain_detection_min_occurrences: max(2, value). Below 2, every pair
+        # of tools becomes a "chain" and the detector drowns in noise.
+        if self.chain_detection_min_occurrences < 2:
+            original = self.chain_detection_min_occurrences
+            clamped = max(2, int(self.chain_detection_min_occurrences))
+            logger.warning(
+                f"Config value chain_detection_min_occurrences clamped from {original} to {clamped}"
+            )
+            self.chain_detection_min_occurrences = clamped
 
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
@@ -423,3 +507,136 @@ def load_config() -> CompassConfig:
     if config_path.exists():
         return CompassConfig.from_file(config_path)
     return get_default_config()
+
+
+# Field-name substrings that indicate a secret — redacted in doctor() dumps.
+# No such fields exist today, but the scan is defensive in case someone adds
+# a "github_token" or "api_key" field and forgets to redact it.
+_SECRET_FIELD_HINTS = ("_token", "_key", "_secret", "_password")
+
+
+def _redact_config(cfg_dict: dict) -> dict:
+    """Walk the config dict and redact any field whose name hints at a secret."""
+
+    def walk(obj):
+        if isinstance(obj, dict):
+            redacted = {}
+            for k, v in obj.items():
+                if isinstance(k, str) and any(
+                    hint in k.lower() for hint in _SECRET_FIELD_HINTS
+                ):
+                    redacted[k] = "[REDACTED]"
+                else:
+                    redacted[k] = walk(v)
+            return redacted
+        if isinstance(obj, list):
+            return [walk(item) for item in obj]
+        return obj
+
+    return walk(cfg_dict)
+
+
+def _ollama_reachable(url: str, timeout: float = 2.0) -> bool:
+    """Quick reachability probe for the doctor dump. Never blocks > timeout."""
+    try:
+        import httpx  # local import — keeps module-level imports stable
+    except ImportError:
+        return False
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            r = client.get(f"{url.rstrip('/')}/api/tags")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+def doctor() -> dict:
+    """Produce a JSON-serializable diagnostic dump.
+
+    MCC-B-004: one-shot environment snapshot for bug reports. Captures
+    version, platform, resolved paths, file sizes, and an Ollama reachability
+    probe. Secrets are redacted defensively on field-name match. Ollama probe
+    has a hard 2s timeout so `python config.py` never hangs on a dead server.
+    """
+    # Local imports to avoid polluting the module namespace with rarely-used
+    # stdlib paths and to keep import-time cost low on the hot path.
+    from _version import __version__
+
+    # MCC-FT-002 bonus: include deprecated tool count in the diagnostic dump
+    # so bug reports surface stale tools without a separate introspection
+    # step. Defensive — tool_manifest should always import, but if it breaks
+    # we still want doctor() to succeed for the user.
+    deprecated_tools_count: Optional[int] = None
+    try:
+        from tool_manifest import get_all_tools
+
+        deprecated_tools_count = sum(
+            1 for t in get_all_tools() if t.deprecated_since is not None
+        )
+    except Exception as e:
+        logger.debug(f"doctor(): could not count deprecated tools: {e}")
+
+    cfg_path = get_config_path()
+    cfg = load_config()
+    cfg_dict = _redact_config(cfg.to_dict())
+
+    base_path = get_base_path()
+    data_dir = get_user_config_dir()
+    python_exe = get_python_executable()
+
+    index_path = Path(cfg.index_dir)
+    if not index_path.is_absolute():
+        index_path = (base_path / cfg.index_dir).resolve()
+    index_exists = index_path.exists()
+    index_size = (
+        sum(p.stat().st_size for p in index_path.rglob("*") if p.is_file())
+        if index_exists and index_path.is_dir()
+        else (index_path.stat().st_size if index_exists else 0)
+    )
+
+    # Analytics DB lives at <module_dir>/db/compass_analytics.db — matches
+    # analytics.ANALYTICS_DB_PATH. Resolve here without importing analytics
+    # to avoid dragging in sqlite3 at doctor-run time.
+    analytics_db_path = Path(__file__).parent / "db" / "compass_analytics.db"
+    analytics_exists = analytics_db_path.exists()
+    analytics_size = analytics_db_path.stat().st_size if analytics_exists else 0
+    analytics_schema_version: Optional[int] = None
+    if analytics_exists:
+        try:
+            import sqlite3
+
+            with sqlite3.connect(str(analytics_db_path)) as _db:
+                row = _db.execute(
+                    "SELECT value FROM schema_meta WHERE key = 'schema_version'"
+                ).fetchone()
+                if row:
+                    analytics_schema_version = int(row[0])
+        except Exception:
+            # Old DB without schema_meta is fine — just report unknown.
+            analytics_schema_version = None
+
+    return {
+        "version": __version__,
+        "python_version": sys.version,
+        "platform": _platform.platform(),
+        "config_path": str(cfg_path),
+        "config": cfg_dict,
+        "base_path": str(base_path),
+        "data_dir": str(data_dir),
+        "python_executable": python_exe,
+        "index_path": str(index_path),
+        "index_exists": index_exists,
+        "index_size_bytes": index_size,
+        "analytics_db_path": str(analytics_db_path),
+        "analytics_exists": analytics_exists,
+        "analytics_size_bytes": analytics_size,
+        "analytics_schema_version": analytics_schema_version,
+        "ollama_url": cfg.ollama_url,
+        "ollama_reachable": _ollama_reachable(cfg.ollama_url),
+        "deprecated_tools": deprecated_tools_count,
+    }
+
+
+if __name__ == "__main__":
+    # Human-runnable diagnostic dump — `python config.py` for bug reports.
+    print(json.dumps(doctor(), indent=2, default=str))

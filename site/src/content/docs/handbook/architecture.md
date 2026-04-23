@@ -26,6 +26,56 @@ Tool Compass uses three components working together:
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Component graph
+
+The runtime wires together five long-lived singletons. `Gateway` is the
+top-level coordinator that every MCP tool call passes through; it delegates
+to the index/backend/analytics subsystems.
+
+```mermaid
+graph TD
+    Embedder[Embedder<br/>nomic-embed-text]
+    Index[CompassIndex<br/>HNSW + SQLite]
+    Sync[SyncManager]
+    Backends[BackendManager]
+    Chains[ChainIndexer]
+    Analytics[CompassAnalytics]
+    Gateway[Gateway<br/>MCP entrypoint]
+
+    Embedder --> Index
+    Backends --> Sync
+    Sync --> Index
+    Index --> Gateway
+    Backends --> Gateway
+    Chains --> Gateway
+    Analytics --> Gateway
+```
+
+> If your Starlight renderer doesn't have Mermaid wired, the block above
+> renders as plain text — the labels still read as a component list.
+
+## Request sequence
+
+What actually happens when a client calls `compass("generate an image")`:
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Gateway
+    participant Index as CompassIndex
+    participant Embed as Embedder
+    participant Ollama
+
+    Client->>Gateway: compass(intent)
+    Gateway->>Index: search(intent, top_k)
+    Index->>Embed: embed_query(intent)
+    Embed->>Ollama: POST /api/embeddings
+    Ollama-->>Embed: 768-dim vector
+    Embed-->>Index: vector
+    Index-->>Gateway: top-k tool matches
+    Gateway-->>Client: {tools: [...], confidence: ...}
+```
+
 ## How it works
 
 1. **Indexing** — Tool descriptions from connected MCP servers are embedded into 768-dim vectors using Ollama's `nomic-embed-text` model

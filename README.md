@@ -18,7 +18,7 @@
 
 *95% fewer tokens. Find tools by describing what you want to do.*
 
-[Installation](#quick-start) • [Usage](#usage) • [Docker](#option-2-docker) • [Performance](#performance) • [Contributing](#contributing)
+[Installation](#quick-start) • [Usage](#usage) • [Docker](#option-2-docker) • [Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [Performance](#performance) • [Contributing](#contributing)
 
 </div>
 
@@ -48,6 +48,8 @@ Tool Compass uses **semantic search** to find relevant tools from a natural lang
 -->
 
 ## Quick Start
+
+📖 **Full documentation:** See the [Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) for installation, configuration, and architecture deep-dives.
 
 ### Option 1: Local Installation
 
@@ -91,6 +93,10 @@ docker-compose --profile with-ollama up
 
 # Access the UI at http://localhost:7860
 ```
+
+> The GHCR image (`ghcr.io/mcp-tool-shop-org/tool-compass`) supports
+> `linux/amd64` and `linux/arm64`, so the same tag runs on x86_64 servers
+> and Apple Silicon / ARM workstations.
 
 ## Features
 

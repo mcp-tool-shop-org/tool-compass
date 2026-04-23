@@ -13,13 +13,30 @@ Usage:
     python gateway.py --sync       # Sync tools from backends and rebuild index
     python gateway.py --test       # Run test queries
     python gateway.py --config     # Show current configuration
+
+HTTP mode (PORT env var set) exposes three operational endpoints:
+
+    GET /health   — Liveness probe. Always 200 while the process is up.
+                    Returns ``{status, server, version}``.
+    GET /ready    — Deep readiness probe (GW-FT-003). 200 only when the index
+                    is loaded, Ollama is reachable (or the circuit breaker is
+                    closed), and at least one configured backend is connected.
+                    Otherwise 503 with per-check detail. Result is cached for
+                    30s so load-balancer polling cannot DoS Ollama.
+    GET /metrics  — Prometheus text format (GW-FT-003). Exposes counters and
+                    gauges for search volume, Ollama availability, per-backend
+                    health, embedder p95 latency / failures, and index age /
+                    orphaned-vector counts. No ``prometheus_client`` dep — the
+                    text is emitted manually.
 """
 
 import asyncio
 import argparse
 import logging
 import json
+import sqlite3
 import time
+import uuid
 from typing import Optional, List, Dict, Any
 
 from _version import __version__
@@ -35,7 +52,7 @@ from indexer import CompassIndex, SearchResult
 from tool_manifest import ToolDefinition
 from config import load_config, CompassConfig, CONFIG_PATH
 # Use simple backend client to avoid anyio conflicts when nested inside another MCP server
-from backend_client_simple import SimpleBackendManager as BackendManager, ToolInfo
+from backend_client_simple import SimpleBackendManager as BackendManager
 from analytics import CompassAnalytics, get_analytics
 from sync_manager import SyncManager, get_sync_manager
 from chain_indexer import ChainIndexer, get_chain_indexer
@@ -65,6 +82,31 @@ _sync_manager: Optional[SyncManager] = None
 _chain_indexer: Optional[ChainIndexer] = None
 _startup_sync_done: bool = False
 
+# GW-B-001 / GW-B-009: runtime health state surfaced via compass_status().
+# The gateway degrades gracefully when a dependency is down — compass() falls
+# back to lexical search, describe() falls back to the backend path — and
+# every response envelope tells the user *why* results look different.
+_health_state: Dict[str, Any] = {
+    "ollama_available": True,
+    "last_ollama_check": 0.0,
+    "last_ollama_error": None,
+    "index_available": True,
+    "last_index_error": None,
+}
+
+
+def _mark_ollama_down(err: BaseException) -> None:
+    """Record an Ollama failure so status + hints can surface it."""
+    _health_state["ollama_available"] = False
+    _health_state["last_ollama_check"] = time.time()
+    _health_state["last_ollama_error"] = f"{type(err).__name__}: {err}"
+
+
+def _mark_ollama_up() -> None:
+    _health_state["ollama_available"] = True
+    _health_state["last_ollama_check"] = time.time()
+    _health_state["last_ollama_error"] = None
+
 # Async locks to prevent race conditions during singleton initialization
 _index_lock = asyncio.Lock()
 _backend_lock = asyncio.Lock()
@@ -87,6 +129,12 @@ async def get_index() -> CompassIndex:
 
     Uses double-checked locking pattern with asyncio.Lock to prevent
     race conditions when multiple coroutines call this concurrently.
+
+    GW-B-001: If Ollama is unreachable, we still return a usable CompassIndex
+    provided a prior ``db/compass.hnsw`` + ``db/tools.db`` exist on disk. The
+    index won't be able to service semantic ``search()`` calls, but callers
+    (compass(), describe()) can fall back to a lexical LIKE query against
+    ``index.db`` and keep serving users instead of raising opaquely.
     """
     global _compass_index
 
@@ -103,17 +151,35 @@ async def get_index() -> CompassIndex:
         index = CompassIndex()
 
         # Try to load existing index
-        if not index.load_index():
-            logger.warning("No existing index found. Building from manifest...")
+        if index.load_index():
+            _compass_index = index
+            return _compass_index
 
-            # Check Ollama
-            if not await index.embedder.health_check():
-                raise RuntimeError(
-                    "Ollama not available. Start Ollama and run: ollama pull nomic-embed-text"
-                )
+        logger.warning("No existing index found. Building from manifest...")
 
-            # Build index from static manifest
-            await index.build_index()
+        # Check Ollama — building needs embeddings, so this is non-negotiable here.
+        try:
+            ollama_ok = await index.embedder.health_check()
+        except Exception as e:
+            _mark_ollama_down(e)
+            raise RuntimeError(
+                "Ollama not available and no cached index found at "
+                f"{index.index_path}. Start Ollama (ollama serve) and run: "
+                "ollama pull nomic-embed-text"
+            ) from e
+
+        if not ollama_ok:
+            _mark_ollama_down(RuntimeError("health_check returned False"))
+            raise RuntimeError(
+                "Ollama not available and no cached index found at "
+                f"{index.index_path}. Start Ollama (ollama serve) and run: "
+                "ollama pull nomic-embed-text"
+            )
+
+        _mark_ollama_up()
+
+        # Build index from static manifest
+        await index.build_index()
 
         _compass_index = index
 
@@ -264,6 +330,77 @@ async def maybe_startup_sync():
 
 
 # =============================================================================
+# GW-B-001: lexical fallback for when semantic search is unavailable.
+# Simple LIKE query against the tools table — matches the same metadata fields
+# the semantic index covers (name, description, category, server). No FTS5
+# setup required.
+# =============================================================================
+
+
+def _lexical_search_fallback(
+    index: CompassIndex,
+    query: str,
+    top_k: int,
+    category: Optional[str],
+    server: Optional[str],
+) -> List[Dict[str, Any]]:
+    """Return up to ``top_k`` tool matches via a case-insensitive LIKE scan.
+
+    Each match is already in the response-envelope shape (``tool``,
+    ``description``, ``server``, ``category``, ``confidence``, ``degraded``).
+    Confidence is a coarse heuristic: 0.6 for name match, 0.4 for description
+    match — enough to produce a sensible ordering without pretending it's a
+    real similarity score.
+    """
+    if not index or not getattr(index, "db", None):
+        return []
+
+    needle = f"%{query.strip()}%"
+    where = [
+        "(lower(name) LIKE lower(?) OR lower(description) LIKE lower(?))"
+    ]
+    params: List[Any] = [needle, needle]
+    if category:
+        where.append("category = ?")
+        params.append(category)
+    if server:
+        where.append("server = ?")
+        params.append(server)
+
+    sql = (
+        "SELECT name, description, category, server "
+        "FROM tools WHERE " + " AND ".join(where) + " LIMIT ?"
+    )
+    params.append(max(1, top_k * 3))
+
+    rows = index.db.execute(sql, params).fetchall()
+    q_lower = query.strip().lower()
+
+    scored: List[Dict[str, Any]] = []
+    for row in rows:
+        name_lower = (row["name"] or "").lower()
+        desc_lower = (row["description"] or "").lower()
+        if q_lower in name_lower:
+            confidence = 0.6
+        elif q_lower in desc_lower:
+            confidence = 0.4
+        else:
+            # Matched via per-token LIKE but not a direct substring — neutral score
+            confidence = 0.3
+        scored.append({
+            "tool": row["name"],
+            "description": row["description"],
+            "server": row["server"],
+            "category": row["category"],
+            "confidence": confidence,
+            "degraded": True,
+        })
+
+    scored.sort(key=lambda m: m["confidence"], reverse=True)
+    return scored[:top_k]
+
+
+# =============================================================================
 # MCP TOOLS - The Gateway Interface
 # =============================================================================
 
@@ -304,57 +441,100 @@ async def compass(
         Use describe() to get full schemas, execute() to run tools.
     """
     start_time = time.time()
+    trace_id = uuid.uuid4().hex[:8]
     config = get_config()
     top_k = max(1, min(10, top_k))
     min_confidence = max(0.0, min(1.0, min_confidence))
+
+    warnings: List[str] = []
+    degraded = False
+
+    logger.info(
+        f"[compass] [{trace_id}] intent={intent!r} top_k={top_k} "
+        f"category={category} server={server} min_conf={min_confidence}"
+    )
 
     # Check for sync on first call
     await maybe_startup_sync()
 
     index = await get_index()
 
-    # Search tools
-    results: List[SearchResult] = await index.search(
-        query=intent, top_k=top_k, category_filter=category, server_filter=server
-    )
+    # Search tools — on embedder/Ollama failure fall back to lexical LIKE
+    # over the existing tools table so users keep getting results.
+    results: List[SearchResult] = []
+    fallback_matches: List[Dict[str, Any]] = []
+    try:
+        results = await index.search(
+            query=intent, top_k=top_k, category_filter=category, server_filter=server
+        )
+        _mark_ollama_up()
+        # Filter by confidence
+        results = [r for r in results if r.score >= min_confidence]
+    except Exception as e:
+        _mark_ollama_down(e)
+        degraded = True
+        logger.warning(
+            f"[compass] [{trace_id}] semantic search failed ({type(e).__name__}: {e}); "
+            "falling back to lexical search"
+        )
+        warnings.append(
+            "Semantic search unavailable: Ollama is unreachable at "
+            f"{config.ollama_url}. Try: ollama serve. "
+            "Showing keyword-based results instead."
+        )
+        fallback_matches = _lexical_search_fallback(
+            index, intent, top_k, category, server
+        )
 
-    # Filter by confidence
-    results = [r for r in results if r.score >= min_confidence]
-
-    # Search chains if enabled
+    # Search chains if enabled — chain search also relies on embeddings,
+    # so a semantic outage will usually take this path down too. Don't let
+    # that kill the whole response.
     chain_matches = []
-    if include_chains and config.chain_indexing_enabled:
+    if include_chains and config.chain_indexing_enabled and not degraded:
         chain_indexer = await get_chain_indexer_instance()
         if chain_indexer:
-            chain_results = await chain_indexer.search_chains(
-                intent, top_k=3, min_confidence=min_confidence
-            )
-            for cr in chain_results:
-                chain_matches.append({
-                    "name": cr.chain.name,
-                    "tools": cr.chain.tools,
-                    "description": cr.chain.description,
-                    "confidence": float(round(cr.score, 3)),
-                    "use_count": cr.chain.use_count,
-                })
+            try:
+                chain_results = await chain_indexer.search_chains(
+                    intent, top_k=3, min_confidence=min_confidence
+                )
+                for cr in chain_results:
+                    chain_matches.append({
+                        "name": cr.chain.name,
+                        "tools": cr.chain.tools,
+                        "description": cr.chain.description,
+                        "confidence": float(round(cr.score, 3)),
+                        "use_count": cr.chain.use_count,
+                    })
+            except Exception as e:
+                logger.warning(
+                    f"[compass] [{trace_id}] chain search failed "
+                    f"({type(e).__name__}: {e}); skipping chain matches"
+                )
+                warnings.append(
+                    "Chain search skipped: embedding service unavailable."
+                )
 
     # Build response - progressive disclosure means we only return summaries
-    matches = []
-    for r in results:
-        match_data = {
-            "tool": r.tool.name,
-            "description": r.tool.description,
-            "server": r.tool.server,
-            "category": r.tool.category,
-            "confidence": float(round(r.score, 3)),
-        }
+    matches: List[Dict[str, Any]] = []
+    if fallback_matches:
+        # Lexical fallback path — fallback_matches is already shaped correctly.
+        matches = fallback_matches
+    else:
+        for r in results:
+            match_data = {
+                "tool": r.tool.name,
+                "description": r.tool.description,
+                "server": r.tool.server,
+                "category": r.tool.category,
+                "confidence": float(round(r.score, 3)),
+            }
 
-        # Only include full schema if progressive disclosure is disabled
-        if not config.progressive_disclosure:
-            match_data["parameters"] = r.tool.parameters
-            match_data["examples"] = r.tool.examples
+            # Only include full schema if progressive disclosure is disabled
+            if not config.progressive_disclosure:
+                match_data["parameters"] = r.tool.parameters
+                match_data["examples"] = r.tool.examples
 
-        matches.append(match_data)
+            matches.append(match_data)
 
     # Stats
     stats = index.get_stats()
@@ -391,18 +571,23 @@ async def compass(
             hint = f"Found {len(matches)} tools. Top: {top_name} ({matches[0]['confidence']:.0%}). Use execute() to run."
 
     response = {
+        "trace_id": trace_id,
         "matches": matches,
         "total_indexed": total_tools,
-        "tokens_saved": (total_tools - len(matches)) * 500,
+        "tokens_saved": max(0, (total_tools - len(matches)) * 500),
         "hint": hint,
         "workflow": "compass() -> describe() -> execute()"
         if config.progressive_disclosure
         else "compass() -> execute()",
+        "degraded": degraded,
     }
 
     # Include chains if any found
     if chain_matches:
         response["chains"] = chain_matches
+
+    if warnings:
+        response["warnings"] = warnings
 
     return response
 
@@ -421,21 +606,37 @@ async def describe(tool_name: str) -> Dict[str, Any]:
     Returns:
         Full tool schema including all parameters, types, and descriptions.
     """
+    trace_id = uuid.uuid4().hex[:8]
+    logger.info(f"[describe] [{trace_id}] tool_name={tool_name!r}")
+
     index = await get_index()
 
-    # Try to find in index first (from manifest)
+    # Try to find in index first (from manifest).
+    # GW-B-009: trap sqlite errors so the user sees "index unhealthy" + a
+    # fallthrough to the backend lookup path instead of an opaque stack.
     if index.db:
-        cursor = index.db.execute(
-            "SELECT name, description, category, server, parameters, examples FROM tools WHERE name = ?",
-            (tool_name,),
-        )
-        row = cursor.fetchone()
+        try:
+            cursor = index.db.execute(
+                "SELECT name, description, category, server, parameters, examples FROM tools WHERE name = ?",
+                (tool_name,),
+            )
+            row = cursor.fetchone()
+        except sqlite3.Error as e:
+            logger.error(
+                f"[describe] [{trace_id}] index DB error: {type(e).__name__}: {e}"
+            )
+            _health_state["index_available"] = False
+            _health_state["last_index_error"] = f"{type(e).__name__}: {e}"
+            row = None
+        else:
+            _health_state["index_available"] = True
 
         if row:
             params = json.loads(row["parameters"]) if row["parameters"] else {}
             examples = json.loads(row["examples"]) if row["examples"] else []
 
             return {
+                "trace_id": trace_id,
                 "tool": row["name"],
                 "description": row["description"],
                 "server": row["server"],
@@ -449,15 +650,29 @@ async def describe(tool_name: str) -> Dict[str, Any]:
     manager = await get_backends()
     schema = manager.get_tool_schema(tool_name)
     if schema:
-        return {
+        response: Dict[str, Any] = {
+            "trace_id": trace_id,
             **schema,
             "hint": f"Use execute('{tool_name}', {{...}}) to run this tool.",
         }
+        if not _health_state.get("index_available", True):
+            response["warnings"] = [
+                "Index database unhealthy — served schema from backend directly. "
+                "Try compass_sync(force=True) to rebuild the index."
+            ]
+        return response
 
-    return {
+    response = {
+        "trace_id": trace_id,
         "error": f"Tool not found: {tool_name}",
         "hint": "Use compass() to search for available tools.",
     }
+    if not _health_state.get("index_available", True):
+        response["warnings"] = [
+            "Index database unhealthy — lookup may be incomplete. "
+            "Try compass_sync(force=True) to rebuild the index."
+        ]
+    return response
 
 
 @mcp.tool()
@@ -478,6 +693,8 @@ async def execute(
         The tool's response or an error message.
     """
     start_time = time.time()
+    trace_id = uuid.uuid4().hex[:8]
+    logger.info(f"[execute] [{trace_id}] tool_name={tool_name!r}")
 
     if arguments is None:
         arguments = {}
@@ -507,7 +724,11 @@ async def execute(
                         latency_ms=latency_ms,
                         error_message=f"Failed to connect to backend: {server_name}",
                     )
+                logger.warning(
+                    f"[execute] [{trace_id}] backend connect failed: {server_name}"
+                )
                 return {
+                    "trace_id": trace_id,
                     "success": False,
                     "error": f"Failed to connect to backend: {server_name}",
                     "hint": "Check that the backend server is configured correctly.",
@@ -518,7 +739,17 @@ async def execute(
 
     # Record analytics
     latency_ms = (time.time() - start_time) * 1000
-    success = result.get("success", True) if isinstance(result, dict) else True
+    if isinstance(result, dict):
+        if "success" in result:
+            success = result["success"]
+        else:
+            # Missing 'success' key: treat as failure to avoid masking backend errors
+            logger.warning(
+                f"Backend result for {tool_name} lacks 'success' key; defaulting to False"
+            )
+            success = False
+    else:
+        success = False
     error_msg = (
         result.get("error") if isinstance(result, dict) and not success else None
     )
@@ -532,6 +763,18 @@ async def execute(
             arguments=arguments,
         )
 
+    # GW-B-003: stamp trace_id into both success and failure envelopes so the
+    # user can paste it into a bug report.
+    if isinstance(result, dict):
+        result.setdefault("trace_id", trace_id)
+        if not success:
+            logger.warning(
+                f"[execute] [{trace_id}] tool={tool_name!r} failed: {error_msg}"
+            )
+        else:
+            logger.info(
+                f"[execute] [{trace_id}] tool={tool_name!r} ok in {latency_ms:.1f}ms"
+            )
     return result
 
 
@@ -568,7 +811,11 @@ async def compass_status() -> Dict[str, Any]:
     index_stats = index.get_stats()
     backend_stats = manager.get_stats()
 
+    trace_id = uuid.uuid4().hex[:8]
+    logger.info(f"[compass_status] [{trace_id}]")
+
     response = {
+        "trace_id": trace_id,
         "index": {
             "total_tools": index_stats.get("total_tools", 0),
             "by_category": index_stats.get("by_category", {}),
@@ -581,6 +828,19 @@ async def compass_status() -> Dict[str, Any]:
             "embedding_model": config.embedding_model,
             "analytics_enabled": config.analytics_enabled,
             "chain_indexing_enabled": config.chain_indexing_enabled,
+        },
+        # GW-B-001 / GW-B-009: expose degraded-mode flags so users / operators
+        # can tell at a glance when compass() is serving lexical fallbacks or
+        # when the index DB has gone sour.
+        "health": {
+            "ollama_available": _health_state["ollama_available"],
+            "last_ollama_error": _health_state["last_ollama_error"],
+            "index_available": _health_state["index_available"],
+            "last_index_error": _health_state["last_index_error"],
+            "degraded_mode": (
+                not _health_state["ollama_available"]
+                or not _health_state["index_available"]
+            ),
         },
     }
 
@@ -829,6 +1089,7 @@ async def compass_audit(
     }
 
     # Hot cache
+    analytics = None
     if config.analytics_enabled:
         analytics = await get_analytics_instance()
         if analytics:
@@ -883,26 +1144,30 @@ async def compass_audit(
 
     # Optionally include all tools
     if include_tools:
-        cursor = index.db.execute(
-            "SELECT name, description, category, server FROM tools ORDER BY server, category, name"
-        )
-        audit["tools"] = [
-            {
-                "name": row["name"],
-                "description": row["description"][:80] + "..."
-                if len(row["description"]) > 80
-                else row["description"],
-                "category": row["category"],
-                "server": row["server"],
-            }
-            for row in cursor.fetchall()
-        ]
+        if index.db:
+            cursor = index.db.execute(
+                "SELECT name, description, category, server FROM tools ORDER BY server, category, name"
+            )
+            audit["tools"] = [
+                {
+                    "name": row["name"],
+                    "description": row["description"][:80] + "..."
+                    if len(row["description"]) > 80
+                    else row["description"],
+                    "category": row["category"],
+                    "server": row["server"],
+                }
+                for row in cursor.fetchall()
+            ]
+        else:
+            audit["tools"] = []
+            audit["tools_note"] = "Index database not available; tool list empty."
 
     # Health check
     issues = []
     if index_stats.get("total_tools", 0) == 0:
         issues.append("No tools indexed - run compass_sync(force=True)")
-    if config.analytics_enabled and not analytics._hot_cache:
+    if config.analytics_enabled and analytics and not analytics._hot_cache:
         issues.append("Hot cache empty - will populate as tools are used")
     if not config.chain_indexing_enabled:
         issues.append("Chain indexing disabled - enable for workflow detection")
@@ -922,7 +1187,6 @@ async def compass_audit(
 
 async def sync_from_backends():
     """Sync tool definitions from live backend servers and rebuild index."""
-    import sys
 
     print("\n" + "=" * 60)
     print("  TOOL COMPASS - INDEX SYNC")
@@ -934,7 +1198,7 @@ async def sync_from_backends():
     print(f"OK ({len(config.backends)} backends configured)")
 
     # Step 2: Connect to backends
-    print(f"\n[2/4] Connecting to backends...")
+    print("\n[2/4] Connecting to backends...")
     manager = BackendManager(config)
 
     results = await manager.connect_all()
@@ -953,7 +1217,7 @@ async def sync_from_backends():
         return
 
     # Step 3: Discover tools
-    print(f"\n[3/4] Discovering tools...")
+    print("\n[3/4] Discovering tools...")
     tools = manager.get_all_tools()
     print(f"      Found {len(tools)} tools from {connected} backend(s)")
 
@@ -997,7 +1261,7 @@ async def sync_from_backends():
     print(f"OK ({len(tool_defs)} definitions)")
 
     # Step 4: Build index
-    print(f"\n[4/4] Building HNSW search index...")
+    print("\n[4/4] Building HNSW search index...")
     index = CompassIndex()
 
     # Check Ollama first
@@ -1024,7 +1288,7 @@ async def sync_from_backends():
     print("-" * 60)
     print(f"  Tools indexed: {result['tools_indexed']}")
     print(f"  Build time: {result['total_time']:.2f}s")
-    print(f"  Index ready for queries")
+    print("  Index ready for queries")
     print("-" * 60 + "\n")
 
 
@@ -1165,9 +1429,21 @@ async def async_main(args):
 
 
 def _run_http(port: int) -> None:
-    """Run the MCP gateway in HTTP mode with a /health endpoint for Fly.io."""
+    """Run the MCP gateway in HTTP mode with /health, /ready, /metrics.
+
+    SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
+    Binding to a non-loopback interface exposes RCE-class surface. The HOST env
+    var defaults to 127.0.0.1 (loopback). Only bind to public interfaces when
+    running behind an authenticated reverse proxy (Fly.io edge, etc.).
+    """
+    import os
     from starlette.routing import Route
-    from starlette.responses import JSONResponse
+    from starlette.responses import JSONResponse, PlainTextResponse
+
+    # GW-FT-003: cache /ready result for 30s so LB polling can't hammer
+    # Ollama or the backend pool. Keyed by time only — a single shared slot.
+    _ready_cache: Dict[str, Any] = {"at": 0.0, "status_code": 0, "body": None}
+    _READY_CACHE_TTL = 30.0
 
     async def health(_request):
         return JSONResponse({
@@ -1176,21 +1452,223 @@ def _run_http(port: int) -> None:
             "version": __version__,
         })
 
-    # Add health route to FastMCP's custom routes (included in streamable_http_app)
+    async def ready(_request):
+        """Deep readiness probe — 200 iff all dependencies are usable."""
+        now = time.time()
+        if _ready_cache["body"] is not None and (now - _ready_cache["at"]) < _READY_CACHE_TTL:
+            return JSONResponse(_ready_cache["body"], status_code=_ready_cache["status_code"])
+
+        checks: Dict[str, Any] = {}
+
+        # Index check — don't force a load here, just inspect current state.
+        index_ok = False
+        try:
+            idx = _compass_index
+            index_ok = idx is not None and getattr(idx, "db", None) is not None
+            checks["index"] = {"ok": index_ok}
+            if not index_ok:
+                checks["index"]["reason"] = "not loaded"
+        except Exception as e:  # defensive
+            checks["index"] = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+
+        # Ollama check — honour breaker state too. Breaker "closed" means
+        # healthy; "open" means known-down; "half_open" means probing.
+        ollama_ok = bool(_health_state.get("ollama_available"))
+        breaker_state = None
+        try:
+            idx = _compass_index
+            if idx is not None and getattr(idx, "embedder", None) is not None:
+                breaker_state = idx.embedder.circuit_breaker_state
+                if breaker_state == "closed":
+                    ollama_ok = True
+        except Exception:
+            pass
+        checks["ollama"] = {
+            "ok": ollama_ok,
+            "breaker": breaker_state,
+            "last_error": _health_state.get("last_ollama_error"),
+        }
+
+        # Backend check — at least one connected backend (and the manager exists).
+        backend_ok = False
+        connected_backends: List[str] = []
+        configured_backends: List[str] = []
+        try:
+            mgr = _backend_manager
+            if mgr is not None:
+                configured_backends = list(mgr.config.backends.keys())
+                for name in configured_backends:
+                    if mgr.is_backend_connected(name):
+                        connected_backends.append(name)
+                backend_ok = bool(connected_backends) or not configured_backends
+        except Exception as e:
+            checks["backends"] = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+        else:
+            checks["backends"] = {
+                "ok": backend_ok,
+                "connected": connected_backends,
+                "configured": configured_backends,
+            }
+            if not backend_ok:
+                checks["backends"]["reason"] = (
+                    "no backends connected" if configured_backends else "manager not initialized"
+                )
+
+        all_ok = index_ok and ollama_ok and backend_ok
+        body = {
+            "status": "ready" if all_ok else "not_ready",
+            "checks": checks,
+        }
+        status_code = 200 if all_ok else 503
+        _ready_cache["at"] = now
+        _ready_cache["status_code"] = status_code
+        _ready_cache["body"] = body
+        return JSONResponse(body, status_code=status_code)
+
+    async def metrics(_request):
+        """Prometheus text format — no prometheus_client dep."""
+
+        def _escape_label(v: str) -> str:
+            # Prometheus label-value escaping: \, ", newline.
+            return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+        lines: List[str] = []
+
+        # Search counter from analytics.
+        search_total: Optional[int] = None
+        try:
+            analytics = _analytics
+            if analytics is not None:
+                summary = await analytics.get_analytics_summary("24h")
+                # get_analytics_summary returns a dict; tolerate shape drift.
+                if isinstance(summary, dict):
+                    stats = summary.get("search_stats") or summary
+                    # Try common keys.
+                    for k in ("total_searches", "total", "count"):
+                        v = stats.get(k) if isinstance(stats, dict) else None
+                        if isinstance(v, (int, float)):
+                            search_total = int(v)
+                            break
+        except Exception as e:
+            logger.debug(f"metrics: analytics read failed: {e}")
+
+        lines.append("# HELP tool_compass_search_total Total number of compass() searches (24h window).")
+        lines.append("# TYPE tool_compass_search_total counter")
+        lines.append(f"tool_compass_search_total {search_total if search_total is not None else 0}")
+
+        # Ollama availability gauge — 1 closed, 0 otherwise.
+        ollama_val = 1 if _health_state.get("ollama_available") else 0
+        try:
+            idx = _compass_index
+            if idx is not None and getattr(idx, "embedder", None) is not None:
+                ollama_val = 1 if idx.embedder.circuit_breaker_state == "closed" else 0
+        except Exception:
+            pass
+        lines.append("# HELP tool_compass_ollama_available 1 if the Ollama circuit breaker is closed, else 0.")
+        lines.append("# TYPE tool_compass_ollama_available gauge")
+        lines.append(f"tool_compass_ollama_available {ollama_val}")
+
+        # Per-backend gauges + call counters.
+        lines.append("# HELP tool_compass_backend_up 1 if the named backend is connected, else 0.")
+        lines.append("# TYPE tool_compass_backend_up gauge")
+        lines.append("# HELP tool_compass_backend_call_total Backend tool-call counter, labelled by status.")
+        lines.append("# TYPE tool_compass_backend_call_total counter")
+        try:
+            mgr = _backend_manager
+            if mgr is not None:
+                stats = mgr.get_stats()
+                configured = stats.get("configured_backends") or list(mgr.config.backends.keys())
+                connected = set(stats.get("connected_backends") or [])
+                per_backend = stats.get("stats") or {}
+                for name in configured:
+                    label = _escape_label(name)
+                    up = 1 if name in connected else 0
+                    lines.append(f'tool_compass_backend_up{{name="{label}"}} {up}')
+                    entry = per_backend.get(name, {}) if isinstance(per_backend, dict) else {}
+                    total = int(entry.get("total_calls", 0) or 0)
+                    failed = int(entry.get("failed_calls", 0) or 0)
+                    success = max(0, total - failed)
+                    lines.append(
+                        f'tool_compass_backend_call_total{{name="{label}",status="success"}} {success}'
+                    )
+                    lines.append(
+                        f'tool_compass_backend_call_total{{name="{label}",status="error"}} {failed}'
+                    )
+        except Exception as e:
+            logger.debug(f"metrics: backend stats failed: {e}")
+
+        # Embedder p95 + failures.
+        embed_p95 = 0.0
+        embed_failures = 0
+        try:
+            idx = _compass_index
+            if idx is not None and getattr(idx, "embedder", None) is not None:
+                es = idx.embedder.get_stats()
+                embed_p95 = float(es.get("p95_latency_ms", 0.0) or 0.0)
+                embed_failures = int(es.get("total_failures", 0) or 0)
+        except Exception as e:
+            logger.debug(f"metrics: embedder stats failed: {e}")
+
+        lines.append("# HELP tool_compass_embed_latency_p95_ms p95 embed latency in ms from the bounded sample window.")
+        lines.append("# TYPE tool_compass_embed_latency_p95_ms gauge")
+        lines.append(f"tool_compass_embed_latency_p95_ms {embed_p95}")
+
+        lines.append("# HELP tool_compass_embed_failures_total Total embed failures across the process lifetime.")
+        lines.append("# TYPE tool_compass_embed_failures_total counter")
+        lines.append(f"tool_compass_embed_failures_total {embed_failures}")
+
+        # Index age + orphaned vectors.
+        index_age = 0.0
+        orphaned = 0
+        try:
+            idx = _compass_index
+            if idx is not None:
+                istats = idx.get_stats()
+                age = istats.get("index_age_seconds")
+                if isinstance(age, (int, float)):
+                    index_age = float(age)
+                orphaned = int(istats.get("orphaned_vector_count", 0) or 0)
+        except Exception as e:
+            logger.debug(f"metrics: index stats failed: {e}")
+
+        lines.append("# HELP tool_compass_index_age_seconds Seconds since the index was last built (0 if unknown).")
+        lines.append("# TYPE tool_compass_index_age_seconds gauge")
+        lines.append(f"tool_compass_index_age_seconds {index_age}")
+
+        lines.append("# HELP tool_compass_orphaned_vectors HNSW entries with no DB mapping.")
+        lines.append("# TYPE tool_compass_orphaned_vectors gauge")
+        lines.append(f"tool_compass_orphaned_vectors {orphaned}")
+
+        body = "\n".join(lines) + "\n"
+        return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+
+    # Add health / ready / metrics routes to FastMCP's custom routes
+    # (included in streamable_http_app).
     mcp._custom_starlette_routes.append(Route("/health", health, methods=["GET"]))
+    mcp._custom_starlette_routes.append(Route("/ready", ready, methods=["GET"]))
+    mcp._custom_starlette_routes.append(Route("/metrics", metrics, methods=["GET"]))
 
     # Use FastMCP's built-in HTTP runner (handles lifespan + session manager init)
     from mcp.server.transport_security import TransportSecuritySettings
-    mcp.settings.host = "0.0.0.0"
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            f"HTTP mode binding to non-loopback host {host!r}. "
+            "The gateway proxies arbitrary MCP tool calls — ensure an authenticated "
+            "reverse proxy is in front. Set HOST=127.0.0.1 for loopback-only."
+        )
+
+    mcp.settings.host = host
     mcp.settings.port = port
-    # Allow Fly.io and Smithery proxy hosts
+    # Allow Fly.io and Smithery proxy hosts (0.0.0.0 intentionally omitted — never a valid Host header)
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[
             "tool-compass-gateway.fly.dev",
             "tool-compass-gateway--mcp-tool-shop.run.tools",
             "localhost",
-            "0.0.0.0",
+            "127.0.0.1",
         ],
     )
     mcp.run(transport="streamable-http")
@@ -1264,7 +1742,8 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         import os
         port = os.environ.get("PORT")
         if port:
-            print(f"Transport: streamable-http on 0.0.0.0:{port}", file=sys.stderr)
+            host = os.environ.get("HOST", "127.0.0.1")
+            print(f"Transport: streamable-http on {host}:{port}", file=sys.stderr)
             _run_http(int(port))
         else:
             print("Transport: stdio", file=sys.stderr)

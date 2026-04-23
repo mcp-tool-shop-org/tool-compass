@@ -6,8 +6,12 @@ updates:
       interval: "monthly"
     open-pull-requests-limit: 3
     groups:
+      # Minor + patch only so breaking majors open as SEPARATE PRs.
+      # (Avoids the ollama-intern PR #4 incident where 5 breaking majors
+      # shipped bundled under a wildcard group.)
       all-pip:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -17,3 +21,4 @@ updates:
     groups:
       all-github-actions:
         patterns: ["*"]
+        update-types: ["minor", "patch"]

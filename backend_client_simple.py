@@ -16,8 +16,8 @@ import os
 import subprocess
 import sys
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime
 
 from config import CompassConfig, StdioBackend, load_config
 from _version import __version__
@@ -29,6 +29,43 @@ CONNECTION_TIMEOUT = 10
 TOOL_CALL_TIMEOUT = 15
 KEEPALIVE_INTERVAL = 30  # Ping backends every 30s to keep connection alive
 MAX_RETRIES = 2
+
+# Stream bounds — guard the gateway against a malicious/buggy backend that
+# writes a massive single line (would otherwise OOM the parent process)
+STDOUT_LINE_LIMIT = 1024 * 1024  # 1 MiB per JSON-RPC line
+STDOUT_READ_TIMEOUT = 30.0  # Per-readline timeout in seconds
+
+
+class BackendShuttingDownError(RuntimeError):
+    """Raised when a request is cancelled because the backend is shutting down.
+
+    The message is deliberately user-actionable so it surfaces cleanly through
+    any error envelope the gateway produces.
+    """
+
+
+class BackendProtocolError(RuntimeError):
+    """Raised when a backend returns a structured MCP/JSON-RPC error.
+
+    Preserves the numeric ``code``, human ``message``, and any ``data`` payload
+    from the original error so downstream logs / responses can surface the
+    structured shape instead of flattening it into a bare RuntimeError string.
+    """
+
+    def __init__(
+        self,
+        code: Optional[int],
+        message: str,
+        data: Optional[Any] = None,
+    ):
+        self.code = code
+        self.message = message
+        self.data = data
+        # Keep str(self) useful for log messages that treat it as a plain exception
+        if code is not None:
+            super().__init__(f"[code={code}] {message}")
+        else:
+            super().__init__(message)
 
 
 @dataclass
@@ -87,9 +124,132 @@ class SimpleBackendConnection:
         self._tools: List[Dict[str, Any]] = []
         self._connected = False
         self._request_id = 0
-        self._lock = asyncio.Lock()  # Serialize requests to prevent interleaving
+        # GW-FT-001: split locking model.
+        # - _write_lock serializes stdin writes ONLY (so concurrent callers
+        #   don't interleave JSON-RPC frames on stdout).
+        # - The read side runs in a dedicated _read_loop task that dispatches
+        #   responses to per-request futures in _pending. This lets N concurrent
+        #   tool calls to the same backend actually run in parallel.
+        # - _lock is preserved as an alias so disconnect() can still grab it
+        #   (external tests may also inject a mock). It maps to _write_lock.
+        self._write_lock = asyncio.Lock()
+        self._lock = self._write_lock  # Backwards-compatible alias
+        self._pending: Dict[int, "asyncio.Future[Dict[str, Any]]"] = {}
+        self._read_task: Optional[asyncio.Task] = None
         self._stats = ConnectionStats()
         self._stderr_task: Optional[asyncio.Task] = None
+        # GW-B-004: flipped by disconnect() so any in-flight _send_request
+        # can distinguish a shutdown from a genuine backend crash.
+        self._shutting_down: bool = False
+
+    def _next_id(self) -> int:
+        self._request_id += 1
+        return self._request_id
+
+    def _fail_all_pending(self, exc: BaseException) -> None:
+        """Resolve every in-flight request future with *exc*.
+
+        Called on EOF, read-loop crash, or shutdown. Safe to call repeatedly:
+        futures that are already done are skipped.
+        """
+        for fut in list(self._pending.values()):
+            if not fut.done():
+                fut.set_exception(exc)
+        self._pending.clear()
+
+    async def _read_loop(self) -> None:
+        """Read JSON-RPC responses from stdout and dispatch to _pending futures.
+
+        GW-FT-001: one task per connection. Runs until EOF, a read error, or
+        the task is cancelled during disconnect(). Malformed lines are logged
+        at WARNING and skipped (the writer-side timeout will still surface a
+        stuck request).
+        """
+        assert self._process is not None and self._process.stdout is not None
+        stdout = self._process.stdout
+        try:
+            while True:
+                try:
+                    line = await asyncio.wait_for(
+                        stdout.readline(),
+                        timeout=STDOUT_READ_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    # Idle read timeout — keep looping. Per-request deadlines
+                    # are enforced by the writer with asyncio.wait_for(fut).
+                    if self._shutting_down:
+                        break
+                    continue
+                except asyncio.LimitOverrunError as e:
+                    logger.error(
+                        f"Backend {self.name} emitted a line exceeding "
+                        f"{STDOUT_LINE_LIMIT} bytes: {e}"
+                    )
+                    self._fail_all_pending(
+                        RuntimeError(
+                            f"Backend {self.name} emitted an oversize line "
+                            f"(>{STDOUT_LINE_LIMIT} bytes)"
+                        )
+                    )
+                    break
+                except (BrokenPipeError, ConnectionResetError) as e:
+                    logger.debug(f"Read loop transport closed for {self.name}: {e}")
+                    break
+
+                if not line:
+                    # EOF — backend closed stdout.
+                    logger.debug(f"Backend {self.name} stdout EOF")
+                    break
+
+                try:
+                    msg = json.loads(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    preview = line[:120].decode("utf-8", errors="replace").rstrip()
+                    logger.warning(
+                        f"Backend {self.name} emitted non-JSON line: {preview!r}"
+                    )
+                    continue
+
+                msg_id = msg.get("id") if isinstance(msg, dict) else None
+                if msg_id is None:
+                    # Notification or malformed. Ignore — we don't route those
+                    # to the caller, but log at debug so they're not invisible.
+                    logger.debug(
+                        f"Backend {self.name} sent id-less message "
+                        f"(method={msg.get('method') if isinstance(msg, dict) else None})"
+                    )
+                    continue
+
+                fut = self._pending.pop(msg_id, None)
+                if fut is None:
+                    logger.debug(
+                        f"Backend {self.name} response for unknown id={msg_id}"
+                    )
+                    continue
+                if not fut.done():
+                    fut.set_result(msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # defensive
+            logger.error(f"Read loop for {self.name} crashed: {e}")
+            self._fail_all_pending(
+                RuntimeError(f"Backend {self.name} read loop crashed: {e}")
+            )
+            return
+        finally:
+            # Whatever exit path we take, no future should stay pending.
+            if self._shutting_down:
+                self._fail_all_pending(
+                    BackendShuttingDownError(
+                        f"Backend {self.name} is shutting down — request cancelled"
+                    )
+                )
+            else:
+                self._fail_all_pending(
+                    BackendShuttingDownError(
+                        f"Backend {self.name} connection lost — request cancelled"
+                    )
+                )
 
     async def connect(self, timeout: Optional[float] = None) -> bool:
         """Establish connection to the backend server."""
@@ -115,7 +275,7 @@ class SimpleBackendConnection:
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NO_WINDOW
 
-            # Start subprocess
+            # Start subprocess (limit caps StreamReader buffer to prevent OOM)
             self._process = await asyncio.create_subprocess_exec(
                 self.backend.command,
                 *self.backend.args,
@@ -125,10 +285,15 @@ class SimpleBackendConnection:
                 env=env,
                 cwd=self.backend.cwd,
                 creationflags=creationflags,
+                limit=STDOUT_LINE_LIMIT,
             )
 
             # Start stderr reader task (logs backend errors)
             self._stderr_task = asyncio.create_task(self._read_stderr())
+
+            # GW-FT-001: start the dedicated stdout reader BEFORE sending
+            # initialize, so its response can be dispatched to our future.
+            self._read_task = asyncio.create_task(self._read_loop())
 
             # Initialize MCP session with timeout
             init_result = await asyncio.wait_for(
@@ -141,7 +306,20 @@ class SimpleBackendConnection:
             )
 
             if "error" in init_result:
-                raise RuntimeError(f"Initialize failed: {init_result['error']}")
+                # GW-B-006: preserve the structured MCP error shape
+                err = init_result["error"]
+                if isinstance(err, dict):
+                    code = err.get("code")
+                    message = err.get("message") or str(err)
+                    data = err.get("data")
+                    logger.error(
+                        f"Backend {self.name} initialize failed: "
+                        f"code={code} message={message}"
+                    )
+                    raise BackendProtocolError(code, message, data)
+                # Fallback: non-dict error payload
+                logger.error(f"Backend {self.name} initialize failed: {err}")
+                raise BackendProtocolError(None, f"Initialize failed: {err}")
 
             # Send initialized notification
             await self._send_notification("notifications/initialized")
@@ -171,35 +349,79 @@ class SimpleBackendConnection:
             return False
 
     async def disconnect(self):
-        """Close the connection gracefully."""
+        """Close the connection gracefully.
+
+        GW-B-004: Try to acquire the request lock so we don't rip the process
+        out from under an in-flight call. If the lock doesn't free within 5s
+        we proceed anyway (any in-flight request will see _shutting_down and
+        surface BackendShuttingDownError instead of a raw BrokenPipeError).
+        """
+        # Signal in-flight requests BEFORE we start tearing anything down.
+        self._shutting_down = True
         self._connected = False
 
-        # Cancel stderr reader
-        if self._stderr_task:
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-            self._stderr_task = None
+        # GW-FT-001: fail any pending futures immediately so callers stuck in
+        # asyncio.wait_for(fut) wake with BackendShuttingDownError rather than
+        # hitting their own tool timeout.
+        self._fail_all_pending(
+            BackendShuttingDownError(
+                f"Backend {self.name} is shutting down — request cancelled"
+            )
+        )
 
-        # Terminate process
-        if self._process:
-            try:
-                # Try graceful shutdown first
-                if self._process.stdin:
-                    self._process.stdin.close()
-                self._process.terminate()
+        # Best-effort: wait for any in-flight writer to release the write lock.
+        lock_acquired = False
+        try:
+            await asyncio.wait_for(self._write_lock.acquire(), timeout=5.0)
+            lock_acquired = True
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"Disconnect of {self.name}: write lock held after 5s — "
+                "terminating anyway; in-flight request will surface as "
+                "BackendShuttingDownError"
+            )
+
+        try:
+            # Cancel stderr reader
+            if self._stderr_task:
+                self._stderr_task.cancel()
                 try:
-                    await asyncio.wait_for(self._process.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    self._process.kill()
-                    await self._process.wait()
-            except Exception as e:
-                logger.debug(f"Error during disconnect of {self.name}: {e}")
-            self._process = None
+                    await self._stderr_task
+                except asyncio.CancelledError:
+                    pass
+                self._stderr_task = None
 
-        self._tools = []
+            # Cancel stdout reader (GW-FT-001)
+            if self._read_task:
+                self._read_task.cancel()
+                try:
+                    await self._read_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as e:
+                    logger.debug(f"Read task cleanup for {self.name}: {e}")
+                self._read_task = None
+
+            # Terminate process
+            if self._process:
+                try:
+                    # Try graceful shutdown first
+                    if self._process.stdin:
+                        self._process.stdin.close()
+                    self._process.terminate()
+                    try:
+                        await asyncio.wait_for(self._process.wait(), timeout=2.0)
+                    except asyncio.TimeoutError:
+                        self._process.kill()
+                        await self._process.wait()
+                except Exception as e:
+                    logger.debug(f"Error during disconnect of {self.name}: {e}")
+                self._process = None
+
+            self._tools = []
+        finally:
+            if lock_acquired:
+                self._write_lock.release()
 
     async def _read_stderr(self):
         """Read and log stderr from the backend process."""
@@ -218,41 +440,80 @@ class SimpleBackendConnection:
             logger.debug(f"Stderr reader error for {self.name}: {e}")
 
     async def _send_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Send a JSON-RPC request and wait for response."""
-        async with self._lock:  # Serialize requests
-            if not self._process or not self._process.stdin or not self._process.stdout:
-                raise RuntimeError("Not connected")
+        """Send a JSON-RPC request and wait for its response.
 
-            if self._process.returncode is not None:
-                raise RuntimeError(f"Process exited with code {self._process.returncode}")
+        GW-FT-001: only the write side is serialized (``_write_lock``). The
+        response arrives asynchronously via ``_read_loop`` which sets
+        ``_pending[request_id]``. Concurrent requests to the same backend no
+        longer serialize on the read side.
 
-            self._request_id += 1
+        GW-B-004: ``_shutting_down`` is still honoured at every boundary, and
+        ``disconnect()`` fails every pending future with
+        ``BackendShuttingDownError``.
+        """
+        if self._shutting_down:
+            raise BackendShuttingDownError(
+                f"Backend {self.name} is shutting down — request cancelled"
+            )
+        if not self._process or not self._process.stdin or not self._process.stdout:
+            raise RuntimeError("Not connected")
+        if self._process.returncode is not None:
+            raise RuntimeError(
+                f"Process exited with code {self._process.returncode}"
+            )
+
+        loop = asyncio.get_running_loop()
+        fut: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
+
+        async with self._write_lock:
+            # Re-check shutdown after acquiring the write lock — disconnect()
+            # may have run while we were queued.
+            if self._shutting_down:
+                raise BackendShuttingDownError(
+                    f"Backend {self.name} is shutting down — request cancelled"
+                )
+
+            request_id = self._next_id()
+            self._pending[request_id] = fut
             request = {
                 "jsonrpc": "2.0",
-                "id": self._request_id,
+                "id": request_id,
                 "method": method,
-                "params": params
+                "params": params,
             }
-
-            # Write request
             request_str = json.dumps(request) + "\n"
-            self._process.stdin.write(request_str.encode("utf-8"))
-            await self._process.stdin.drain()
-
-            # Read response - handle multiple lines (some responses are multi-line)
-            response_line = await self._process.stdout.readline()
-            if not response_line:
-                raise RuntimeError("No response from backend (EOF)")
-
             try:
-                return json.loads(response_line.decode("utf-8"))
-            except json.JSONDecodeError as e:
-                logger.error(f"Invalid JSON from {self.name}: {response_line[:100]}")
-                raise RuntimeError(f"Invalid JSON response: {e}")
+                self._process.stdin.write(request_str.encode("utf-8"))
+                await self._process.stdin.drain()
+            except (BrokenPipeError, ConnectionResetError) as e:
+                # Pull our future back off the pending map before surfacing.
+                self._pending.pop(request_id, None)
+                if self._shutting_down:
+                    raise BackendShuttingDownError(
+                        f"Backend {self.name} is shutting down — request cancelled"
+                    ) from e
+                raise
+
+        # Now wait for the read loop to resolve our future. We don't hold the
+        # write lock here, so other callers can send their own requests in
+        # parallel.
+        try:
+            return await asyncio.wait_for(fut, timeout=STDOUT_READ_TIMEOUT)
+        except asyncio.TimeoutError:
+            if self._shutting_down:
+                raise BackendShuttingDownError(
+                    f"Backend {self.name} is shutting down — request cancelled"
+                )
+            raise RuntimeError(
+                f"Backend {self.name} did not respond within {STDOUT_READ_TIMEOUT}s"
+            )
+        finally:
+            # Whether we succeeded or timed out, don't leak an entry.
+            self._pending.pop(request_id, None)
 
     async def _send_notification(self, method: str, params: Optional[Dict[str, Any]] = None):
         """Send a JSON-RPC notification (no response expected)."""
-        async with self._lock:
+        async with self._write_lock:
             if not self._process or not self._process.stdin:
                 raise RuntimeError("Not connected")
 
@@ -336,7 +597,7 @@ class SimpleBackendConnection:
             self._stats.record_call(False, latency_ms)
             return {"success": False, "error": "Invalid response from backend"}
 
-        except Exception as e:
+        except Exception:
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             self._stats.record_call(False, latency_ms)
 

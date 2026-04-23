@@ -5,6 +5,58 @@ All notable changes to Tool Compass will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0] - 2026-04-23
+
+Dogfood swarm release: Stage A bug/security health pass + Stage B/C humanization
++ Feature Pass. Shipcheck 17/17 retained.
+
+### Added
+- **Per-backend stdout reader** — isolated log streams per MCP backend so a noisy
+  child process can't crowd out siblings in the combined view
+- **`/ready` + `/metrics` HTTP endpoints** — readiness probe + Prometheus-style
+  metrics surface for operators running the gateway behind a load balancer
+- **Embedding cache** — LRU cache in `Embedder` so repeated identical queries
+  skip the Ollama round-trip
+- **Diffing sync** — `SyncManager` now emits a structured diff (added / removed /
+  changed) instead of a full rebuild signal; downstream consumers can act on
+  partial changes
+- **`tool-compass` CLI subcommand shell** (`cli.py`) — top-level entry point now
+  dispatches to `serve` (gateway), `ui` (Gradio), `doctor` (config health),
+  `sync`, `test`, and `config`. `python gateway.py` still works unchanged.
+- **`deprecated_aliases` in tool manifest** — lets backends rename tools without
+  breaking old callers; the compass surfaces both names and marks legacy ones
+- **`make scorecard` + `make verify-scorecard`** (CDS-FT-001) — regenerate
+  SCORECARD.md from shipcheck output; CI soft-fails on drift
+- **`make dev` + `make dev-ui`** (CDS-FT-002) — one-shot install + run targets
+  for the fast local loop, with a warning if Ollama isn't reachable
+- **Nightly Hypothesis fuzz job** (TST-FT-002) — `nightly-fuzz` runs Mon/Wed/Fri
+  at 09:00 UTC in `ci.yml` (no new workflow file), auto-opens a tracking issue
+  on failure
+- **Coverage floor** (TST-FT-001) — `[tool.coverage.report] fail_under = 60`
+  and `--cov-fail-under=60` in `make test`; conservative first gate
+- **Architecture Mermaid diagrams** (CDS-FT-005) — component graph + request
+  sequence diagrams in `site/src/content/docs/handbook/architecture.md`
+
+### Changed
+- `tool-compass` console script now targets `cli:main` (was `gateway:main`).
+  `python gateway.py` remains fully supported for direct invocation.
+- Wheel bundle includes `cli.py`
+
+### Fixed (Stage A — 23 HIGH bug/security)
+- Misc security, bug, and error-shape fixes surfaced by the health pass
+
+### Humanized (Stage B/C — 15 HIGH + 14 MED)
+- **Ollama-down lexical fallback** — compass returns keyword matches when the
+  embedding backend is unreachable, with a clear degraded-mode marker
+- **`trace_id` correlation** — every request carries a trace ID end-to-end for
+  log stitching
+- **Circuit breaker** on the embedder — opens after N consecutive failures,
+  half-opens after a cooldown
+- **Corrupt-config recovery** — malformed `compass_config.json` no longer
+  crashes startup; loader falls back to defaults with a warning
+- **`tool-compass doctor`** — diagnoses Ollama reachability, index presence,
+  backend health, and prints actionable fixes
+
 ## [2.0.7] - 2026-03-25
 
 ### Added
@@ -182,7 +234,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 | 1.1.0 | 2026-01-16 | Workflows, analytics, sync |
 | 1.0.0 | 2026-01-15 | Initial release |
 
-[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.3...HEAD
+[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.2.0...HEAD
+[2.2.0]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.7...v2.2.0
+[2.0.7]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.6...v2.0.7
+[2.0.6]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.3...v2.0.6
 [2.0.3]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.2...v2.0.3
 [2.0.2]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.1...v2.0.2
 [2.0.1]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.0...v2.0.1

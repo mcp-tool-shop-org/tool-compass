@@ -5,7 +5,6 @@ Tests tool definitions, filtering, and export functionality.
 """
 
 import json
-from pathlib import Path
 
 from tool_manifest import (
     ToolDefinition,

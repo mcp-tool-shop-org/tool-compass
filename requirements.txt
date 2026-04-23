@@ -3,7 +3,7 @@
 
 # Core
 hnswlib>=0.8.0,<1.0.0
-numpy>=1.26.0,<3.0.0
+numpy>=1.26.0,<2.2.0  # <2.2.0: numpy 2.2+ wheels SIGILL on Python 3.13 GitHub runners (AVX-512 gate)
 httpx>=0.27.0,<1.0.0
 
 # MCP Protocol

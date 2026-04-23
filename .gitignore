@@ -102,3 +102,8 @@ site/node_modules/
 # forkctl / polyglot-mcp scratch
 .artifact/
 .polyglot-cache.json
+
+# repo-knowledge scratch (init creates these; don't commit)
+rk.config.json
+data/knowledge.db*
+data/artifacts/

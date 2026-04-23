@@ -161,6 +161,26 @@ class SyncManager:
 
             return results
 
+    def _get_backend_tool_names(self, backend_name: str) -> set:
+        """Return set of currently-indexed tool names for a backend.
+
+        Used by diffing sync (IDX-FT-004) to compute which tools disappeared
+        since the last rebuild so we can remove them instead of only adding.
+        """
+        names: set = set()
+        idx_db = getattr(self.index, "db", None)
+        if idx_db is None:
+            return names
+        try:
+            cursor = idx_db.execute(
+                "SELECT name FROM tools WHERE server = ?", (backend_name,)
+            )
+            for row in cursor.fetchall():
+                names.add(row["name"])
+        except Exception as e:
+            logger.debug(f"_get_backend_tool_names({backend_name}) failed: {e}")
+        return names
+
     async def _rebuild_for_backends(self, backend_names: List[str]):
         """Rebuild index for specified backends."""
         from tool_manifest import ToolDefinition
@@ -169,17 +189,44 @@ class SyncManager:
         all_tools = []
         db = self._get_db()
 
+        # Per-backend diff counters (IDX-FT-004).
+        diff_stats: Dict[str, Dict[str, int]] = {}
+
         for backend_name in backend_names:
             tools = self.backends.get_backend_tools(backend_name)
             if not tools:
                 continue
 
+            # Diff: old names in this backend vs. new names — anything
+            # that vanished is removed from the index (IDX-FT-004).
+            old_names = self._get_backend_tool_names(backend_name)
+            new_names = {t.qualified_name for t in tools}
+            removed = old_names - new_names
+            removed_count = 0
+            for name in removed:
+                ok = await self.index.remove_tool(name)
+                if ok:
+                    removed_count += 1
+
+            diff_stats[backend_name] = {
+                "added": len(new_names - old_names),
+                "updated": len(new_names & old_names),
+                "removed": removed_count,
+            }
+
             # Convert to ToolDefinition format
             for tool in tools:
-                # Parse server and name
+                # Parse server from the qualified name ("server:tool").
+                # The short name is intentionally dropped here — ToolDefinition.name
+                # below uses tool.qualified_name (fully-qualified) to keep names
+                # globally unique across backends.
                 if ":" in tool.qualified_name:
-                    server, name = tool.qualified_name.split(":", 1)
+                    server, _short_name = tool.qualified_name.split(":", 1)
                 else:
+                    # No colon — fall back to the backend-reported server.
+                    # Note: tool.qualified_name is unqualified in this case; we
+                    # still use it as ToolDefinition.name below, accepting that
+                    # a server-less name can collide with tools from other backends.
                     server = tool.server
 
                 # Extract parameters from schema
@@ -221,6 +268,13 @@ class SyncManager:
             )
 
         db.commit()
+
+        # Per-backend diff summary (IDX-FT-004).
+        for bname, stats in diff_stats.items():
+            logger.info(
+                f"Sync diff for {bname}: {stats['added']} added, "
+                f"{stats['updated']} updated, {stats['removed']} removed"
+            )
 
         # Rebuild index with new tools
         if all_tools:
@@ -271,6 +325,22 @@ class SyncManager:
             all_tools = []
             db = self._get_db()
 
+            # Pre-compute the OLD name-set across ALL backends so we can log
+            # the diff after build_index clears the old rows (IDX-FT-004).
+            # build_index already truncates the tools table, so we capture
+            # baseline before it runs.
+            old_all_names: set = set()
+            idx_db = getattr(self.index, "db", None)
+            if idx_db is not None:
+                try:
+                    cursor = idx_db.execute("SELECT name, server FROM tools")
+                    old_all_names = {row["name"] for row in cursor.fetchall()}
+                except Exception as e:
+                    logger.debug(f"full_sync: baseline fetch failed: {e}")
+
+            # Per-backend diff counters (IDX-FT-004).
+            diff_stats: Dict[str, Dict[str, int]] = {}
+
             for backend_name, connected in connect_results.items():
                 if not connected:
                     logger.warning(f"Skipping {backend_name} - not connected")
@@ -280,10 +350,22 @@ class SyncManager:
                 if not tools:
                     continue
 
+                # Diff this backend's old vs. new names.
+                old_names = self._get_backend_tool_names(backend_name)
+                new_names = {t.qualified_name for t in tools}
+                diff_stats[backend_name] = {
+                    "added": len(new_names - old_names),
+                    "updated": len(new_names & old_names),
+                    "removed": len(old_names - new_names),
+                }
+
                 # Convert to ToolDefinition
                 for tool in tools:
+                    # See sibling comment in _rebuild_for_backends — short name
+                    # is intentionally dropped; ToolDefinition.name uses the
+                    # qualified form.
                     if ":" in tool.qualified_name:
-                        server, name = tool.qualified_name.split(":", 1)
+                        server, _short_name = tool.qualified_name.split(":", 1)
                     else:
                         server = tool.server
 
@@ -325,6 +407,21 @@ class SyncManager:
                 )
 
             db.commit()
+
+            # Emit diff summary per backend (IDX-FT-004).
+            for bname, stats in diff_stats.items():
+                logger.info(
+                    f"Sync diff for {bname}: {stats['added']} added, "
+                    f"{stats['updated']} updated, {stats['removed']} removed"
+                )
+            # Also note globally removed tools (backends that vanished entirely).
+            new_all_names = {t.name for t in all_tools}
+            globally_removed = old_all_names - new_all_names
+            if globally_removed:
+                logger.info(
+                    f"Full sync will drop {len(globally_removed)} tool(s) "
+                    f"from removed/disconnected backends"
+                )
 
             # Rebuild entire index
             if all_tools:
@@ -381,12 +478,21 @@ class SyncManager:
 
         async def poll_loop():
             while True:
+                # Explicit cancellation check at loop top so we exit promptly
+                # when stop_background_polling is called.
+                if asyncio.current_task().cancelled():
+                    return
                 await asyncio.sleep(interval_seconds)
                 try:
-                    results = await self.sync_if_needed()
+                    # Shield the critical section: once we've taken the sync
+                    # lock, a cancel shouldn't leave the lock in a weird state
+                    # or abort a partial rebuild.
+                    results = await asyncio.shield(self.sync_if_needed())
                     synced = [k for k, v in results.items() if v == "synced"]
                     if synced:
                         logger.info(f"Background sync completed for: {synced}")
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.error(f"Background sync error: {e}")
 

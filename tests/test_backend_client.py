@@ -6,7 +6,6 @@ Tests MCP backend connections, tool discovery, and execution.
 
 import pytest
 import asyncio
-from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
 
 from backend_client_mcp import (
@@ -125,20 +124,25 @@ class TestBackendConnection:
         """Should connect successfully with mocked MCP."""
         conn = BackendConnection("test", mock_backend)
 
+        # Build proper tool mocks. NOTE: `name` is a RESERVED kwarg on Mock
+        # (it names the mock itself, NOT the `.name` attribute). Set `.name`
+        # on the instance instead, otherwise `.name` would return a nested
+        # Mock object and the parsing code would silently coerce garbage.
+        mock_tool1 = Mock()
+        mock_tool1.name = "tool1"
+        mock_tool1.description = "Tool 1"
+        mock_tool1.inputSchema = {}
+
+        mock_tool2 = Mock()
+        mock_tool2.name = "tool2"
+        mock_tool2.description = "Tool 2"
+        mock_tool2.inputSchema = {"type": "object"}
+
         # Mock the stdio_client context manager
         mock_session = AsyncMock()
         mock_session.initialize = AsyncMock()
         mock_session.list_tools = AsyncMock(
-            return_value=Mock(
-                tools=[
-                    Mock(name="tool1", description="Tool 1", inputSchema={}),
-                    Mock(
-                        name="tool2",
-                        description="Tool 2",
-                        inputSchema={"type": "object"},
-                    ),
-                ]
-            )
+            return_value=Mock(tools=[mock_tool1, mock_tool2])
         )
 
         with patch("backend_client_mcp.stdio_client") as mock_stdio:
@@ -155,7 +159,13 @@ class TestBackendConnection:
 
                 await conn.connect(timeout=5.0)
 
-        # Note: This test verifies the structure, actual connection requires real MCP server
+        # Real assertions on parsed tool list — earlier revisions of this test
+        # only ran the code path but never verified the tools were parsed
+        # correctly, so a bug in list-tool parsing would have gone unnoticed.
+        assert len(conn._tools) == 2
+        names = [t.name for t in conn._tools]
+        assert "tool1" in names
+        assert "tool2" in names
 
     @pytest.mark.asyncio
     async def test_connect_already_connected(self, mock_backend):
@@ -762,8 +772,14 @@ class TestBackendManagerEdgeCases:
 
                 results = await manager.connect_all()
 
-                # One success, one failure
-                assert sum(1 for v in results.values() if v) >= 0
+                # `sum(...) >= 0` is tautological. Assert the exact shape:
+                # both configured backends appear in results, exactly one
+                # succeeded and exactly one failed (per the side_effect).
+                assert set(results.keys()) == {"backend1", "backend2"}
+                successes = sum(1 for v in results.values() if v)
+                failures = sum(1 for v in results.values() if not v)
+                assert successes == 1
+                assert failures == 1
 
     @pytest.mark.asyncio
     async def test_connect_backend_creates_connection(self, config_with_backends):

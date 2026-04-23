@@ -3,42 +3,34 @@
 > Score a repo before remediation. Fill this out first, then use SHIP_GATE.md to fix.
 
 **Repo:** tool-compass
-**Date:** 2026-02-27
+**Date:** 2026-04-23
+**Version:** 2.0.7
 **Type tags:** [pypi] [mcp] [cli]
 
-## Pre-Remediation Assessment
+## Current Assessment
+
+Per-category scores below are placeholders — regenerate after the current
+dogfood swarm lands by running `npx @mcptoolshop/shipcheck audit` and copying
+the hard-gate totals verbatim. Do NOT fabricate numbers.
 
 | Category | Score | Notes |
 |----------|-------|-------|
-| A. Security | 9/10 | Extensive SECURITY.md but non-standard email, no inline data scope in README |
-| B. Error Handling | 10/10 | Structured results, graceful degradation, exit codes, SQLite auto-recreate |
-| C. Operator Docs | 9/10 | README, CHANGELOG, LICENSE, --help all present but no verify script |
-| D. Shipping Hygiene | 8/10 | CI has coverage + pip-audit + Docker, but no Makefile verify target |
-| E. Identity (soft) | 10/10 | Logo, translations, landing page, GitHub metadata |
-| **Overall** | **46/50** | |
+| A. Security | TBD — regenerate post-swarm via `npx @mcptoolshop/shipcheck audit` | SECURITY.md present; pip-audit runs warn-only pending CVE baseline |
+| B. Error Handling | TBD — regenerate post-swarm via `npx @mcptoolshop/shipcheck audit` | Structured results, graceful degradation, exit codes |
+| C. Operator Docs | TBD — regenerate post-swarm via `npx @mcptoolshop/shipcheck audit` | README, CHANGELOG, LICENSE, Makefile `verify` present |
+| D. Shipping Hygiene | TBD — regenerate post-swarm via `npx @mcptoolshop/shipcheck audit` | CI consolidated to 2 workflows; pytest config consolidated into pyproject.toml |
+| E. Identity (soft) | TBD — regenerate post-swarm via `npx @mcptoolshop/shipcheck audit` | Logo, landing page, GitHub metadata present; translations lag main by one version (see below) |
+| **Overall** | TBD | Regenerate after swarm merges |
 
-## Key Gaps
+## Known Gaps (as of 2026-04-23)
 
-1. SECURITY.md uses non-standard email address
-2. README missing inline Security & Data Scope section
-3. No Makefile with verify target
-4. Redundant h1 tag when logo already contains product name
+1. **Translation freshness** — non-English READMEs (`README.{es,fr,hi,it,ja,pt-BR,zh}.md`) are behind the current English README by at least one version; user regenerates locally via polyglot-mcp as part of the release hand-off.
+2. **pip-audit baseline** — pip-audit runs with `continue-on-error: true` until the CVE baseline is reviewed; a follow-up issue will flip it to blocking.
+3. **Ollama pin** — CI pins Ollama to a specific release but the SHA-256 field is a placeholder; fill in the real hash from the upstream `.sha256` file and drop the fallback `|| true` in the verification step.
 
-## Remediation Priority
+## Remediation History
 
-| Priority | Item | Estimated effort |
-|----------|------|-----------------|
-| 1 | Update SECURITY.md email + add data scope to README | 3 min |
-| 2 | Add Makefile with verify target | 2 min |
-| 3 | Remove redundant h1, add scorecard to README | 2 min |
-
-## Post-Remediation
-
-| Category | Before | After |
-|----------|--------|-------|
-| A. Security | 9/10 | 10/10 |
-| B. Error Handling | 10/10 | 10/10 |
-| C. Operator Docs | 9/10 | 10/10 |
-| D. Shipping Hygiene | 8/10 | 10/10 |
-| E. Identity (soft) | 10/10 | 10/10 |
-| **Overall** | 46/50 | 50/50 |
+| Date | Wave | Highlights |
+|------|------|------------|
+| 2026-02-27 | Initial polish | SECURITY.md email fix, README data scope, Makefile `verify`, h1 cleanup |
+| 2026-04-23 | Dogfood Stage A | CI workflow consolidation (2-file limit), flat-layout entry points, Dockerfile version sync, pinned Ollama install, pytest config consolidated, Makefile lint unmasked |
