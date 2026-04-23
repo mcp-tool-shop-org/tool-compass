@@ -16,7 +16,33 @@ After:  1 compass tool + 3 results = ~2,000 tokens per request
 Savings: 95%
 ```
 
-## Option 1: Local installation
+## Option 1: Install from PyPI (v2.2+)
+
+```bash
+# Prerequisites: Ollama with nomic-embed-text
+ollama pull nomic-embed-text
+
+# Install the CLI + gateway
+pip install tool-compass
+
+# Build the search index from your configured backends
+tool-compass sync
+
+# Start the MCP server (or `tool-compass serve`)
+tool-compass
+```
+
+`tool-compass` with no arguments starts the MCP server — same as the
+pre-2.2 `python gateway.py` entry point. New subcommands are available:
+
+```bash
+tool-compass search "generate an AI image" --top 3 --json
+tool-compass describe comfy:comfy_generate
+tool-compass sync --force
+tool-compass doctor              # diagnostic dump (config, Ollama probe, DB stats)
+```
+
+## Option 1b: Clone from source
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -30,14 +56,12 @@ cd tool-compass
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
+# Install dependencies (editable — gives you the `tool-compass` CLI too)
+pip install -e .[all]
 
-# Build the search index
-python gateway.py --sync
-
-# Run the MCP server
-python gateway.py
+# Build the search index and start the MCP server
+tool-compass sync
+tool-compass
 ```
 
 ## Option 2: Docker
@@ -55,22 +79,42 @@ docker-compose --profile with-ollama up
 # Access the UI at http://localhost:7860
 ```
 
-## CLI flags
+## CLI reference
 
-The gateway accepts several flags for administration tasks:
+`tool-compass` exposes both the MCP server and a set of one-shot subcommands.
+
+| Subcommand | Purpose |
+|------------|---------|
+| `tool-compass` (no args) | Start the MCP server — same as `serve` |
+| `tool-compass serve [--http]` | Start the MCP server explicitly |
+| `tool-compass search <intent> [--top N] [--json]` | One-shot semantic search |
+| `tool-compass describe <tool> [--json]` | Print a tool's schema and examples |
+| `tool-compass sync [--force]` | Rebuild the HNSW index from configured backends |
+| `tool-compass doctor` | Diagnostic dump: version, config (secrets redacted), index path + size, analytics schema version, Ollama reachability |
+
+The underlying `gateway.py` also accepts admin flags for backward compat:
 
 | Flag | Description |
 |------|-------------|
-| `--sync` | Discover tools from backend MCP servers and rebuild the HNSW index |
+| `--sync` | Same as `tool-compass sync` |
 | `--test` | Run semantic search tests to verify index quality |
-| `--config` | Display current configuration including backends and settings |
-| `--verbose` / `-v` | Enable verbose (DEBUG-level) output |
+| `--config` | Display current configuration |
+| `--verbose` / `-v` | Enable DEBUG-level output |
 
-Running `python gateway.py` with no flags starts the MCP server in stdio mode by default. Set the `PORT` environment variable to switch to HTTP (streamable-http) transport for remote deployment (e.g., Fly.io):
+## HTTP mode
+
+Set `PORT` to switch from stdio to streamable-http transport. By default
+the server binds to `127.0.0.1` (loopback only) — set `HOST=0.0.0.0`
+**only behind an authenticated reverse proxy**:
 
 ```bash
-PORT=8080 python gateway.py
+PORT=8080 tool-compass             # stdio → streamable-http on 127.0.0.1:8080
+PORT=8080 HOST=0.0.0.0 tool-compass # exposed on all interfaces (see warnings)
 ```
+
+HTTP mode adds three routes: `/health` (liveness), `/ready` (deep probe),
+and `/metrics` (Prometheus). See [Operations](/tool-compass/handbook/operations/)
+for details.
 
 ## Fast local loop
 

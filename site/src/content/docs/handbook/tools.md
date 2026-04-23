@@ -5,9 +5,21 @@ sidebar:
   order: 2
 ---
 
+Every handler here also returns a `trace_id` (8-char hex) in its success
+and error envelopes. Use it in bug reports — the same id appears in the
+gateway log lines for that request. See the
+[Operations page](/tool-compass/handbook/operations/) for more.
+
 ## compass
 
 Semantic search for tools. Describe what you want to do and get back only the relevant tools. Also searches for matching tool chains (workflows).
+
+:::note
+When Ollama is unreachable, `compass()` falls back to SQLite `LIKE`
+lexical search over the same index. Results are marked `degraded: true`
+and the response gains a `warnings[]` array telling you what to start.
+See [Degraded modes](/tool-compass/handbook/operations/#degraded-modes).
+:::
 
 ```python
 compass(

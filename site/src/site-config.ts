@@ -9,24 +9,28 @@ export const config: SiteConfig = {
   footerText: 'MIT Licensed — built by <a href="https://github.com/mcp-tool-shop-org" style="color:var(--color-muted);text-decoration:underline">mcp-tool-shop-org</a>',
 
   hero: {
-    badge: 'MCP Gateway',
+    badge: 'MCP Gateway — v2.2',
     headline: 'Find tools by',
     headlineAccent: 'intent, not memory.',
-    description: 'Semantic search for MCP tools. Load 3 relevant tools instead of 77 — 95% fewer tokens, ~15ms latency, ~95% accuracy.',
+    description: 'Semantic search for MCP tools. 95% fewer tokens, ~15ms latency, graceful Ollama-offline fallback, trace IDs you can paste into a bug report.',
     primaryCta: { href: '#quick-start', label: 'Quick Start' },
     secondaryCta: { href: 'handbook/', label: 'Read the Handbook' },
     previews: [
       {
-        label: 'Setup',
-        code: 'ollama pull nomic-embed-text\npip install -r requirements.txt\npython gateway.py --sync',
+        label: 'Install',
+        code: 'ollama pull nomic-embed-text\npip install tool-compass\ntool-compass sync',
       },
       {
-        label: 'compass()',
+        label: 'CLI',
+        code: 'tool-compass search "generate an AI image"\ntool-compass describe comfy:comfy_generate\ntool-compass doctor',
+      },
+      {
+        label: 'MCP tool',
         code: 'compass(\n  intent="generate an AI image",\n  top_k=3\n)',
       },
       {
         label: 'Result',
-        code: '# comfy:comfy_generate  0.91\n# tokens_saved: 20,500\n# total_indexed: 44',
+        code: '# comfy:comfy_generate  0.91\n# tokens_saved: 20,500\n# trace_id: 9f3a1c7b',
       },
     ],
   },
@@ -35,8 +39,8 @@ export const config: SiteConfig = {
     {
       kind: 'features',
       id: 'features',
-      title: 'Features',
-      subtitle: 'Stop loading all 77 tools into context. Find the right one.',
+      title: 'Why Tool Compass',
+      subtitle: 'Stop loading all 77 tools into context. Find the right one — and keep finding it when things go sideways.',
       features: [
         {
           title: 'Semantic Discovery',
@@ -50,6 +54,50 @@ export const config: SiteConfig = {
           title: 'Progressive Disclosure',
           desc: 'compass() → describe() → execute(). Load only the schema you need, only when you actually need it.',
         },
+        {
+          title: 'Graceful degradation',
+          desc: 'Ollama down? Compass falls back to keyword search over the same index, marks results degraded, and tells you exactly what to start.',
+        },
+        {
+          title: 'Trace IDs in every response',
+          desc: 'Every MCP call gets an 8-char trace_id plumbed into logs, success envelopes, and error envelopes. Paste it into a bug report and grep the logs.',
+        },
+        {
+          title: 'Production observability',
+          desc: '/ready does a deep probe (index + Ollama + backends). /metrics emits Prometheus text with embed p95, orphan vectors, per-backend up/down.',
+        },
+      ],
+    },
+    {
+      kind: 'features',
+      id: 'whats-new',
+      title: "What's new in v2.2",
+      subtitle: 'Stage A bug/security pass (23 HIGH), Stage B/C humanization (15 HIGH), plus 12 shipped features.',
+      features: [
+        {
+          title: 'tool-compass CLI',
+          desc: 'New subcommand shell: search, describe, sync, doctor, serve. Default (no args) still starts the MCP server — backward compatible.',
+        },
+        {
+          title: 'Embedding cache',
+          desc: 'Persistent SQLite cache keyed by (text, provider, model). Huge speedup on re-sync when most tool descriptions haven\'t changed.',
+        },
+        {
+          title: 'Per-backend concurrency',
+          desc: 'New id-keyed stdout reader replaces the blocking read lock. Concurrent calls to the same backend no longer head-of-line-block each other.',
+        },
+        {
+          title: 'Diffing sync',
+          desc: 'Upstream tool removed? Sync now diffs the old set against the new and calls remove_tool() for disappearing names. No more index orphans.',
+        },
+        {
+          title: 'Multi-arch Docker',
+          desc: 'GHCR image ships linux/amd64 + linux/arm64. Same tag works on x86_64 servers and Apple Silicon / ARM workstations without emulation.',
+        },
+        {
+          title: 'Deprecated-alias handling',
+          desc: 'ToolDefinition.deprecated_aliases + get_canonical_name() mean analytics stays consistent across tool renames. UI shows a "deprecated since vX.Y.Z" badge.',
+        },
       ],
     },
     {
@@ -59,11 +107,19 @@ export const config: SiteConfig = {
       cards: [
         {
           title: 'Install & Index',
-          code: '# Prerequisites: Ollama running locally\nollama pull nomic-embed-text\n\n# Clone and install\ngit clone https://github.com/mcp-tool-shop-org/tool-compass\ncd tool-compass\npip install -r requirements.txt\n\n# Build the search index\npython gateway.py --sync\n\n# Start the MCP gateway\npython gateway.py',
+          code: '# Prerequisites: Ollama running locally\nollama pull nomic-embed-text\n\n# Install the CLI + gateway\npip install tool-compass\n\n# Build the search index from your configured backends\ntool-compass sync\n\n# Start the MCP gateway (or `tool-compass serve`)\ntool-compass',
         },
         {
-          title: 'Query by Intent',
-          code: 'compass(\n  intent="I need to generate an AI image from a text description",\n  top_k=3,\n  min_confidence=0.3\n)\n\n# Returns:\n# {\n#   "matches": [{\n#     "tool": "comfy:comfy_generate",\n#     "confidence": 0.912\n#   }],\n#   "tokens_saved": 20500\n# }',
+          title: 'One-shot CLI',
+          code: '# Search by intent without starting a server\ntool-compass search "generate an AI image" --top 3 --json\n\n# Inspect a tool\'s schema\ntool-compass describe comfy:comfy_generate\n\n# Diagnostics dump — version, config, Ollama reachability\ntool-compass doctor',
+        },
+        {
+          title: 'MCP tool call',
+          code: 'compass(\n  intent="I need to generate an AI image from text",\n  top_k=3,\n  min_confidence=0.3\n)\n\n# Returns (excerpt):\n# {\n#   "matches": [{\n#     "tool": "comfy:comfy_generate",\n#     "confidence": 0.912\n#   }],\n#   "tokens_saved": 20500,\n#   "trace_id": "9f3a1c7b"\n# }',
+        },
+        {
+          title: 'Graceful Ollama-down',
+          code: '# Ollama stopped mid-session? compass still answers:\ncompass(intent="read a file")\n\n# Returns:\n# {\n#   "matches": [{\n#     "tool": "bridge:read_file",\n#     "degraded": true\n#   }],\n#   "warnings": [\n#     "Semantic search unavailable: Ollama at\n#      http://localhost:11434 is unreachable.\n#      Try: ollama serve"\n#   ]\n# }',
         },
       ],
     },
@@ -71,18 +127,31 @@ export const config: SiteConfig = {
       kind: 'data-table',
       id: 'tools',
       title: 'Gateway Tools',
-      subtitle: 'Nine tools — one semantic entry point for your entire MCP ecosystem.',
+      subtitle: 'Nine MCP tools — one semantic entry point for your entire MCP ecosystem.',
       columns: ['Tool', 'Description'],
       rows: [
         ['compass(intent)', 'Semantic search — find the right tool by describing your intent'],
         ['describe(tool)', 'Get full JSON schema for a specific tool before calling it'],
         ['execute(tool, args)', 'Run any indexed tool directly through the gateway'],
         ['compass_categories()', 'List all tool categories and connected MCP servers'],
-        ['compass_status()', 'System health — index size, model status, config'],
+        ['compass_status()', 'System health — index size, model status, Ollama reachability'],
         ['compass_analytics(timeframe)', 'Usage statistics, accuracy metrics, and performance data'],
         ['compass_chains(action)', 'Discover and manage common multi-tool workflows'],
         ['compass_sync(force)', 'Rebuild the HNSW search index from connected backends'],
         ['compass_audit()', 'Full system diagnostic — index integrity, server health'],
+      ],
+    },
+    {
+      kind: 'data-table',
+      id: 'operations',
+      title: 'HTTP Endpoints',
+      subtitle: 'Start the gateway in HTTP mode with `PORT=8000 tool-compass` for operator-grade endpoints.',
+      columns: ['Endpoint', 'Purpose'],
+      rows: [
+        ['/health', 'Liveness probe — always 200 if the process is up.'],
+        ['/ready', 'Readiness probe — 200 only when index loaded + Ollama reachable + ≥1 backend connected. 503 otherwise with a JSON breakdown of which check failed. Cached 30s.'],
+        ['/metrics', 'Prometheus text format. search_total, ollama_available, backend_up{name}, backend_call_total{name,status}, embed_latency_p95_ms, embed_failures_total, index_age_seconds, orphaned_vectors.'],
+        ['MCP JSON-RPC', 'Standard MCP streamable-http transport at the root. HOST env var defaults to 127.0.0.1 — set HOST=0.0.0.0 only behind an auth reverse proxy.'],
       ],
     },
   ],

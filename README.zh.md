@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="README.ja.md">日本語</a> | <a href="README.zh.md">中文</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (BR)</a>
+  <a href="README.ja.md">日本語</a> | <a href="README.md">English</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (BR)</a>
 </p>
 
 <div align="center">
@@ -15,11 +15,12 @@
 <img src="https://img.shields.io/badge/docker-ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
 
+
 *减少 95% 的令牌使用量。通过描述您想要执行的操作来查找工具。*
 
-[安装](#quick-start) • [使用方法](#usage) • [Docker](#option-2-docker) • [性能](#performance) • [贡献](#contributing)
+[安装](#quick-start) • [使用方法](#usage) • [Docker](#option-2-docker) • [手册](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [性能](#performance) • [贡献](#contributing)
 
-</div
+</div>
 
 ---
 
@@ -36,7 +37,7 @@ Savings: 95%
 
 ## 解决方案
 
-Tool Compass 使用**语义搜索**来根据自然语言描述查找相关的工具。与加载所有工具不同，Claude 调用 `compass()` 函数，并仅返回相关的工具。
+Tool Compass 使用**语义搜索**，通过自然语言描述来查找相关的工具。与加载所有工具不同，Claude 调用 `compass()` 函数，并仅返回相关的工具。
 
 <!--
 ## 演示
@@ -46,7 +47,9 @@ Tool Compass 使用**语义搜索**来根据自然语言描述查找相关的工
 </p>
 -->
 
-## 快速开始
+## 快速入门
+
+📖 **完整文档：** 请参阅 [Tool Compass 手册](https://mcp-tool-shop-org.github.io/tool-compass/handbook/)，了解安装、配置和架构的详细信息。
 
 ### 选项 1：本地安装
 
@@ -56,7 +59,7 @@ ollama pull nomic-embed-text
 
 # Clone and setup
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
-cd tool-compass/tool_compass
+cd tool-compass
 
 # Create virtual environment
 python -m venv venv
@@ -80,7 +83,7 @@ python ui.py
 ```bash
 # Clone the repo
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
-cd tool-compass/tool_compass
+cd tool-compass
 
 # Start with Docker Compose (requires Ollama running locally)
 docker-compose up
@@ -91,15 +94,19 @@ docker-compose --profile with-ollama up
 # Access the UI at http://localhost:7860
 ```
 
+> GHCR 镜像 (`ghcr.io/mcp-tool-shop-org/tool-compass`) 支持
+> `linux/amd64` 和 `linux/arm64`，因此相同的镜像标签可以在 x86_64 服务器
+> 和 Apple Silicon / ARM 工作站上运行。
+
 ## 特性
 
-- **语义搜索** - 通过描述您想要执行的操作来查找工具
-- **分层展示** - `compass()` → `describe()` → `execute()`
-- **热缓存** - 常用工具会被预加载
-- **链检测** - 自动发现常见的工具工作流程
-- **分析** - 跟踪使用模式和工具性能
-- **跨平台** - Windows、macOS、Linux
-- **支持 Docker** - 一键部署
+- **语义搜索：** 通过描述您想要执行的操作来查找工具。
+- **分步展示：** `compass()` → `describe()` → `execute()`
+- **热缓存：** 常用工具会被预加载。
+- **链检测：** 自动发现常见的工具工作流程。
+- **分析：** 跟踪使用模式和工具性能。
+- **跨平台：** Windows、macOS、Linux
+- **支持 Docker：** 一键部署
 
 ## 架构
 
@@ -156,8 +163,8 @@ compass(
 
 | 工具 | 描述 |
 |------|-------------|
-| `compass(intent)` | 语义搜索工具 |
-| `describe(tool_name)` | 获取工具的完整 schema |
+| `compass(intent)` | 用于工具的语义搜索 |
+| `describe(tool_name)` | 获取工具的完整模式 |
 | `execute(tool_name, args)` | 在工具的后端运行 |
 | `compass_categories()` | 列出类别和服务器 |
 | `compass_status()` | 系统健康状况和配置 |
@@ -166,26 +173,65 @@ compass(
 | `compass_sync(force)` | 从后端重建索引 |
 | `compass_audit()` | 完整的系统报告 |
 
+### 分步展示模式
+
+Tool Compass 使用一种分步展示模式，以最大限度地减少令牌的使用量：
+
+```
+1. compass("your intent")     → Get tool name + short description (~100 tokens)
+2. describe("tool:name")      → Get full parameter schema (~500 tokens)
+3. execute("tool:name", args) → Run the tool
+```
+
+**原因：**
+- 预加载 77 个工具 = ~38,500 个令牌
+- 分步展示 = 每个使用的工具 ~600 个令牌
+- 节省：**典型工作流程可节省 95% 以上**
+
+**示例工作流程：**
+
+```python
+# Step 1: Find the right tool
+compass("generate an image from text")
+# Returns: comfy:comfy_generate (confidence: 0.91)
+
+# Step 2: Get the schema (only if needed)
+describe("comfy:comfy_generate")
+# Returns: Full parameter definitions, types, examples
+
+# Step 3: Execute
+execute("comfy:comfy_generate", {"prompt": "a sunset over mountains"})
+```
+
+`compass()` 函数的结果中的 `hint` 字段会引导此流程，提示何时使用 `describe()` 函数。
+
 ## 配置
 
 | 变量 | 描述 | 默认值 |
 |----------|-------------|---------|
 | `TOOL_COMPASS_BASE_PATH` | 项目根目录 | 自动检测 |
 | `TOOL_COMPASS_PYTHON` | Python 解释器 | 自动检测 |
-| `TOOL_COMPASS_CONFIG` | 配置文件路径 | `./compass_config.json` |
+| `TOOL_COMPASS_CONFIG` | 配置文件路径 | `~/.config/tool-compass/compass_config.json` |
+| `TOOL_COMPASS_DATA_DIR` | 数据目录 | 平台特定（见下文） |
 | `OLLAMA_URL` | Ollama 服务器 URL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUI 服务器 | `http://localhost:8188` |
+| `PORT` | 设置为启用 HTTP 传输（例如，用于 Fly.io） | 未设置 (stdio) |
 
-请参阅 [`.env.example`](.env.example) 了解所有选项。
+**默认数据目录：**
+- **Windows：** `%LOCALAPPDATA%\tool-compass\`
+- **macOS：** `~/Library/Application Support/tool-compass/`
+- **Linux：** `~/.config/tool-compass/` (或 `$XDG_CONFIG_HOME/tool-compass/`)
+
+请参阅 [`.env.example`](.env.example)，了解所有选项。
 
 ## 性能
 
 | 指标 | 值 |
 |--------|-------|
-| 索引构建时间 | 约 5 秒，用于 44 个工具 |
-| 查询延迟 | 约 15 毫秒（包括嵌入） |
-| 令牌节省量 | 约 95% (38K → 2K) |
-| 准确率@3 | 约 95% (前 3 个结果中包含正确的工具) |
+| 索引构建时间 | 44 个工具，约 5 秒 |
+| 查询延迟 | ~15毫秒（包括嵌入） |
+| 令牌节省 | ~95% (38K → 2K) |
+| 准确率@3 | ~95% (在排名前3中，正确工具的比例) |
 
 ## 测试
 
@@ -202,14 +248,14 @@ pytest -m "not integration"
 
 ## 故障排除
 
-### 无法连接到 MCP 服务器
+### MCP服务器无法连接
 
-如果 Claude Desktop 的日志显示 JSON 解析错误：
+如果Claude Desktop日志显示JSON解析错误：
 ```
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**原因：** `print()` 语句会破坏 JSON-RPC 协议。
+**原因：** `print()`语句破坏了JSON-RPC协议。
 
 **解决方法：** 使用日志记录或 `file=sys.stderr`。
 ```python
@@ -217,7 +263,7 @@ import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Ollama 连接失败
+### Ollama连接失败
 
 ```bash
 # Check Ollama is running
@@ -227,7 +273,7 @@ curl http://localhost:11434/api/tags
 ollama pull nomic-embed-text
 ```
 
-### 未找到索引
+### 索引未找到
 
 ```bash
 python gateway.py --sync
@@ -235,43 +281,44 @@ python gateway.py --sync
 
 ## 相关项目
 
-它是用于 AI 驱动开发的 **Compass 套件** 的一部分：
+它是**Compass套件**中用于AI驱动开发的工具：
 
 - [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - 语义文件搜索
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - 嵌入向量的 Gradio 组件
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - 无头 LLM 微调
-- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - 简化版的 ComfyUI
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - 向量嵌入的Gradio组件
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - 无头LLM微调
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - 简化版的ComfyUI
 
 ## 贡献
 
-我们欢迎贡献！请参阅 [CONTRIBUTING.md](CONTRIBUTING.md) 了解指南。
+我们欢迎贡献！请参阅[CONTRIBUTING.md](CONTRIBUTING.md)以获取指南。
 
 ## 安全与数据范围
 
-Tool Compass 是一款**本地优先**的开发工具。请参阅 [SECURITY.md](SECURITY.md) 了解完整策略。
+Tool Compass是一个**本地优先**的开发工具。请参阅[SECURITY.md](SECURITY.md)以获取完整策略。
 
-- **涉及的数据：** 工具描述被索引到本地的HNSW向量数据库中，搜索查询被记录到本地的SQLite数据库（`compass_analytics.db`），嵌入向量通过本地的Ollama生成。
-- **未涉及的数据：** 不包括用户代码、文件内容以及任何凭证。工具调用的参数会被哈希处理，不会以明文形式存储。
-- **网络：** 连接到本地的Ollama以生成嵌入向量。可选的Gradio用户界面绑定到本地主机。不收集任何外部数据。
-- **无数据收集：** 不收集任何外部数据。分析仅在本地进行。
+- **涉及的数据：** 工具描述被索引到本地HNSW向量数据库，搜索查询被记录到本地SQLite数据库（`compass_analytics.db`），嵌入通过本地Ollama生成。
+- **未涉及的数据：** 不包括用户代码、文件内容或凭据。工具调用参数被哈希，而不是以明文存储。
+- **网络：** 连接到本地Ollama以生成嵌入。可选的Gradio UI绑定到localhost。没有外部遥测。
+- **无遥测：** 不收集任何外部数据。分析仅在本地进行。
 
 ## 评分卡
 
 | 类别 | 评分 | 备注 |
 |----------|-------|-------|
-| A. 安全性 | 10/10 | `SECURITY.md`文件，仅本地运行，不收集任何数据，使用参数化SQL。 |
-| B. 错误处理 | 10/10 | 结构化结果，优雅地回退到Ollama。 |
-| C. 操作文档 | 10/10 | `README`文件，`CHANGELOG`文件，`CONTRIBUTING`文件，API文档。 |
-| D. 发布质量 | 10/10 | CI（代码检查 + 413个测试 + 代码覆盖率 + `pip-audit` + Docker），验证脚本。 |
-| E. 身份 | 10/10 | Logo，翻译，着陆页。 |
+| A. 安全性 | 10/10 | SECURITY.md，仅本地，无遥测，参数化SQL |
+| B. 错误处理 | 10/10 | 结构化结果，优雅的Ollama回退 |
+| C. 操作文档 | 10/10 | README，CHANGELOG，CONTRIBUTING，API文档 |
+| D. 发布质量 | 10/10 | CI（lint + tests + coverage + pip-audit + Docker），验证脚本 |
+| E. 标识 | 10/10 | Logo，翻译，主页 |
 | **Total** | **50/50** | |
 
 ## 许可证
 
-[MIT](LICENSE) - 详情请参阅`LICENSE`文件。
+[MIT](LICENSE) - 详情请参阅LICENSE文件。
 
 ---
 
 <p align="center">
   Built by <a href="https://mcp-tool-shop.github.io/">MCP Tool Shop</a>
 </p>
+

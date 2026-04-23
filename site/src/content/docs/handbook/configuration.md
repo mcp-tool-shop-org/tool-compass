@@ -15,6 +15,15 @@ sidebar:
 | `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUI server URL (used by the comfy backend) | `http://localhost:8188` |
 | `PORT` | Set to enable HTTP (streamable-http) transport instead of stdio | unset (stdio mode) |
+| `HOST` | HTTP bind address (only used when `PORT` is set) | `127.0.0.1` (loopback) |
+| `GRADIO_AUTH` | `user:pass` required when launching `tool-compass-ui --share` | unset (refuses `--share` without it) |
+| `HYPOTHESIS_PROFILE` | `dev` / `ci` / `nightly` profile for fuzz tests | `dev` |
+
+:::caution
+**`HOST=0.0.0.0` exposes the gateway on every network interface.** Tool
+Compass proxies arbitrary MCP tool calls — only set it behind an
+authenticated reverse proxy. Default loopback is safe.
+:::
 
 ## Config file
 
