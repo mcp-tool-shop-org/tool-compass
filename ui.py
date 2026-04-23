@@ -9,8 +9,10 @@ Usage:
 """
 
 import asyncio
+import html
 import json
 import logging
+import os
 import sys
 import threading
 from pathlib import Path
@@ -252,7 +254,7 @@ def search_tools(
             f"""
         <div style="text-align: center; padding: 40px; color: #888;">
             <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
-            <p style="color: #ffb74d;">No tools found matching "{truncate_text(query, 50)}"</p>
+            <p style="color: #ffb74d;">No tools found matching "{html.escape(truncate_text(query, 50), quote=True)}"</p>
             <p style="font-size: 0.9em;">Suggestions:</p>
             <ul style="text-align: left; display: inline-block; color: #aaa;">
                 <li>Try broader or simpler terms</li>
@@ -282,19 +284,26 @@ def search_tools(
             5 - min(5, int(r.score * 5 + 0.5))
         )
 
-        # Truncate long descriptions
+        # Truncate long descriptions — escape every untrusted string that lands
+        # in HTML to block <script>/style/attr injection from tool metadata.
         desc_display = truncate_text(r.tool.description, 150)
+        safe_name = html.escape(r.tool.name, quote=True)
+        safe_name_short = html.escape(truncate_text(r.tool.name, 40), quote=True)
+        safe_desc = html.escape(r.tool.description or "", quote=True)
+        safe_desc_short = html.escape(desc_display, quote=True)
+        safe_server = html.escape(r.tool.server, quote=True)
+        safe_category = html.escape(r.tool.category, quote=True)
 
         html_parts.append(f"""
         <div style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a1a2e;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.1em; font-weight: bold; color: #4fc3f7;" title="{r.tool.name}">{truncate_text(r.tool.name, 40)}</span>
+                <span style="font-size: 1.1em; font-weight: bold; color: #4fc3f7;" title="{safe_name}">{safe_name_short}</span>
                 <span style="color: {confidence_color};" title="{conf_label} match ({confidence_pct}%)">{stars} {conf_label} ({confidence_pct}%)</span>
             </div>
-            <p style="margin: 8px 0; color: #ccc;" title="{r.tool.description}">{desc_display}</p>
+            <p style="margin: 8px 0; color: #ccc;" title="{safe_desc}">{safe_desc_short}</p>
             <div style="display: flex; gap: 12px; font-size: 0.9em; color: #888; flex-wrap: wrap;">
-                <span>📦 {r.tool.server}</span>
-                <span>🏷️ {r.tool.category}</span>
+                <span>📦 {safe_server}</span>
+                <span>🏷️ {safe_category}</span>
             </div>
         </div>
         """)
@@ -336,7 +345,7 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
         <div style="text-align: center; padding: 40px; color: #888;">
             <div style="font-size: 2em; margin-bottom: 12px;">⚙️</div>
             <p style="color: #ffb74d;">Chain indexing is disabled in configuration.</p>
-            <p style="font-size: 0.9em;">Enable it in config.yaml to use workflow search.</p>
+            <p style="font-size: 0.9em;">Enable it in compass_config.json to use workflow search.</p>
         </div>
         """
 
@@ -356,7 +365,7 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
         return f"""
         <div style="text-align: center; padding: 40px; color: #888;">
             <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
-            <p style="color: #ffb74d;">No workflows found matching "{truncate_text(query, 50)}"</p>
+            <p style="color: #ffb74d;">No workflows found matching "{html.escape(truncate_text(query, 50), quote=True)}"</p>
             <p style="font-size: 0.9em;">Workflows are auto-detected from usage patterns.</p>
             <p style="font-size: 0.9em; color: #aaa;">Use tools together to create workflows.</p>
         </div>
@@ -373,15 +382,20 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
             "#81c784" if cr.score > 0.7 else "#ffb74d" if cr.score > 0.5 else "#9e9e9e"
         )
         tool_flow = " → ".join([t.split(":")[-1] for t in cr.chain.tools])
+        safe_chain_name = html.escape(cr.chain.name, quote=True)
+        safe_chain_name_short = html.escape(truncate_text(cr.chain.name, 40), quote=True)
+        safe_flow = html.escape(tool_flow, quote=True)
+        safe_flow_short = html.escape(truncate_text(tool_flow, 80), quote=True)
+        safe_desc = html.escape(truncate_text(cr.chain.description or "", 100), quote=True)
 
         html_parts.append(f"""
         <div style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a2e1a;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.1em; font-weight: bold; color: #81c784;" title="{cr.chain.name}">{truncate_text(cr.chain.name, 40)}</span>
+                <span style="font-size: 1.1em; font-weight: bold; color: #81c784;" title="{safe_chain_name}">{safe_chain_name_short}</span>
                 <span style="color: {confidence_color};" title="{conf_label} match ({confidence_pct}%)">{conf_label} ({confidence_pct}%)</span>
             </div>
-            <p style="margin: 8px 0; color: #ccc; font-family: monospace;" title="{tool_flow}">{truncate_text(tool_flow, 80)}</p>
-            <p style="margin: 4px 0; color: #888; font-size: 0.9em;">{truncate_text(cr.chain.description, 100)}</p>
+            <p style="margin: 8px 0; color: #ccc; font-family: monospace;" title="{safe_flow}">{safe_flow_short}</p>
+            <p style="margin: 4px 0; color: #888; font-size: 0.9em;">{safe_desc}</p>
             <div style="font-size: 0.85em; color: #666;">
                 Used {cr.chain.use_count} times | {"🤖 Auto-detected" if cr.chain.is_auto_detected else "👤 Manual"}
             </div>
@@ -488,20 +502,25 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
         html_parts.append(f"""
         <details open style="margin: 12px 0;">
             <summary style="cursor: pointer; font-size: 1.1em; font-weight: bold; color: #64b5f6; padding: 8px 0;">
-                📦 {server_name} ({len(server_tools)} tool{"s" if len(server_tools) != 1 else ""})
+                📦 {html.escape(server_name, quote=True)} ({len(server_tools)} tool{"s" if len(server_tools) != 1 else ""})
             </summary>
             <div style="padding-left: 16px;">
         """)
 
         for t in server_tools:
             param_count = len(t["parameters"])
-            desc_truncated = truncate_text(t["description"], 120)
+            desc_truncated = truncate_text(t["description"] or "", 120)
+            safe_name = html.escape(t["name"], quote=True)
+            safe_name_short = html.escape(truncate_text(t["name"], 45), quote=True)
+            safe_desc = html.escape(t["description"] or "", quote=True)
+            safe_desc_short = html.escape(desc_truncated, quote=True)
+            safe_category = html.escape(t["category"], quote=True)
             html_parts.append(f"""
             <div style="border-left: 3px solid #444; padding: 8px 12px; margin: 8px 0; background: #1a1a2e;">
-                <div style="font-weight: bold; color: #4fc3f7;" title="{t["name"]}">{truncate_text(t["name"], 45)}</div>
-                <div style="color: #aaa; font-size: 0.9em; margin: 4px 0;" title="{t["description"]}">{desc_truncated}</div>
+                <div style="font-weight: bold; color: #4fc3f7;" title="{safe_name}">{safe_name_short}</div>
+                <div style="color: #aaa; font-size: 0.9em; margin: 4px 0;" title="{safe_desc}">{safe_desc_short}</div>
                 <div style="color: #666; font-size: 0.85em;">
-                    🏷️ {t["category"]} | 📝 {param_count} param{"s" if param_count != 1 else ""}
+                    🏷️ {safe_category} | 📝 {param_count} param{"s" if param_count != 1 else ""}
                 </div>
             </div>
             """)
@@ -566,7 +585,7 @@ def get_tool_details(tool_name: str) -> str:
         return f"""
         <div style="text-align: center; padding: 40px; color: #888;">
             <div style="font-size: 2em; margin-bottom: 12px;">❓</div>
-            <p style="color: #ffb74d;">Tool not found: "{truncate_text(tool_name, 40)}"</p>
+            <p style="color: #ffb74d;">Tool not found: "{html.escape(truncate_text(tool_name, 40), quote=True)}"</p>
             <p style="font-size: 0.9em; color: #aaa;">Check the tool name and try again.</p>
         </div>
         """
@@ -574,7 +593,8 @@ def get_tool_details(tool_name: str) -> str:
     params = json.loads(row["parameters"]) if row["parameters"] else {}
     examples = json.loads(row["examples"]) if row["examples"] else []
 
-    # Build parameters table
+    # Build parameters table — all untrusted strings run through html.escape to
+    # block HTML/script injection from malicious tool metadata.
     params_html = ""
     if params:
         params_html = f"""
@@ -588,8 +608,8 @@ def get_tool_details(tool_name: str) -> str:
         for name, ptype in params.items():
             params_html += f"""
             <tr>
-                <td style="padding: 8px; border: 1px solid #444; font-family: monospace; color: #4fc3f7;">{truncate_text(name, 30)}</td>
-                <td style="padding: 8px; border: 1px solid #444; color: #888;">{truncate_text(str(ptype), 50)}</td>
+                <td style="padding: 8px; border: 1px solid #444; font-family: monospace; color: #4fc3f7;">{html.escape(truncate_text(name, 30), quote=True)}</td>
+                <td style="padding: 8px; border: 1px solid #444; color: #888;">{html.escape(truncate_text(str(ptype), 50), quote=True)}</td>
             </tr>
             """
         params_html += "</table>"
@@ -604,15 +624,15 @@ def get_tool_details(tool_name: str) -> str:
     if examples:
         examples_html = f"<h4 style='color: #81c784; margin-top: 16px;'>Examples ({len(examples)})</h4>"
         for ex in examples:
-            examples_html += f"<pre style='background: #1a1a2e; padding: 8px; border-radius: 4px; overflow-x: auto;'>{truncate_text(ex, 200)}</pre>"
+            examples_html += f"<pre style='background: #1a1a2e; padding: 8px; border-radius: 4px; overflow-x: auto;'>{html.escape(truncate_text(ex, 200), quote=True)}</pre>"
 
     return f"""
     <div style="padding: 16px;">
-        <h2 style="color: #4fc3f7; margin: 0; word-break: break-all;">{row["name"]}</h2>
+        <h2 style="color: #4fc3f7; margin: 0; word-break: break-all;">{html.escape(row["name"], quote=True)}</h2>
         <div style="color: #888; margin: 8px 0;">
-            📦 {row["server"]} | 🏷️ {row["category"]}
+            📦 {html.escape(row["server"], quote=True)} | 🏷️ {html.escape(row["category"], quote=True)}
         </div>
-        <p style="color: #ccc; font-size: 1.1em; margin: 16px 0;">{row["description"]}</p>
+        <p style="color: #ccc; font-size: 1.1em; margin: 16px 0;">{html.escape(row["description"] or "", quote=True)}</p>
         {params_html}
         {examples_html}
     </div>
@@ -640,7 +660,8 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
     searches = summary["searches"]
     calls = summary["tool_calls"]
 
-    html = f"""
+    # Local var named `out` (not `html`) to avoid shadowing the html module.
+    out = f"""
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
         <div style="background: #1a2e3a; padding: 16px; border-radius: 8px; text-align: center;">
             <div style="font-size: 2em; font-weight: bold; color: #4fc3f7;">{searches["total"]}</div>
@@ -663,7 +684,7 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
 
     # Top tools
     if calls["top_tools"]:
-        html += """
+        out += """
         <h3 style="color: #4fc3f7;">Top Tools</h3>
         <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px;">
             <tr style="background: #2a2a4a;">
@@ -674,45 +695,45 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
             </tr>
         """
         for t in calls["top_tools"][:10]:
-            html += f"""
+            out += f"""
             <tr>
-                <td style="padding: 8px; border: 1px solid #444; color: #4fc3f7;">{t["tool"]}</td>
+                <td style="padding: 8px; border: 1px solid #444; color: #4fc3f7;">{html.escape(t["tool"], quote=True)}</td>
                 <td style="padding: 8px; border: 1px solid #444; text-align: right;">{t["calls"]}</td>
                 <td style="padding: 8px; border: 1px solid #444; text-align: right; color: {"#81c784" if t["success_rate"] > 90 else "#ffb74d"};">{t["success_rate"]}%</td>
                 <td style="padding: 8px; border: 1px solid #444; text-align: right; color: #888;">{t["avg_latency_ms"]}ms</td>
             </tr>
             """
-        html += "</table>"
+        out += "</table>"
 
     # Top queries
     if searches["top_queries"]:
-        html += """
+        out += """
         <h3 style="color: #81c784;">Top Queries</h3>
         <ul style="color: #ccc;">
         """
         for q in searches["top_queries"][:10]:
-            html += f'<li>"{q["query"]}" <span style="color: #888;">({q["count"]} times)</span></li>'
-        html += "</ul>"
+            out += f'<li>"{html.escape(q["query"], quote=True)}" <span style="color: #888;">({q["count"]} times)</span></li>'
+        out += "</ul>"
 
     # Failures
     if summary.get("failures"):
-        html += """
+        out += """
         <h3 style="color: #ef5350;">Recent Failures</h3>
         <ul style="color: #ccc;">
         """
         for f in summary["failures"][:5]:
-            html += f'<li style="color: #ef5350;">{f["tool"]}: {f["error"] or "Unknown error"} ({f["count"]}x)</li>'
-        html += "</ul>"
+            out += f'<li style="color: #ef5350;">{html.escape(f["tool"], quote=True)}: {html.escape(f["error"] or "Unknown error", quote=True)} ({f["count"]}x)</li>'
+        out += "</ul>"
 
     # Hot cache
     hot_cache = summary.get("hot_cache", {})
     if hot_cache.get("tools"):
-        html += f"""
+        out += f"""
         <h3 style="color: #ba68c8;">Hot Cache ({hot_cache["size"]} tools)</h3>
-        <p style="color: #888; font-family: monospace;">{", ".join(hot_cache["tools"])}</p>
+        <p style="color: #888; font-family: monospace;">{html.escape(", ".join(hot_cache["tools"]), quote=True)}</p>
         """
 
-    return html
+    return out
 
 
 # =============================================================================
@@ -728,7 +749,7 @@ def get_chains_view() -> str:
         <div style="text-align: center; padding: 40px; color: #888;">
             <div style="font-size: 2em; margin-bottom: 12px;">⚙️</div>
             <p style="color: #ffb74d;">Chain indexing is disabled in configuration.</p>
-            <p style="font-size: 0.9em;">Enable <code>chain_indexing_enabled</code> in config.yaml to use workflows.</p>
+            <p style="font-size: 0.9em;">Enable <code>chain_indexing_enabled</code> in compass_config.json to use workflows.</p>
         </div>
         """
 
@@ -936,9 +957,15 @@ def create_ui() -> gr.Blocks:
         .tool-result { border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; }
         """,
     ) as demo:
-        gr.Markdown("""
+        # Compute the tool count dynamically — avoid drift between the UI
+        # banner and the actual indexed tools.
+        try:
+            _tool_count = len(get_all_tools())
+        except Exception:
+            _tool_count = 0
+        gr.Markdown(f"""
         # 🧭 Tool Compass
-        **Semantic search across 44 MCP tools** | Progressive discovery: Search → Describe → Execute
+        **Semantic search across {_tool_count} MCP tools** | Progressive discovery: Search → Describe → Execute
         """)
 
         with gr.Tabs():
@@ -1188,9 +1215,38 @@ def main():
         print(f"   Warning: Could not load index: {e}")
         print("   Run 'python gateway.py --sync' to build the index first.")
 
+    # Gradio `share=True` publishes a public tunnel. Require basic auth via
+    # GRADIO_AUTH=user:pass so the public URL is not wide open.
+    auth = None
+    if args.share:
+        auth_env = os.environ.get("GRADIO_AUTH", "").strip()
+        if not auth_env or ":" not in auth_env:
+            print(
+                "   ERROR: --share refused. Set GRADIO_AUTH='user:pass' to "
+                "enable basic auth on the public tunnel.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        user, _, pwd = auth_env.partition(":")
+        if not user or not pwd:
+            print(
+                "   ERROR: GRADIO_AUTH must be 'user:pass' (non-empty on both sides).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        auth = (user, pwd)
+        print(
+            "   WARNING: --share creates a PUBLIC tunnel. Basic auth is enabled "
+            f"for user '{user}'. Anyone with the URL and credentials can access."
+        )
+
     demo = create_ui()
     demo.launch(
-        server_name=args.host, server_port=args.port, share=args.share, show_error=True
+        server_name=args.host,
+        server_port=args.port,
+        share=args.share,
+        auth=auth,
+        show_error=True,
     )
 
 

@@ -16,8 +16,8 @@ import os
 import subprocess
 import sys
 from typing import Dict, List, Optional, Any
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass
+from datetime import datetime
 
 from config import CompassConfig, StdioBackend, load_config
 from _version import __version__
@@ -29,6 +29,11 @@ CONNECTION_TIMEOUT = 10
 TOOL_CALL_TIMEOUT = 15
 KEEPALIVE_INTERVAL = 30  # Ping backends every 30s to keep connection alive
 MAX_RETRIES = 2
+
+# Stream bounds — guard the gateway against a malicious/buggy backend that
+# writes a massive single line (would otherwise OOM the parent process)
+STDOUT_LINE_LIMIT = 1024 * 1024  # 1 MiB per JSON-RPC line
+STDOUT_READ_TIMEOUT = 30.0  # Per-readline timeout in seconds
 
 
 @dataclass
@@ -115,7 +120,7 @@ class SimpleBackendConnection:
             if sys.platform == "win32":
                 creationflags = subprocess.CREATE_NO_WINDOW
 
-            # Start subprocess
+            # Start subprocess (limit caps StreamReader buffer to prevent OOM)
             self._process = await asyncio.create_subprocess_exec(
                 self.backend.command,
                 *self.backend.args,
@@ -125,6 +130,7 @@ class SimpleBackendConnection:
                 env=env,
                 cwd=self.backend.cwd,
                 creationflags=creationflags,
+                limit=STDOUT_LINE_LIMIT,
             )
 
             # Start stderr reader task (logs backend errors)
@@ -240,7 +246,19 @@ class SimpleBackendConnection:
             await self._process.stdin.drain()
 
             # Read response - handle multiple lines (some responses are multi-line)
-            response_line = await self._process.stdout.readline()
+            try:
+                response_line = await asyncio.wait_for(
+                    self._process.stdout.readline(),
+                    timeout=STDOUT_READ_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                raise RuntimeError(
+                    f"Backend {self.name} did not respond within {STDOUT_READ_TIMEOUT}s"
+                )
+            except asyncio.LimitOverrunError as e:
+                raise RuntimeError(
+                    f"Backend {self.name} emitted a line exceeding {STDOUT_LINE_LIMIT} bytes: {e}"
+                )
             if not response_line:
                 raise RuntimeError("No response from backend (EOF)")
 
@@ -336,7 +354,7 @@ class SimpleBackendConnection:
             self._stats.record_call(False, latency_ms)
             return {"success": False, "error": "Invalid response from backend"}
 
-        except Exception as e:
+        except Exception:
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             self._stats.record_call(False, latency_ms)
 

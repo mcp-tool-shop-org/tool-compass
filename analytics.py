@@ -6,10 +6,12 @@ Tracks usage patterns, manages hot tool cache, and detects tool chains.
 import sqlite3
 import json
 import hashlib
+import threading
+from collections import deque
 import numpy as np
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Deque
 from dataclasses import dataclass
 import logging
 
@@ -79,20 +81,33 @@ class CompassAnalytics:
         self.db: Optional[sqlite3.Connection] = None
         self._hot_cache: Dict[str, HotToolEntry] = {}
 
-        # Session tracking for chain detection
+        # Lock for all DB mutations (sqlite3 connection is shared across threads
+        # via check_same_thread=False; we serialize writes ourselves).
+        self._lock = threading.Lock()
+
+        # Session tracking for chain detection. Use a bounded deque so a long
+        # session never drops middle items on truncation — patterns are saved
+        # before the window slides.
         self._session_id = hashlib.sha256(
             f"{datetime.now().isoformat()}".encode()
         ).hexdigest()[:16]
-        self._session_tool_sequence: List[str] = []
+        self._session_tool_sequence: Deque[str] = deque(maxlen=20)
         self._call_count_since_refresh = 0
 
         # Ensure db directory exists
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _get_db(self) -> sqlite3.Connection:
-        """Get or create database connection."""
+        """Get or create database connection.
+
+        The connection is opened with check_same_thread=False so it can be
+        shared across Gradio's thread pool. All mutations are protected by
+        self._lock — see record_search / record_tool_call / _save_chain_pattern.
+        """
         if self.db is None:
-            self.db = sqlite3.connect(str(self.db_path))
+            self.db = sqlite3.connect(
+                str(self.db_path), check_same_thread=False
+            )
             self.db.row_factory = sqlite3.Row
             self._init_db()
         return self.db
@@ -209,23 +224,24 @@ class CompassAnalytics:
         top_result = results[0].tool.name if results else None
         result_count = len(results)
 
-        db.execute(
-            """
-            INSERT INTO search_queries
-            (query, query_hash, top_result, result_count, latency_ms, category_filter, server_filter)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-            (
-                query,
-                query_hash,
-                top_result,
-                result_count,
-                latency_ms,
-                category_filter,
-                server_filter,
-            ),
-        )
-        db.commit()
+        with self._lock:
+            db.execute(
+                """
+                INSERT INTO search_queries
+                (query, query_hash, top_result, result_count, latency_ms, category_filter, server_filter)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    query,
+                    query_hash,
+                    top_result,
+                    result_count,
+                    latency_ms,
+                    category_filter,
+                    server_filter,
+                ),
+            )
+            db.commit()
 
         logger.debug(
             f"Recorded search: '{query[:50]}...' -> {top_result} ({latency_ms:.1f}ms)"
@@ -248,63 +264,68 @@ class CompassAnalytics:
         # Parse server from tool name
         server = tool_name.split(":")[0] if ":" in tool_name else "unknown"
 
-        # Hash arguments for pattern detection (without sensitive data)
+        # Hash arguments for pattern detection. Hash the full key/value payload
+        # (sorted for stability) so different argument values produce different
+        # hashes — earlier revisions hashed only keys and collided on every call.
         args_hash = None
         if arguments:
             args_hash = hashlib.sha256(
-                json.dumps(sorted(arguments.keys())).encode()
+                json.dumps(arguments, sort_keys=True, default=str).encode()
             ).hexdigest()[:16]
 
-        # Insert call record
-        db.execute(
-            """
-            INSERT INTO tool_calls
-            (tool_name, server, success, error_message, latency_ms, arguments_hash)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """,
-            (
-                tool_name,
-                server,
-                1 if success else 0,
-                error_message,
-                latency_ms,
-                args_hash,
-            ),
-        )
+        with self._lock:
+            # Insert call record
+            db.execute(
+                """
+                INSERT INTO tool_calls
+                (tool_name, server, success, error_message, latency_ms, arguments_hash)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    tool_name,
+                    server,
+                    1 if success else 0,
+                    error_message,
+                    latency_ms,
+                    args_hash,
+                ),
+            )
 
-        # Update aggregated stats
-        # Note: last_success_at uses a SQL CASE expression (not a bound parameter)
-        # so CURRENT_TIMESTAMP is evaluated by SQLite as a function, not a string.
-        db.execute(
-            """
-            INSERT INTO tool_usage_stats (tool_name, call_count, success_count, failure_count, avg_latency_ms, last_called_at, last_success_at)
-            VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
-            ON CONFLICT(tool_name) DO UPDATE SET
-                call_count = call_count + 1,
-                success_count = success_count + excluded.success_count,
-                failure_count = failure_count + excluded.failure_count,
-                avg_latency_ms = (avg_latency_ms * call_count + excluded.avg_latency_ms) / (call_count + 1),
-                last_called_at = CURRENT_TIMESTAMP,
-                last_success_at = CASE WHEN excluded.success_count > 0 THEN CURRENT_TIMESTAMP ELSE last_success_at END,
-                updated_at = CURRENT_TIMESTAMP
-        """,
-            (
-                tool_name,
-                1 if success else 0,
-                0 if success else 1,
-                latency_ms,
-                1 if success else 0,
-            ),
-        )
+            # Update aggregated stats.
+            # NOTE: SET-clause ordering is load-bearing — SQLite evaluates SET
+            # clauses left-to-right (see https://sqlite.org/lang_update.html),
+            # so the avg_latency_ms computation MUST come BEFORE call_count is
+            # incremented. Reversing these lines introduces an off-by-one that
+            # drifts the rolling mean.
+            db.execute(
+                """
+                INSERT INTO tool_usage_stats (tool_name, call_count, success_count, failure_count, avg_latency_ms, last_called_at, last_success_at)
+                VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CASE WHEN ? THEN CURRENT_TIMESTAMP ELSE NULL END)
+                ON CONFLICT(tool_name) DO UPDATE SET
+                    avg_latency_ms = (avg_latency_ms * call_count + excluded.avg_latency_ms) / (call_count + 1),
+                    call_count = call_count + 1,
+                    success_count = success_count + excluded.success_count,
+                    failure_count = failure_count + excluded.failure_count,
+                    last_called_at = CURRENT_TIMESTAMP,
+                    last_success_at = CASE WHEN excluded.success_count > 0 THEN CURRENT_TIMESTAMP ELSE last_success_at END,
+                    updated_at = CURRENT_TIMESTAMP
+            """,
+                (
+                    tool_name,
+                    1 if success else 0,
+                    0 if success else 1,
+                    latency_ms,
+                    1 if success else 0,
+                ),
+            )
 
-        db.commit()
+            db.commit()
 
-        # Track for chain detection
+        # Track for chain detection. The deque is bounded (maxlen=20) so appends
+        # silently drop the OLDEST item — never middle items. Save patterns on
+        # every append so nothing is lost when the window slides.
         self._session_tool_sequence.append(tool_name)
-        if len(self._session_tool_sequence) > 20:
-            # Keep last 20 tools, save pattern
-            await self._save_chain_pattern()
-            self._session_tool_sequence = self._session_tool_sequence[-10:]
+        await self._save_chain_pattern()
 
         # Check if we should refresh hot cache
         self._call_count_since_refresh += 1
@@ -323,26 +344,30 @@ class CompassAnalytics:
 
         db = self._get_db()
 
-        # Find subsequences of length 2-5
-        for length in range(2, min(6, len(self._session_tool_sequence) + 1)):
-            for i in range(len(self._session_tool_sequence) - length + 1):
-                subseq = self._session_tool_sequence[i : i + length]
-                seq_json = json.dumps(subseq)
-                seq_hash = hashlib.sha256(seq_json.encode()).hexdigest()[:32]
+        # Snapshot the deque as a list for subsequence slicing.
+        sequence = list(self._session_tool_sequence)
 
-                # Upsert pattern
-                db.execute(
-                    """
-                    INSERT INTO chain_patterns (session_id, tool_sequence, sequence_hash, occurrence_count)
-                    VALUES (?, ?, ?, 1)
-                    ON CONFLICT(sequence_hash) DO UPDATE SET
-                        occurrence_count = occurrence_count + 1,
-                        last_seen_at = CURRENT_TIMESTAMP
-                """,
-                    (self._session_id, seq_json, seq_hash),
-                )
+        with self._lock:
+            # Find subsequences of length 2-5
+            for length in range(2, min(6, len(sequence) + 1)):
+                for i in range(len(sequence) - length + 1):
+                    subseq = sequence[i : i + length]
+                    seq_json = json.dumps(subseq)
+                    seq_hash = hashlib.sha256(seq_json.encode()).hexdigest()[:32]
 
-        db.commit()
+                    # Upsert pattern
+                    db.execute(
+                        """
+                        INSERT INTO chain_patterns (session_id, tool_sequence, sequence_hash, occurrence_count)
+                        VALUES (?, ?, ?, 1)
+                        ON CONFLICT(sequence_hash) DO UPDATE SET
+                            occurrence_count = occurrence_count + 1,
+                            last_seen_at = CURRENT_TIMESTAMP
+                    """,
+                        (self._session_id, seq_json, seq_hash),
+                    )
+
+            db.commit()
 
     async def refresh_hot_cache(self, embedder=None, index=None):
         """
@@ -365,63 +390,64 @@ class CompassAnalytics:
         top_tools = cursor.fetchall()
 
         new_cache = {}
-        for rank, row in enumerate(top_tools, 1):
-            tool_name = row["tool_name"]
+        with self._lock:
+            for rank, row in enumerate(top_tools, 1):
+                tool_name = row["tool_name"]
 
-            # Try to get existing embedding from hot_tools table
-            existing = db.execute(
-                "SELECT embedding, schema_json, description FROM hot_tools WHERE tool_name = ?",
-                (tool_name,),
-            ).fetchone()
+                # Try to get existing embedding from hot_tools table
+                existing = db.execute(
+                    "SELECT embedding, schema_json, description FROM hot_tools WHERE tool_name = ?",
+                    (tool_name,),
+                ).fetchone()
 
-            embedding = None
-            schema = None
-            description = ""
+                embedding = None
+                schema = None
+                description = ""
 
-            if existing:
-                if existing["embedding"]:
-                    embedding = np.frombuffer(existing["embedding"], dtype=np.float32)
-                if existing["schema_json"]:
-                    schema = json.loads(existing["schema_json"])
-                description = existing["description"] or ""
+                if existing:
+                    if existing["embedding"]:
+                        embedding = np.frombuffer(existing["embedding"], dtype=np.float32)
+                    if existing["schema_json"]:
+                        schema = json.loads(existing["schema_json"])
+                    description = existing["description"] or ""
 
-            entry = HotToolEntry(
-                tool_name=tool_name,
-                rank=rank,
-                call_count=row["call_count"],
-                embedding=embedding,
-                schema=schema,
-                description=description,
-                last_called_at=row["last_called_at"],
-            )
-            new_cache[tool_name] = entry
+                entry = HotToolEntry(
+                    tool_name=tool_name,
+                    rank=rank,
+                    call_count=row["call_count"],
+                    embedding=embedding,
+                    schema=schema,
+                    description=description,
+                    last_called_at=row["last_called_at"],
+                )
+                new_cache[tool_name] = entry
 
-            # Persist to DB
-            embedding_blob = embedding.tobytes() if embedding is not None else None
-            schema_json = json.dumps(schema) if schema else None
+                # Persist to DB
+                embedding_blob = embedding.tobytes() if embedding is not None else None
+                schema_json = json.dumps(schema) if schema else None
 
-            db.execute(
-                """
-                INSERT INTO hot_tools (tool_name, rank, call_count, embedding, schema_json, description)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(tool_name) DO UPDATE SET
-                    rank = excluded.rank,
-                    call_count = excluded.call_count,
-                    embedding = COALESCE(excluded.embedding, embedding),
-                    schema_json = COALESCE(excluded.schema_json, schema_json),
-                    updated_at = CURRENT_TIMESTAMP
-            """,
-                (
-                    tool_name,
-                    rank,
-                    row["call_count"],
-                    embedding_blob,
-                    schema_json,
-                    description,
-                ),
-            )
+                db.execute(
+                    """
+                    INSERT INTO hot_tools (tool_name, rank, call_count, embedding, schema_json, description)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(tool_name) DO UPDATE SET
+                        rank = excluded.rank,
+                        call_count = excluded.call_count,
+                        embedding = COALESCE(excluded.embedding, embedding),
+                        schema_json = COALESCE(excluded.schema_json, schema_json),
+                        updated_at = CURRENT_TIMESTAMP
+                """,
+                    (
+                        tool_name,
+                        rank,
+                        row["call_count"],
+                        embedding_blob,
+                        schema_json,
+                        description,
+                    ),
+                )
 
-        db.commit()
+            db.commit()
         self._hot_cache = new_cache
 
         logger.info(f"Refreshed hot cache with {len(new_cache)} tools")
@@ -457,49 +483,50 @@ class CompassAnalytics:
         patterns = cursor.fetchall()
         detected_chains = []
 
-        for row in patterns:
-            tools = json.loads(row["tool_sequence"])
+        with self._lock:
+            for row in patterns:
+                tools = json.loads(row["tool_sequence"])
 
-            # Generate chain name from tools
-            chain_name = "_to_".join([t.split(":")[-1] for t in tools])[:50]
+                # Generate chain name from tools
+                chain_name = "_to_".join([t.split(":")[-1] for t in tools])[:50]
 
-            # Generate description
-            tool_names = [t.split(":")[-1].replace("_", " ") for t in tools]
-            description = f"Workflow: {' → '.join(tool_names)}"
+                # Generate description
+                tool_names = [t.split(":")[-1].replace("_", " ") for t in tools]
+                description = f"Workflow: {' → '.join(tool_names)}"
 
-            # Check if already exists
-            existing = db.execute(
-                "SELECT id FROM tool_chains WHERE chain_name = ?", (chain_name,)
-            ).fetchone()
+                # Check if already exists
+                existing = db.execute(
+                    "SELECT id FROM tool_chains WHERE chain_name = ?", (chain_name,)
+                ).fetchone()
 
-            if not existing:
-                # Create embedding text for semantic search
-                embedding_text = f"Workflow: {chain_name} | Steps: {', '.join(tool_names)} | Tools: {', '.join(tools)}"
+                if not existing:
+                    # Create embedding text for semantic search
+                    embedding_text = f"Workflow: {chain_name} | Steps: {', '.join(tool_names)} | Tools: {', '.join(tools)}"
 
-                db.execute(
-                    """
-                    INSERT INTO tool_chains (chain_name, chain_tools, description, embedding_text, use_count, is_auto_detected)
-                    VALUES (?, ?, ?, ?, ?, 1)
-                """,
-                    (
-                        chain_name,
-                        json.dumps(tools),
-                        description,
-                        embedding_text,
-                        row["occurrence_count"],
-                    ),
-                )
+                    db.execute(
+                        """
+                        INSERT INTO tool_chains (chain_name, chain_tools, description, embedding_text, use_count, is_auto_detected)
+                        VALUES (?, ?, ?, ?, ?, 1)
+                    """,
+                        (
+                            chain_name,
+                            json.dumps(tools),
+                            description,
+                            embedding_text,
+                            row["occurrence_count"],
+                        ),
+                    )
 
-                detected_chains.append(
-                    {
-                        "name": chain_name,
-                        "tools": tools,
-                        "description": description,
-                        "occurrences": row["occurrence_count"],
-                    }
-                )
+                    detected_chains.append(
+                        {
+                            "name": chain_name,
+                            "tools": tools,
+                            "description": description,
+                            "occurrences": row["occurrence_count"],
+                        }
+                    )
 
-        db.commit()
+            db.commit()
 
         if detected_chains:
             logger.info(f"Detected {len(detected_chains)} new tool chains")
@@ -697,9 +724,10 @@ class CompassAnalytics:
 
     def close(self):
         """Close database connection."""
-        if self.db:
-            self.db.close()
-            self.db = None
+        with self._lock:
+            if self.db:
+                self.db.close()
+                self.db = None
 
 
 # Singleton instance

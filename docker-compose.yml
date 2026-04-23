@@ -9,7 +9,8 @@
 #   - Ollama running locally (or update OLLAMA_URL)
 #   - Run `ollama pull nomic-embed-text` first
 
-version: '3.8'
+# Note: the top-level `version:` key is obsolete in Compose v2+ and is
+# intentionally omitted (CDS-A-010).
 
 services:
   # ==========================================================================

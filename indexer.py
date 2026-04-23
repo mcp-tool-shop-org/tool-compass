@@ -116,82 +116,118 @@ class CompassIndex:
         # Initialize database
         self._init_db()
 
-        # Clear existing data
-        self.db.execute("DELETE FROM tools")
-        self.db.commit()
+        # Empty tool set: clear state and initialize an empty HNSW index so
+        # search() returns [] cleanly (see IDX-A-002 regression).
+        if not tools:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                self.db.execute("DELETE FROM tools")
+                self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+                self.index.init_index(
+                    max_elements=1000,
+                    ef_construction=HNSW_EF_CONSTRUCTION,
+                    M=HNSW_M,
+                )
+                self.index.set_ef(HNSW_EF_SEARCH)
+                self.index.save_index(str(self.index_path))
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
+            self._id_to_name = {}
+            logger.info("build_index completed with 0 tools")
+            return
 
-        # Insert tools and collect texts for embedding
-        embedding_texts = []
-        tool_ids = []
+        # Wrap the DELETE → INSERT → embed → add_items sequence in a single
+        # transaction. Only commit AFTER HNSW save succeeds, so a failure
+        # leaves the previous DB state intact (no orphan SQLite rows).
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            # Clear existing data
+            self.db.execute("DELETE FROM tools")
 
-        for i, tool in enumerate(tools):
-            embedding_text = tool.embedding_text()
-            embedding_texts.append(embedding_text)
+            # Insert tools and collect texts for embedding
+            embedding_texts = []
+            tool_ids = []
 
-            # Insert into SQLite
-            cursor = self.db.execute(
+            for i, tool in enumerate(tools):
+                embedding_text = tool.embedding_text()
+                embedding_texts.append(embedding_text)
+
+                # Insert into SQLite (still inside the open transaction)
+                cursor = self.db.execute(
+                    """
+                    INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        tool.name,
+                        tool.description,
+                        tool.category,
+                        tool.server,
+                        json.dumps(tool.parameters),
+                        json.dumps(tool.examples),
+                        1 if tool.is_core else 0,
+                        embedding_text,
+                    ),
+                )
+                tool_ids.append(cursor.lastrowid)
+
+            logger.info(f"Inserted {len(tools)} tools into database (uncommitted)")
+
+            # Generate embeddings
+            logger.info("Generating embeddings via Ollama...")
+            embed_start = time.time()
+            embeddings = await self.embedder.embed_batch(embedding_texts)
+            embed_time = time.time() - embed_start
+            logger.info(f"Generated {len(embeddings)} embeddings in {embed_time:.2f}s")
+
+            # Validate shape before add_items to fail fast on partial embeds.
+            if embeddings.shape != (len(tools), EMBEDDING_DIM):
+                raise RuntimeError(
+                    f"Embedding shape mismatch: got {embeddings.shape}, "
+                    f"expected ({len(tools)}, {EMBEDDING_DIM})"
+                )
+
+            # Build HNSW index
+            logger.info("Building HNSW index...")
+            self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+            self.index.init_index(
+                max_elements=max(len(tools) * 2, 1000),  # Room to grow
+                ef_construction=HNSW_EF_CONSTRUCTION,
+                M=HNSW_M,
+            )
+
+            # Add vectors with tool IDs
+            self.index.add_items(embeddings, tool_ids)
+            self.index.set_ef(HNSW_EF_SEARCH)
+
+            # Save index — only after this succeeds do we commit SQLite.
+            self.index.save_index(str(self.index_path))
+
+            # Update metadata
+            self.db.execute(
                 """
-                INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO index_meta (key, value) VALUES
+                ('tool_count', ?),
+                ('embedding_dim', ?),
+                ('hnsw_m', ?),
+                ('hnsw_ef_construction', ?),
+                ('build_time', ?)
             """,
                 (
-                    tool.name,
-                    tool.description,
-                    tool.category,
-                    tool.server,
-                    json.dumps(tool.parameters),
-                    json.dumps(tool.examples),
-                    1 if tool.is_core else 0,
-                    embedding_text,
+                    str(len(tools)),
+                    str(EMBEDDING_DIM),
+                    str(HNSW_M),
+                    str(HNSW_EF_CONSTRUCTION),
+                    str(time.time() - start_time),
                 ),
             )
-            tool_ids.append(cursor.lastrowid)
-
-        self.db.commit()
-        logger.info(f"Inserted {len(tools)} tools into database")
-
-        # Generate embeddings
-        logger.info("Generating embeddings via Ollama...")
-        embed_start = time.time()
-        embeddings = await self.embedder.embed_batch(embedding_texts)
-        embed_time = time.time() - embed_start
-        logger.info(f"Generated {len(embeddings)} embeddings in {embed_time:.2f}s")
-
-        # Build HNSW index
-        logger.info("Building HNSW index...")
-        self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
-        self.index.init_index(
-            max_elements=max(len(tools) * 2, 1000),  # Room to grow
-            ef_construction=HNSW_EF_CONSTRUCTION,
-            M=HNSW_M,
-        )
-
-        # Add vectors with tool IDs
-        self.index.add_items(embeddings, tool_ids)
-        self.index.set_ef(HNSW_EF_SEARCH)
-
-        # Save index
-        self.index.save_index(str(self.index_path))
-
-        # Update metadata
-        self.db.execute(
-            """
-            INSERT OR REPLACE INTO index_meta (key, value) VALUES
-            ('tool_count', ?),
-            ('embedding_dim', ?),
-            ('hnsw_m', ?),
-            ('hnsw_ef_construction', ?),
-            ('build_time', ?)
-        """,
-            (
-                str(len(tools)),
-                str(EMBEDDING_DIM),
-                str(HNSW_M),
-                str(HNSW_EF_CONSTRUCTION),
-                str(time.time() - start_time),
-            ),
-        )
-        self.db.commit()
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            logger.error("build_index failed; rolled back SQLite transaction")
+            raise
 
         # Load ID mapping
         self._load_id_mapping()
@@ -286,8 +322,13 @@ class CompassIndex:
         # Generate query embedding
         query_embedding = await self.embedder.embed_query(query)
 
-        # Search HNSW (get more than needed for filtering)
-        search_k = min(top_k * 3, self.index.get_current_count())
+        # Guard against empty index — knn_query crashes on k=0 or k > count.
+        count = self.index.get_current_count()
+        if count == 0:
+            return []
+
+        # Search HNSW (get more than needed for filtering), clamped to [1, count].
+        search_k = max(1, min(top_k * 3, count))
         labels, distances = self.index.knn_query(
             query_embedding.reshape(1, -1), k=search_k
         )
@@ -317,12 +358,24 @@ class CompassIndex:
         return results
 
     def search_sync(self, query: str, top_k: int = 5, **kwargs) -> List[SearchResult]:
-        """Synchronous search wrapper."""
-        loop = asyncio.new_event_loop()
+        """Synchronous search wrapper.
+
+        Safe to call from either a normal synchronous context or inside an
+        active event loop (e.g., Gradio, FastMCP). Mirrors SyncEmbedder._run.
+        """
+        coro = self.search(query, top_k, **kwargs)
         try:
-            return loop.run_until_complete(self.search(query, top_k, **kwargs))
-        finally:
-            loop.close()
+            asyncio.get_running_loop()
+            # A loop is already running — dispatch to a worker thread with
+            # its own loop so we don't deadlock the caller's loop.
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, coro)
+                return future.result()
+        except RuntimeError:
+            # No running loop — safe to use asyncio.run directly.
+            return asyncio.run(coro)
 
     def get_stats(self) -> Dict:
         """Get index statistics."""
@@ -384,79 +437,82 @@ class CompassIndex:
             return False
 
         try:
+            # Generate embedding FIRST — if Ollama fails we never touched the DB.
+            embedding_text = tool.embedding_text()
+            embedding = await self.embedder.embed(embedding_text)
+
+            # Now do DB write + HNSW add inside a single transaction.
             # Check if tool already exists
             cursor = self.db.execute(
                 "SELECT id FROM tools WHERE name = ?", (tool.name,)
             )
             existing = cursor.fetchone()
 
-            if existing:
-                # Update existing tool
-                tool_id = existing["id"]
-                embedding_text = tool.embedding_text()
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                if existing:
+                    # Update existing tool
+                    tool_id = existing["id"]
 
-                self.db.execute(
-                    """
-                    UPDATE tools SET
-                        description = ?, category = ?, server = ?,
-                        parameters = ?, examples = ?, is_core = ?,
-                        embedding_text = ?
-                    WHERE id = ?
-                """,
-                    (
-                        tool.description,
-                        tool.category,
-                        tool.server,
-                        json.dumps(tool.parameters),
-                        json.dumps(tool.examples),
-                        1 if tool.is_core else 0,
-                        embedding_text,
-                        tool_id,
-                    ),
-                )
-            else:
-                # Insert new tool
-                embedding_text = tool.embedding_text()
+                    self.db.execute(
+                        """
+                        UPDATE tools SET
+                            description = ?, category = ?, server = ?,
+                            parameters = ?, examples = ?, is_core = ?,
+                            embedding_text = ?
+                        WHERE id = ?
+                    """,
+                        (
+                            tool.description,
+                            tool.category,
+                            tool.server,
+                            json.dumps(tool.parameters),
+                            json.dumps(tool.examples),
+                            1 if tool.is_core else 0,
+                            embedding_text,
+                            tool_id,
+                        ),
+                    )
+                else:
+                    # Insert new tool
+                    cursor = self.db.execute(
+                        """
+                        INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            tool.name,
+                            tool.description,
+                            tool.category,
+                            tool.server,
+                            json.dumps(tool.parameters),
+                            json.dumps(tool.examples),
+                            1 if tool.is_core else 0,
+                            embedding_text,
+                        ),
+                    )
+                    tool_id = cursor.lastrowid
 
-                cursor = self.db.execute(
-                    """
-                    INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                    (
-                        tool.name,
-                        tool.description,
-                        tool.category,
-                        tool.server,
-                        json.dumps(tool.parameters),
-                        json.dumps(tool.examples),
-                        1 if tool.is_core else 0,
-                        embedding_text,
-                    ),
-                )
-                tool_id = cursor.lastrowid
+                # Check if we need to resize the index
+                if self.index.get_current_count() >= self.index.get_max_elements() - 1:
+                    # Need to resize - HNSW doesn't support dynamic resize, so we extend
+                    new_max = self.index.get_max_elements() * 2
+                    self.index.resize_index(new_max)
+                    logger.info(f"Resized HNSW index to {new_max} elements")
 
-            self.db.commit()
+                # Add to HNSW index
+                self.index.add_items(embedding.reshape(1, -1), [tool_id])
 
-            # Generate embedding
-            embedding_text = tool.embedding_text()
-            embedding = await self.embedder.embed(embedding_text)
+                # Save index before committing SQLite.
+                self.index.save_index(str(self.index_path))
 
-            # Check if we need to resize the index
-            if self.index.get_current_count() >= self.index.get_max_elements() - 1:
-                # Need to resize - HNSW doesn't support dynamic resize, so we extend
-                new_max = self.index.get_max_elements() * 2
-                self.index.resize_index(new_max)
-                logger.info(f"Resized HNSW index to {new_max} elements")
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                raise
 
-            # Add to HNSW index
-            self.index.add_items(embedding.reshape(1, -1), [tool_id])
-
-            # Update ID mapping
+            # Update ID mapping (post-commit, in-memory only)
             self._id_to_name[tool_id] = tool.name
-
-            # Save index
-            self.index.save_index(str(self.index_path))
 
             logger.info(f"Added tool to index: {tool.name}")
             return True

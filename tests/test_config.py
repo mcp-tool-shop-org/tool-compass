@@ -5,6 +5,7 @@ Tests cross-platform path handling and environment variable support.
 """
 
 import os
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
@@ -54,6 +55,28 @@ class TestPathResolution:
             assert exe  # Should return something
             # Should be a valid path or the current interpreter
             assert Path(exe).exists() or exe == sys.executable
+
+    def test_get_python_executable_env_nonexistent_falls_back(self, tmp_path):
+        """If TOOL_COMPASS_PYTHON points to a nonexistent path, behavior must
+        be well-defined — exercise the OR branch in get_python_executable so
+        that path isn't silently untested. Historically this branch referenced
+        an unimported `sys`, so the fallback raised NameError instead of
+        returning a valid interpreter.
+        """
+        fake = str(tmp_path / "does_not_exist_python")
+        assert not Path(fake).exists()
+        # Current contract: env var wins verbatim (caller owns validation).
+        # This test LOCKS IN that contract and executes the code path without
+        # raising NameError — if the implementation later changes to validate
+        # existence and fall back, adjust this assertion accordingly.
+        with patch.dict(os.environ, {"TOOL_COMPASS_PYTHON": fake}):
+            exe = get_python_executable()
+            # Must not raise NameError; must return a non-empty string.
+            assert isinstance(exe, str)
+            assert exe  # non-empty
+            # Either verbatim env value, or a real existing interpreter
+            # (sys.executable fallback).
+            assert exe == fake or Path(exe).exists() or exe == sys.executable
 
     def test_get_config_path_from_env(self, tmp_path):
         """TOOL_COMPASS_CONFIG should override default."""

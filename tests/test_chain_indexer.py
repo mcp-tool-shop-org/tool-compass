@@ -7,7 +7,6 @@ Tests tool chain/workflow indexing, searching, and management.
 import pytest
 import json
 import numpy as np
-from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
 import sqlite3
 

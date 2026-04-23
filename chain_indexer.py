@@ -254,7 +254,8 @@ class ChainIndexer:
             if similarity < min_confidence:
                 continue
 
-            chain = self._id_to_chain.get(label)
+            # Cast numpy int64 → Python int so dict lookup matches int keys.
+            chain = self._id_to_chain.get(int(label))
             if chain:
                 results.append(ChainSearchResult(
                     chain=chain,
@@ -342,6 +343,14 @@ class ChainIndexer:
 
         # Add to index if it exists
         if self.index:
+            # Resize at capacity so add_items doesn't throw on a full index.
+            current_count = self.index.get_current_count()
+            max_elements = self.index.get_max_elements()
+            if current_count >= max_elements - 1:
+                new_max = max_elements * 2
+                self.index.resize_index(new_max)
+                logger.info(f"Resized chain HNSW index to {new_max} elements")
+
             self._id_to_chain[chain_id] = chain
             self.index.add_items(
                 embedding.reshape(1, -1).astype(np.float32), [chain_id]

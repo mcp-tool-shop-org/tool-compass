@@ -152,8 +152,16 @@ class Embedder:
         Returns:
             numpy array of shape (len(texts), EMBEDDING_DIM)
         """
-        # Ollama doesn't support true batching, so we parallelize
-        tasks = [self.embed(text) for text in texts]
+        # Ollama doesn't support true batching, so we parallelize.
+        # Cap concurrency so we don't overwhelm Ollama (or the async runtime)
+        # when indexing large tool lists.
+        semaphore = asyncio.Semaphore(8)
+
+        async def _bounded_embed(text: str) -> np.ndarray:
+            async with semaphore:
+                return await self.embed(text)
+
+        tasks = [_bounded_embed(text) for text in texts]
         embeddings = await asyncio.gather(*tasks)
         return np.stack(embeddings)
 

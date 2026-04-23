@@ -35,7 +35,7 @@ from indexer import CompassIndex, SearchResult
 from tool_manifest import ToolDefinition
 from config import load_config, CompassConfig, CONFIG_PATH
 # Use simple backend client to avoid anyio conflicts when nested inside another MCP server
-from backend_client_simple import SimpleBackendManager as BackendManager, ToolInfo
+from backend_client_simple import SimpleBackendManager as BackendManager
 from analytics import CompassAnalytics, get_analytics
 from sync_manager import SyncManager, get_sync_manager
 from chain_indexer import ChainIndexer, get_chain_indexer
@@ -393,7 +393,7 @@ async def compass(
     response = {
         "matches": matches,
         "total_indexed": total_tools,
-        "tokens_saved": (total_tools - len(matches)) * 500,
+        "tokens_saved": max(0, (total_tools - len(matches)) * 500),
         "hint": hint,
         "workflow": "compass() -> describe() -> execute()"
         if config.progressive_disclosure
@@ -518,7 +518,17 @@ async def execute(
 
     # Record analytics
     latency_ms = (time.time() - start_time) * 1000
-    success = result.get("success", True) if isinstance(result, dict) else True
+    if isinstance(result, dict):
+        if "success" in result:
+            success = result["success"]
+        else:
+            # Missing 'success' key: treat as failure to avoid masking backend errors
+            logger.warning(
+                f"Backend result for {tool_name} lacks 'success' key; defaulting to False"
+            )
+            success = False
+    else:
+        success = False
     error_msg = (
         result.get("error") if isinstance(result, dict) and not success else None
     )
@@ -829,6 +839,7 @@ async def compass_audit(
     }
 
     # Hot cache
+    analytics = None
     if config.analytics_enabled:
         analytics = await get_analytics_instance()
         if analytics:
@@ -883,26 +894,30 @@ async def compass_audit(
 
     # Optionally include all tools
     if include_tools:
-        cursor = index.db.execute(
-            "SELECT name, description, category, server FROM tools ORDER BY server, category, name"
-        )
-        audit["tools"] = [
-            {
-                "name": row["name"],
-                "description": row["description"][:80] + "..."
-                if len(row["description"]) > 80
-                else row["description"],
-                "category": row["category"],
-                "server": row["server"],
-            }
-            for row in cursor.fetchall()
-        ]
+        if index.db:
+            cursor = index.db.execute(
+                "SELECT name, description, category, server FROM tools ORDER BY server, category, name"
+            )
+            audit["tools"] = [
+                {
+                    "name": row["name"],
+                    "description": row["description"][:80] + "..."
+                    if len(row["description"]) > 80
+                    else row["description"],
+                    "category": row["category"],
+                    "server": row["server"],
+                }
+                for row in cursor.fetchall()
+            ]
+        else:
+            audit["tools"] = []
+            audit["tools_note"] = "Index database not available; tool list empty."
 
     # Health check
     issues = []
     if index_stats.get("total_tools", 0) == 0:
         issues.append("No tools indexed - run compass_sync(force=True)")
-    if config.analytics_enabled and not analytics._hot_cache:
+    if config.analytics_enabled and analytics and not analytics._hot_cache:
         issues.append("Hot cache empty - will populate as tools are used")
     if not config.chain_indexing_enabled:
         issues.append("Chain indexing disabled - enable for workflow detection")
@@ -922,7 +937,6 @@ async def compass_audit(
 
 async def sync_from_backends():
     """Sync tool definitions from live backend servers and rebuild index."""
-    import sys
 
     print("\n" + "=" * 60)
     print("  TOOL COMPASS - INDEX SYNC")
@@ -934,7 +948,7 @@ async def sync_from_backends():
     print(f"OK ({len(config.backends)} backends configured)")
 
     # Step 2: Connect to backends
-    print(f"\n[2/4] Connecting to backends...")
+    print("\n[2/4] Connecting to backends...")
     manager = BackendManager(config)
 
     results = await manager.connect_all()
@@ -953,7 +967,7 @@ async def sync_from_backends():
         return
 
     # Step 3: Discover tools
-    print(f"\n[3/4] Discovering tools...")
+    print("\n[3/4] Discovering tools...")
     tools = manager.get_all_tools()
     print(f"      Found {len(tools)} tools from {connected} backend(s)")
 
@@ -997,7 +1011,7 @@ async def sync_from_backends():
     print(f"OK ({len(tool_defs)} definitions)")
 
     # Step 4: Build index
-    print(f"\n[4/4] Building HNSW search index...")
+    print("\n[4/4] Building HNSW search index...")
     index = CompassIndex()
 
     # Check Ollama first
@@ -1024,7 +1038,7 @@ async def sync_from_backends():
     print("-" * 60)
     print(f"  Tools indexed: {result['tools_indexed']}")
     print(f"  Build time: {result['total_time']:.2f}s")
-    print(f"  Index ready for queries")
+    print("  Index ready for queries")
     print("-" * 60 + "\n")
 
 
@@ -1165,7 +1179,14 @@ async def async_main(args):
 
 
 def _run_http(port: int) -> None:
-    """Run the MCP gateway in HTTP mode with a /health endpoint for Fly.io."""
+    """Run the MCP gateway in HTTP mode with a /health endpoint for Fly.io.
+
+    SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
+    Binding to a non-loopback interface exposes RCE-class surface. The HOST env
+    var defaults to 127.0.0.1 (loopback). Only bind to public interfaces when
+    running behind an authenticated reverse proxy (Fly.io edge, etc.).
+    """
+    import os
     from starlette.routing import Route
     from starlette.responses import JSONResponse
 
@@ -1181,16 +1202,25 @@ def _run_http(port: int) -> None:
 
     # Use FastMCP's built-in HTTP runner (handles lifespan + session manager init)
     from mcp.server.transport_security import TransportSecuritySettings
-    mcp.settings.host = "0.0.0.0"
+
+    host = os.environ.get("HOST", "127.0.0.1")
+    if host not in ("127.0.0.1", "localhost", "::1"):
+        logger.warning(
+            f"HTTP mode binding to non-loopback host {host!r}. "
+            "The gateway proxies arbitrary MCP tool calls — ensure an authenticated "
+            "reverse proxy is in front. Set HOST=127.0.0.1 for loopback-only."
+        )
+
+    mcp.settings.host = host
     mcp.settings.port = port
-    # Allow Fly.io and Smithery proxy hosts
+    # Allow Fly.io and Smithery proxy hosts (0.0.0.0 intentionally omitted — never a valid Host header)
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=[
             "tool-compass-gateway.fly.dev",
             "tool-compass-gateway--mcp-tool-shop.run.tools",
             "localhost",
-            "0.0.0.0",
+            "127.0.0.1",
         ],
     )
     mcp.run(transport="streamable-http")
@@ -1264,7 +1294,8 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         import os
         port = os.environ.get("PORT")
         if port:
-            print(f"Transport: streamable-http on 0.0.0.0:{port}", file=sys.stderr)
+            host = os.environ.get("HOST", "127.0.0.1")
+            print(f"Transport: streamable-http on {host}:{port}", file=sys.stderr)
             _run_http(int(port))
         else:
             print("Transport: stdio", file=sys.stderr)

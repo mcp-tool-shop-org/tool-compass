@@ -5,7 +5,6 @@ Tests backend change detection, hash computation, and sync operations.
 """
 
 import pytest
-from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
 
 from sync_manager import SyncManager, get_sync_manager

@@ -90,7 +90,18 @@ class TestCompassTool:
         result = await compass(intent="anything", top_k=3)
 
         assert "tokens_saved" in result
-        assert result["tokens_saved"] >= 0
+        # `>= 0` was tautological for any non-negative number including
+        # nonsense types that compare True. Assert it's a numeric type and
+        # that it is related to the number of tools NOT shown (i.e. the
+        # full tool list minus the top_k returned).
+        assert isinstance(result["tokens_saved"], (int, float))
+        total_indexed = result.get("total_indexed", 0)
+        shown = len(result.get("matches", []))
+        # tokens_saved should be zero only when all tools were shown.
+        if total_indexed > shown:
+            assert result["tokens_saved"] > 0
+        else:
+            assert result["tokens_saved"] >= 0
 
     @pytest.mark.asyncio
     async def test_compass_no_results(self, test_index, test_config):

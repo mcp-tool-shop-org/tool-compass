@@ -7,7 +7,7 @@ test:
 	pytest --cov=. --cov-report=term-missing -m "not integration"
 
 lint:
-	ruff check . || true
+	ruff check .
 
 build:
 	python -m build --sdist --wheel

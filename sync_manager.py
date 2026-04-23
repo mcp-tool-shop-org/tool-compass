@@ -176,10 +176,17 @@ class SyncManager:
 
             # Convert to ToolDefinition format
             for tool in tools:
-                # Parse server and name
+                # Parse server from the qualified name ("server:tool").
+                # The short name is intentionally dropped here — ToolDefinition.name
+                # below uses tool.qualified_name (fully-qualified) to keep names
+                # globally unique across backends.
                 if ":" in tool.qualified_name:
-                    server, name = tool.qualified_name.split(":", 1)
+                    server, _short_name = tool.qualified_name.split(":", 1)
                 else:
+                    # No colon — fall back to the backend-reported server.
+                    # Note: tool.qualified_name is unqualified in this case; we
+                    # still use it as ToolDefinition.name below, accepting that
+                    # a server-less name can collide with tools from other backends.
                     server = tool.server
 
                 # Extract parameters from schema
@@ -282,8 +289,11 @@ class SyncManager:
 
                 # Convert to ToolDefinition
                 for tool in tools:
+                    # See sibling comment in _rebuild_for_backends — short name
+                    # is intentionally dropped; ToolDefinition.name uses the
+                    # qualified form.
                     if ":" in tool.qualified_name:
-                        server, name = tool.qualified_name.split(":", 1)
+                        server, _short_name = tool.qualified_name.split(":", 1)
                     else:
                         server = tool.server
 
@@ -381,12 +391,21 @@ class SyncManager:
 
         async def poll_loop():
             while True:
+                # Explicit cancellation check at loop top so we exit promptly
+                # when stop_background_polling is called.
+                if asyncio.current_task().cancelled():
+                    return
                 await asyncio.sleep(interval_seconds)
                 try:
-                    results = await self.sync_if_needed()
+                    # Shield the critical section: once we've taken the sync
+                    # lock, a cancel shouldn't leave the lock in a weird state
+                    # or abort a partial rebuild.
+                    results = await asyncio.shield(self.sync_if_needed())
                     synced = [k for k, v in results.items() if v == "synced"]
                     if synced:
                         logger.info(f"Background sync completed for: {synced}")
+                except asyncio.CancelledError:
+                    raise
                 except Exception as e:
                     logger.error(f"Background sync error: {e}")
 

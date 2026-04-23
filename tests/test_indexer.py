@@ -5,7 +5,6 @@ Tests HNSW index building, searching, and metadata management.
 """
 
 import pytest
-from pathlib import Path
 
 from indexer import CompassIndex, SearchResult
 from tool_manifest import ToolDefinition

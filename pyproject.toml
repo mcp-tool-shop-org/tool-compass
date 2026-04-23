@@ -67,11 +67,33 @@ Issues = "https://github.com/mcp-tool-shop-org/tool-compass/issues"
 Changelog = "https://github.com/mcp-tool-shop-org/tool-compass/blob/main/CHANGELOG.md"
 
 [project.scripts]
-tool-compass = "tool_compass.gateway:main"
-tool-compass-ui = "tool_compass.ui:main"
+# Flat-layout: modules live at the repo root (gateway.py, ui.py), not in a
+# tool_compass/ subpackage. Entry points reference the top-level modules.
+tool-compass = "gateway:main"
+tool-compass-ui = "ui:main"
 
 [tool.hatch.build.targets.wheel]
+# Explicit module list for hatch under a flat layout. Without this hatch
+# would either try to infer a package named `tool_compass` (doesn't exist)
+# or bundle stray top-level modules unpredictably.
 packages = ["."]
+only-include = [
+    "gateway.py",
+    "ui.py",
+    "indexer.py",
+    "embedder.py",
+    "chain_indexer.py",
+    "analytics.py",
+    "config.py",
+    "backend_client_mcp.py",
+    "backend_client_simple.py",
+    "sync_manager.py",
+    "tool_manifest.py",
+    "bootstrap.py",
+    "_version.py",
+    "compass_config.example.json",
+    "llms.txt",
+]
 exclude = [
     "tests/",
     "archive/",
@@ -99,16 +121,32 @@ exclude = [
     "compass_config.json",
 ]
 
+[tool.ruff]
+# Per-file ignores for pre-existing patterns scheduled for Stage B/C humanization wave.
+# E402: ui.py uses sys.path.insert before imports for flat-layout compatibility.
+# E722: bare except in get_filter_choices — will be narrowed in Stage C humanization.
+[tool.ruff.lint.per-file-ignores]
+"ui.py" = ["E402", "E722"]
+
 [tool.pytest.ini_options]
+# Consolidated from former pytest.ini (TST-A-008). Single source of truth.
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]  # Allow imports without sys.path.insert
 python_files = ["test_*.py"]
+python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --strict-markers -ra"
 markers = [
-    "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests requiring external services (Ollama, backends)",
+    "slow: marks tests that take a long time to run",
+]
+# Narrowed from blanket DeprecationWarning ignore to known-noisy modules only,
+# so new deprecations in our own code still surface.
+filterwarnings = [
+    "ignore::DeprecationWarning:hnswlib",
+    "ignore::DeprecationWarning:pkg_resources",
+    "ignore::PendingDeprecationWarning",
 ]
 
 [tool.coverage.run]

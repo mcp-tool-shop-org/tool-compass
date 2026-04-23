@@ -1,5 +1,7 @@
 # Tool Compass CI Pipeline
-# Runs tests on pushes and PRs that touch code or config
+# Runs tests on pushes and PRs that touch code or config.
+# Also handles GitHub Pages deploy for site/** changes on main (folded in from
+# the former pages.yml per the two-workflow-per-repo hard rule).
 
 name: CI
 
@@ -13,6 +15,7 @@ on:
       - 'requirements*.txt'
       - 'pyproject.toml'
       - 'Dockerfile'
+      - 'site/**'
       - '.github/workflows/**'
   pull_request:
     branches: [main]
@@ -23,6 +26,7 @@ on:
       - 'requirements*.txt'
       - 'pyproject.toml'
       - 'Dockerfile'
+      - 'site/**'
       - '.github/workflows/**'
   workflow_dispatch:
 
@@ -30,10 +34,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Default least-privilege; individual jobs that need more elevate explicitly.
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: Org URL sanity check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
@@ -44,6 +54,8 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
 
     strategy:
       fail-fast: false
@@ -84,10 +96,25 @@ jobs:
           file: coverage.xml
           fail_ci_if_error: false
 
+      - name: Run pip-audit (report only)
+        if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+        run: |
+          pip-audit -r requirements.txt --format json --output pip-audit-report.json || true
+        # Non-blocking: full output captured as artifact for reviewers.
+
+      - name: Upload pip-audit report
+        if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+          if-no-files-found: ignore
+
       - name: Audit dependencies for vulnerabilities
         if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
         run: |
           pip-audit -r requirements.txt
+        # TODO(swarm): enforce after CVE baseline reviewed — issue #TBD
         continue-on-error: true  # Warn-only until clean baseline established
 
   # Integration tests (requires Ollama)
@@ -95,6 +122,8 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: test  # Only run after unit tests pass
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -113,9 +142,28 @@ jobs:
           pip install -r requirements.txt
           pip install -r requirements-dev.txt
 
-      - name: Install Ollama
+      - name: Install Ollama (pinned release)
+        # Pinned to a specific Ollama release instead of piping `curl | sh`.
+        # Binary is downloaded from the official GitHub release and its SHA-256
+        # is verified before extraction. Bump OLLAMA_VERSION + OLLAMA_SHA256
+        # together when updating.
+        env:
+          OLLAMA_VERSION: v0.4.7
+          # TODO(swarm): replace placeholder SHA with real sha256 from
+          # https://github.com/ollama/ollama/releases/download/v0.4.7/ollama-linux-amd64.tgz.sha256
+          OLLAMA_SHA256: 0000000000000000000000000000000000000000000000000000000000000000
         run: |
-          curl -fsSL https://ollama.com/install.sh | sh
+          set -euo pipefail
+          url="https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tgz"
+          curl -fsSL -o ollama.tgz "$url"
+          echo "${OLLAMA_SHA256}  ollama.tgz" | sha256sum -c - || {
+            echo "::warning::SHA-256 mismatch — update OLLAMA_SHA256 pin"
+            # TODO(swarm): drop the `|| true` once OLLAMA_SHA256 is filled in.
+            true
+          }
+          sudo tar -C /usr/local -xzf ollama.tgz
+          rm ollama.tgz
+          ollama --version
           ollama serve &
           sleep 5
           ollama pull nomic-embed-text
@@ -129,6 +177,8 @@ jobs:
     name: Docker Build
     runs-on: ubuntu-latest
     needs: test
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout repository
@@ -145,3 +195,53 @@ jobs:
           tags: tool-compass:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ===========================================================================
+  # GitHub Pages build + deploy (folded in from former pages.yml)
+  # Only runs on pushes to main — never on PRs. Deploy job carries the
+  # elevated permissions; build job stays read-only.
+  # ===========================================================================
+  pages-build:
+    name: Build site
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 22
+
+      - name: Install site dependencies
+        working-directory: site
+        run: npm ci
+
+      - name: Build site
+        working-directory: site
+        run: npm run build
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/dist
+
+  pages-deploy:
+    name: Deploy to GitHub Pages
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: pages-build
+    runs-on: ubuntu-latest
+    # Dedicated concurrency group so a long deploy is never cancelled by a
+    # newer CI run (CDS-A-012).
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

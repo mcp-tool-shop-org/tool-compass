@@ -7,7 +7,6 @@ Tests Ollama embedding generation, both async and sync wrappers.
 import pytest
 import asyncio
 import numpy as np
-from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
 import httpx
 
