@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first for layer caching
 COPY requirements.txt .
-COPY pyproject.toml .
+COPY pyproject.toml README.md LICENSE ./
 COPY cli.py gateway.py ui.py indexer.py embedder.py chain_indexer.py \
      analytics.py config.py sync_manager.py tool_manifest.py \
      bootstrap.py backend_client_simple.py backend_client_mcp.py \
