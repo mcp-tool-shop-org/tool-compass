@@ -5,6 +5,19 @@ All notable changes to Tool Compass will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.2] - 2026-04-23
+
+Patch release. Fixes the Docker image so the `tool-compass` console script
+is actually installed inside the container (was missing in v2.2.0/v2.2.1).
+
+### Fixed
+- Docker image now runs `pip install --no-deps .` during build, so
+  `docker run ghcr.io/mcp-tool-shop-org/tool-compass:2.2.2 tool-compass --version`
+  (or any subcommand) works out of the box. v2.2.0/v2.2.1 images only
+  shipped the source tree; the console script was never registered on
+  PATH.
+- Dockerfile `LABEL version` bumped 2.0.7 → 2.2.2.
+
 ## [2.2.1] - 2026-04-23
 
 Patch release. Fixes the v2.2.0 release-smoke defect.
