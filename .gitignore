@@ -98,3 +98,7 @@ tmpclaude-*
 archive/
 site/.astro/
 site/node_modules/
+
+# forkctl / polyglot-mcp scratch
+.artifact/
+.polyglot-cache.json

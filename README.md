@@ -57,8 +57,7 @@ ollama pull nomic-embed-text
 
 # Clone and setup
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
-
-cd tool-compass/tool_compass
+cd tool-compass
 
 # Create virtual environment
 python -m venv venv
@@ -82,8 +81,7 @@ python ui.py
 ```bash
 # Clone the repo
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
-
-cd tool-compass/tool_compass
+cd tool-compass
 
 # Start with Docker Compose (requires Ollama running locally)
 docker-compose up
@@ -211,6 +209,7 @@ The `hint` field in compass results guides this flow, suggesting when to use `de
 | `TOOL_COMPASS_DATA_DIR` | Data directory | Platform-specific (see below) |
 | `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
+| `PORT` | Set to enable HTTP transport (e.g., for Fly.io) | unset (stdio) |
 
 **Default data directories:**
 - **Windows:** `%LOCALAPPDATA%\tool-compass\`
@@ -303,7 +302,7 @@ Tool Compass is a **local-first** development tool. See [SECURITY.md](SECURITY.m
 | A. Security | 10/10 | SECURITY.md, local-only, no telemetry, parameterized SQL |
 | B. Error Handling | 10/10 | Structured results, graceful Ollama fallback |
 | C. Operator Docs | 10/10 | README, CHANGELOG, CONTRIBUTING, API docs |
-| D. Shipping Hygiene | 10/10 | CI (lint + 413 tests + coverage + pip-audit + Docker), verify script |
+| D. Shipping Hygiene | 10/10 | CI (lint + tests + coverage + pip-audit + Docker), verify script |
 | E. Identity | 10/10 | Logo, translations, landing page |
 | **Total** | **50/50** | |
 

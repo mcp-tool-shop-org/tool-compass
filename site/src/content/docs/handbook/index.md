@@ -9,6 +9,7 @@ Welcome to the Tool Compass handbook.
 
 ## What's inside
 
+- **[Beginners](/tool-compass/handbook/beginners/)** — First-time setup walkthrough and core concepts
 - **[Getting Started](/tool-compass/handbook/getting-started/)** — Install, build the index, run the gateway
 - **[Tools](/tool-compass/handbook/tools/)** — All 9 gateway tools in detail
 - **[Architecture](/tool-compass/handbook/architecture/)** — How semantic search works under the hood
