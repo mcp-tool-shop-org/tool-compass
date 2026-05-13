@@ -12,7 +12,7 @@
     "@astrojs/starlight": "^0.38.3",
     "@mcptoolshop/site-theme": "^0.2.4",
     "@tailwindcss/vite": "^4.2.0",
-    "astro": "^6.1.8",
+    "astro": "^6.3.1",
     "tailwindcss": "^4.2.0"
   }
 }
