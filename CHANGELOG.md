@@ -247,17 +247,9 @@ Dogfood swarm release: Stage A bug/security health pass + Stage B/C humanization
 
 ---
 
-## Version History
-
-| Version | Date | Highlights |
-|---------|------|------------|
-| 2.0.3 | 2026-02-14 | Bug fixes, async safety, CI hygiene, 410 tests |
-| 2.0.2 | 2026-02-14 | Org migration, CI updates, Windows fix |
-| 2.0.0 | 2026-01-17 | Gradio UI, error handling, polish |
-| 1.1.0 | 2026-01-16 | Workflows, analytics, sync |
-| 1.0.0 | 2026-01-15 | Initial release |
-
-[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.2.2...HEAD
+[2.2.2]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.2.1...v2.2.2
+[2.2.1]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.2.0...v2.2.1
 [2.2.0]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.7...v2.2.0
 [2.0.7]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.6...v2.0.7
 [2.0.6]: https://github.com/mcp-tool-shop-org/tool-compass/compare/v2.0.3...v2.0.6

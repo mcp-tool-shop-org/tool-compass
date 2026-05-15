@@ -74,15 +74,51 @@ class TestAnalyticsRecording:
 
     @pytest.mark.asyncio
     async def test_record_tool_call_with_arguments(self, test_analytics):
-        """Should handle tool calls with arguments."""
+        """Should hash argument payload and persist it on the call row."""
+        # TS-A-003: previously this test asserted nothing beyond "did not raise."
+        # Verify the args_hash is computed, deterministic for the same input,
+        # and actually written to tool_calls.arguments_hash.
+        arguments = {"filepath": "/tmp/test.txt", "encoding": "utf-8"}
+
         await test_analytics.record_tool_call(
             tool_name="test:read_file",
             success=True,
             latency_ms=25.0,
-            arguments={"filepath": "/tmp/test.txt", "encoding": "utf-8"},
+            arguments=arguments,
         )
 
-        # Should not crash, arguments are hashed for patterns
+        # Re-record with the same args — the hashes must match (determinism).
+        await test_analytics.record_tool_call(
+            tool_name="test:read_file",
+            success=True,
+            latency_ms=25.0,
+            arguments=arguments,
+        )
+
+        # Re-record with different args — the hash must differ.
+        await test_analytics.record_tool_call(
+            tool_name="test:read_file",
+            success=True,
+            latency_ms=25.0,
+            arguments={"filepath": "/tmp/other.txt", "encoding": "utf-8"},
+        )
+
+        # Read directly from the DB to verify hashes were persisted.
+        db = test_analytics._get_db()
+        rows = db.execute(
+            "SELECT arguments_hash FROM tool_calls "
+            "WHERE tool_name = 'test:read_file' "
+            "ORDER BY id ASC"
+        ).fetchall()
+        hashes = [row["arguments_hash"] for row in rows]
+
+        assert len(hashes) == 3, f"expected 3 rows recorded, got {len(hashes)}"
+        # All hashes are non-null — args were supplied.
+        assert all(h is not None for h in hashes), hashes
+        # Same input -> same hash (determinism).
+        assert hashes[0] == hashes[1], (hashes[0], hashes[1])
+        # Different input -> different hash (no key-only collision).
+        assert hashes[0] != hashes[2], (hashes[0], hashes[2])
 
 
 class TestHotCache:
@@ -145,7 +181,13 @@ class TestHotCache:
             )
         await test_analytics.refresh_hot_cache()
 
-        # May or may not be hot depending on cache size
+        # TS-A-004: the fixture wires hot_cache_size=5 (conftest.py:298) and
+        # only one tool was recorded. There is no eviction pressure, so the
+        # tool MUST be hot — earlier "may or may not" wording left this
+        # branch unverified.
+        assert test_analytics.is_hot("test:becoming_hot") is True
+        # Negative case: a tool never recorded is not hot.
+        assert test_analytics.is_hot("test:never_recorded") is False
 
 
 class TestChainDetection:
@@ -165,8 +207,22 @@ class TestChainDetection:
             "test:write_file", success=True, latency_ms=15
         )
 
-        # Patterns are saved when sequence reaches certain length
-        # The internal _session_tool_sequence should have these
+        # TS-A-001: the three calls must show up in the in-memory session
+        # sequence (the deque feeding chain detection). The deque stores
+        # tool_name strings — assert the trailing three match what we sent
+        # in order. Earlier revisions of this test asserted nothing and so
+        # could not detect a regression where record_tool_call silently
+        # stopped appending to the chain-detection buffer.
+        recent = list(test_analytics._session_tool_sequence)[-3:]
+        assert recent == ["test:read_file", "test:process", "test:write_file"], recent
+
+        # The 3-tool subsequence should also be persisted to chain_patterns
+        # (record_tool_call calls _save_chain_pattern on every append).
+        db = test_analytics._get_db()
+        pattern_count = db.execute(
+            "SELECT COUNT(*) AS n FROM chain_patterns"
+        ).fetchone()["n"]
+        assert pattern_count > 0, "chain_patterns should contain at least one row"
 
     @pytest.mark.asyncio
     async def test_detect_chains(self, test_analytics):
@@ -184,10 +240,22 @@ class TestChainDetection:
         await test_analytics._save_chain_pattern()
 
         # Detect chains
-        await test_analytics.detect_chains()
+        detected = await test_analytics.detect_chains()
 
-        # Should find the a->b pattern
-        # Note: detection requires min_occurrences (default 3)
+        # TS-A-002: detection should have promoted the recurring [step_a,
+        # step_b] subsequence into tool_chains. The fixture sets
+        # chain_min_occurrences=2 (conftest.py:299), so 5 occurrences
+        # clears the bar. Earlier revisions left the assertion off and
+        # could not detect a regression where detect_chains() silently
+        # found nothing.
+        chains = await test_analytics.get_chains(limit=50)
+        chain_tool_sets = [tuple(c["tools"]) for c in chains]
+        assert ("test:step_a", "test:step_b") in chain_tool_sets, chain_tool_sets
+
+        # detect_chains() returns NEW chains it promoted on this call.
+        # On the first run it should be non-empty for this pattern.
+        detected_tool_sets = [tuple(c["tools"]) for c in detected]
+        assert ("test:step_a", "test:step_b") in detected_tool_sets, detected_tool_sets
 
     @pytest.mark.asyncio
     async def test_get_chains(self, test_analytics):
@@ -254,8 +322,15 @@ class TestPersistence:
         # Reload from DB
         await test_analytics.load_hot_cache_from_db()
 
-        # Should be restored
-        # (may or may not contain our tool depending on what else was recorded)
+        # TS-A-005: the fixture wires hot_cache_size=5 and only this one
+        # tool was recorded, so the persisted hot_tools row MUST be
+        # rehydrated. Earlier revisions left the assertion off, so a
+        # regression where load_hot_cache_from_db silently produced an
+        # empty cache would still pass.
+        assert "test:persistent_tool" in test_analytics._hot_cache
+        entry = test_analytics._hot_cache["test:persistent_tool"]
+        assert entry.tool_name == "test:persistent_tool"
+        assert entry.call_count == 5
 
     def test_close(self, test_analytics):
         """Should close database connection cleanly."""

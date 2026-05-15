@@ -70,7 +70,7 @@ _index: Optional[CompassIndex] = None
 _analytics: Optional[CompassAnalytics] = None
 _chain_indexer: Optional[ChainIndexer] = None
 _config = None
-_init_lock = threading.Lock()
+_init_lock = threading.RLock()
 
 
 def get_index() -> CompassIndex:
@@ -834,16 +834,22 @@ def get_chains_view() -> str:
         tool_flow = " → ".join([t.split(":")[-1] for t in chain.tools])
         badge = "🤖 Auto-detected" if chain.is_auto_detected else "👤 Manual"
 
+        safe_chain_name = html.escape(chain.name, quote=True)
+        safe_chain_name_short = html.escape(truncate_text(chain.name, 35), quote=True)
+        safe_flow = html.escape(tool_flow, quote=True)
+        safe_flow_short = html.escape(truncate_text(tool_flow, 80), quote=True)
+        safe_desc = html.escape(truncate_text(chain.description or "", 120), quote=True)
+
         html_parts.append(f"""
         <div style="border: 1px solid #444; border-radius: 8px; padding: 16px; margin: 12px 0; background: #1a2e1a;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.2em; font-weight: bold; color: #81c784;" title="{chain.name}">{truncate_text(chain.name, 35)}</span>
+                <span style="font-size: 1.2em; font-weight: bold; color: #81c784;" title="{safe_chain_name}">{safe_chain_name_short}</span>
                 <span style="color: #888; font-size: 0.9em;">{badge}</span>
             </div>
-            <div style="font-family: monospace; color: #4fc3f7; margin: 12px 0; font-size: 1.1em;" title="{tool_flow}">
-                {truncate_text(tool_flow, 80)}
+            <div style="font-family: monospace; color: #4fc3f7; margin: 12px 0; font-size: 1.1em;" title="{safe_flow}">
+                {safe_flow_short}
             </div>
-            <p style="color: #aaa; margin: 8px 0;">{truncate_text(chain.description, 120)}</p>
+            <p style="color: #aaa; margin: 8px 0;">{safe_desc}</p>
             <div style="color: #666; font-size: 0.9em;">
                 Used {chain.use_count} time{"s" if chain.use_count != 1 else ""}
             </div>
@@ -900,7 +906,9 @@ def get_system_status() -> str:
     except Exception as e:
         ollama_status = f"❌ Unavailable: {truncate_text(str(e), 40)}"
 
-    html = f"""
+    safe_embedding_model = html.escape(str(_config.embedding_model), quote=True)
+
+    out = f"""
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
         <div>
             <h3 style="color: #4fc3f7;">System Health</h3>
@@ -921,24 +929,26 @@ def get_system_status() -> str:
     """
 
     if stats.get("by_server"):
-        html += "<ul style='color: #ccc;'>"
+        out += "<ul style='color: #ccc;'>"
         for server, count in sorted(stats.get("by_server", {}).items()):
-            html += f"<li>{server}: {count}</li>"
-        html += "</ul>"
+            safe_server = html.escape(str(server), quote=True)
+            out += f"<li>{safe_server}: {count}</li>"
+        out += "</ul>"
     else:
-        html += "<p style='color: #888; font-style: italic;'>No data</p>"
+        out += "<p style='color: #888; font-style: italic;'>No data</p>"
 
-    html += "<h4 style='color: #81c784;'>By Category</h4>"
+    out += "<h4 style='color: #81c784;'>By Category</h4>"
 
     if stats.get("by_category"):
-        html += "<ul style='color: #ccc;'>"
+        out += "<ul style='color: #ccc;'>"
         for category, count in sorted(stats.get("by_category", {}).items()):
-            html += f"<li>{category}: {count}</li>"
-        html += "</ul>"
+            safe_category = html.escape(str(category), quote=True)
+            out += f"<li>{safe_category}: {count}</li>"
+        out += "</ul>"
     else:
-        html += "<p style='color: #888; font-style: italic;'>No data</p>"
+        out += "<p style='color: #888; font-style: italic;'>No data</p>"
 
-    html += f"""
+    out += f"""
         </div>
 
         <div>
@@ -948,7 +958,7 @@ def get_system_status() -> str:
                 <li>Auto sync: {"✅" if _config.auto_sync else "❌"}</li>
                 <li>Analytics: {"✅" if _config.analytics_enabled else "❌"}</li>
                 <li>Chain indexing: {"✅" if _config.chain_indexing_enabled else "❌"}</li>
-                <li>Embedding model: <code>{_config.embedding_model}</code></li>
+                <li>Embedding model: <code>{safe_embedding_model}</code></li>
                 <li>Hot cache: {hot_cache_size}/{_config.hot_cache_size}</li>
             </ul>
 
@@ -957,9 +967,10 @@ def get_system_status() -> str:
     """
 
     for name in _config.backends.keys():
-        html += f"<li>{name}</li>"
+        safe_name = html.escape(str(name), quote=True)
+        out += f"<li>{safe_name}</li>"
 
-    html += """
+    out += """
             </ul>
 
             <h3 style="color: #4fc3f7;">Quick Commands</h3>
@@ -972,7 +983,7 @@ def get_system_status() -> str:
     </div>
     """
 
-    return html
+    return out
 
 
 # =============================================================================

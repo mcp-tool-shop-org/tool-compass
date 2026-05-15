@@ -436,6 +436,54 @@ def test_sync_manager(
 
 
 # =============================================================================
+# Gateway global state reset (TS-A-011)
+# =============================================================================
+# `gateway` is a module-level singleton container — tests mutate
+# `gateway._compass_index`, `gateway._config`, `gateway._analytics`,
+# `gateway._backend_manager`, `gateway._chain_indexer`, `gateway._sync_manager`,
+# and `gateway._startup_sync_done` directly. Without an autouse reset, the
+# state from one test leaks into the next: a test that forgets to set
+# `_analytics = None` can inherit a (now-closed) analytics handle from a
+# prior test, masking real regressions in record_tool_call. The fixture
+# snapshots these names before each test and restores them after.
+#
+# The fixture is `try`/`yield`/`finally` so the restore runs even when a
+# test raises. The asyncio locks defined on the gateway module are NOT
+# reset — they are reusable across tests and resetting them would itself
+# race the event loop. Only the mutable state singletons are restored.
+#
+# `gateway` is imported lazily inside the fixture so test modules that
+# never touch the gateway (e.g. pure analytics/indexer tests) pay nothing.
+_GATEWAY_STATE_NAMES = (
+    "_compass_index",
+    "_backend_manager",
+    "_config",
+    "_analytics",
+    "_sync_manager",
+    "_chain_indexer",
+    "_startup_sync_done",
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_gateway_globals():
+    """Snapshot + restore gateway module globals around every test."""
+    try:
+        import gateway  # noqa: WPS433 — lazy import to keep non-gateway suites fast
+    except ImportError:
+        # If gateway can't be imported in this environment, nothing to reset.
+        yield
+        return
+
+    snapshot = {name: getattr(gateway, name, None) for name in _GATEWAY_STATE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in snapshot.items():
+            setattr(gateway, name, value)
+
+
+# =============================================================================
 # Integration Test Markers
 # =============================================================================
 

@@ -4,7 +4,7 @@
 
 **Repo:** tool-compass
 **Date:** 2026-04-23
-**Version:** 2.0.7
+**Version:** 2.2.2
 **Type tags:** [pypi] [mcp] [cli]
 
 ## Current Assessment

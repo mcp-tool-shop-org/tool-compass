@@ -35,9 +35,16 @@ on:
     - cron: '0 9 * * 1,3,5'
   workflow_dispatch:
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# NOTE: concurrency is intentionally NOT set at the workflow level.
+# A workflow-level cancel-in-progress would cancel the whole run when a
+# new push lands on the same ref — including the pages-deploy job that
+# carries its own concurrency: pages / cancel-in-progress: false. The
+# job-level setting cannot override workflow-level cancellation because
+# the entire run is cancelled before per-job concurrency takes effect.
+# Each test/lint/integration/docker job below carries its own
+# concurrency block scoped to PR refs only (push events on main are
+# never cancelled). The pages-build / pages-deploy jobs keep their
+# dedicated concurrency: pages group with cancel-in-progress: false.
 
 # Default least-privilege; individual jobs that need more elevate explicitly.
 permissions:
@@ -47,6 +54,11 @@ jobs:
   lint:
     name: Org URL sanity check
     runs-on: ubuntu-latest
+    # PR-scoped concurrency: a newer push to the same PR cancels the
+    # older run, but pushes to main never cancel themselves.
+    concurrency:
+      group: lint-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
     steps:
@@ -72,6 +84,10 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }} on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # PR-scoped concurrency (see workflow-top NOTE).
+    concurrency:
+      group: test-${{ matrix.python-version }}-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
 
@@ -212,6 +228,10 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     needs: test  # Only run after unit tests pass
+    # PR-scoped concurrency (see workflow-top NOTE).
+    concurrency:
+      group: integration-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
 
@@ -271,6 +291,10 @@ jobs:
     name: Docker Build
     runs-on: ubuntu-latest
     needs: test
+    # PR-scoped concurrency (see workflow-top NOTE).
+    concurrency:
+      group: docker-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
 

@@ -30,15 +30,14 @@ This project follows the [Contributor Covenant](https://www.contributor-covenant
 ```bash
 # Clone the repository
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
-cd tool-compass/tool_compass
+cd tool-compass
 
 # Create virtual environment
 python -m venv venv
 source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-# Install dependencies
-pip install -r requirements.txt
-pip install -r requirements-dev.txt  # Development dependencies
+# Install dependencies (editable + dev extras)
+pip install -e .[all]
 
 # Start Ollama and pull embedding model
 ollama pull nomic-embed-text
@@ -58,35 +57,45 @@ Tool Compass uses environment variables for cross-platform configuration:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TOOL_COMPASS_BASE_PATH` | Project root directory | Parent of tool_compass |
+| `TOOL_COMPASS_BASE_PATH` | Project root directory | Repository root |
 | `TOOL_COMPASS_PYTHON` | Python executable path | Auto-detected |
 | `TOOL_COMPASS_CONFIG` | Config file path | `./compass_config.json` |
 | `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
 
 ### Project Structure
 
+Tool Compass uses a flat layout — modules live at the repository root, not in a
+nested `tool_compass/` subpackage. Hatch packaging (`pyproject.toml`) explicitly
+lists the modules to ship in the wheel.
+
 ```
-tool_compass/
-├── gateway.py           # MCP server with 9 tools
-├── indexer.py           # HNSW index management
-├── embedder.py          # Ollama embedding integration
-├── analytics.py         # Usage tracking and hot cache
-├── chain_indexer.py     # Workflow/chain detection
-├── sync_manager.py      # Backend synchronization
-├── config.py            # Configuration schema
-├── ui.py                # Gradio web interface
-├── backend_client.py    # MCP backend connections
-├── tool_manifest.py     # Tool definitions
-├── tests/               # Test suite
-│   ├── conftest.py      # Shared fixtures
+tool-compass/
+├── gateway.py                  # MCP server (compass tools)
+├── cli.py                      # `tool-compass` subcommand shell (serve/ui/doctor/sync/test/config)
+├── indexer.py                  # HNSW index management
+├── embedder.py                 # Ollama embedding integration + LRU cache + circuit breaker
+├── analytics.py                # Usage tracking and hot cache
+├── chain_indexer.py            # Workflow/chain detection
+├── sync_manager.py             # Backend synchronization + diff emission
+├── config.py                   # Configuration schema (with corrupt-config recovery)
+├── ui.py                       # Gradio web interface
+├── backend_client_mcp.py       # MCP backend connections (FastMCP-based)
+├── backend_client_simple.py    # Simple stdio backend client
+├── tool_manifest.py            # Tool definitions (incl. deprecated_aliases)
+├── bootstrap.py                # Environment bootstrap helper
+├── _version.py                 # Version reporting (reads from importlib.metadata / pyproject.toml)
+├── compass_config.example.json # Example operator config
+├── llms.txt                    # LLM discoverability manifest
+├── tests/                      # Test suite
+│   ├── conftest.py             # Shared fixtures
 │   ├── test_config.py
 │   ├── test_indexer.py
 │   ├── test_analytics.py
 │   └── test_gateway.py
-└── db/                  # Index and analytics data
-    ├── compass.hnsw     # HNSW vector index
-    ├── tools.db         # Tool metadata
-    └── compass_analytics.db
+└── db/                         # Index and analytics data (gitignored)
+    ├── compass.hnsw            # HNSW vector index
+    ├── tools.db                # Tool metadata
+    └── compass_analytics.db    # Search/call analytics
 ```
 
 ## Running Tests

@@ -8,6 +8,7 @@ import sqlite3
 import json
 import asyncio
 import hashlib
+import threading
 import numpy as np
 from pathlib import Path
 from typing import List, Dict, Optional
@@ -68,6 +69,14 @@ class CompassIndex:
         self._cache_hits = 0
         self._cache_misses = 0
 
+        # BE-A-003: serialize DB writes across threads. search_sync() dispatches
+        # search() to a worker thread via ThreadPoolExecutor when called from
+        # inside a running event loop (Gradio, nested MCP). The sqlite3
+        # connection is opened with check_same_thread=False (below in _init_db)
+        # so cross-thread access is permitted, but concurrent writes would
+        # still race; this lock guards mutating execs and commits.
+        self._db_write_lock = threading.Lock()
+
         # Ensure db directory exists
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -103,10 +112,11 @@ class CompassIndex:
         dim = int(row["dim"])
         if dim != EMBEDDING_DIM:
             # Stale entry from a different-dim model — drop and miss.
-            self.db.execute(
-                "DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,)
-            )
-            self.db.commit()
+            with self._db_write_lock:
+                self.db.execute(
+                    "DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,)
+                )
+                self.db.commit()
             return None
         vector = np.frombuffer(row["vector"], dtype=np.float32).reshape(dim)
         # frombuffer returns a read-only view; copy so hnswlib can use it.
@@ -120,14 +130,15 @@ class CompassIndex:
             return
         vec_f32 = np.asarray(vector, dtype=np.float32).reshape(-1)
         try:
-            self.db.execute(
-                """
-                INSERT OR REPLACE INTO embedding_cache (text_hash, vector, dim, provider)
-                VALUES (?, ?, ?, ?)
-                """,
-                (text_hash, vec_f32.tobytes(), int(dim), provider),
-            )
-            self.db.commit()
+            with self._db_write_lock:
+                self.db.execute(
+                    """
+                    INSERT OR REPLACE INTO embedding_cache (text_hash, vector, dim, provider)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (text_hash, vec_f32.tobytes(), int(dim), provider),
+                )
+                self.db.commit()
         except sqlite3.OperationalError as e:
             logger.debug(f"embedding_cache put failed: {e}")
 
@@ -153,41 +164,45 @@ class CompassIndex:
 
     def _init_db(self):
         """Initialize SQLite database for tool metadata."""
-        self.db = sqlite3.connect(str(self.db_path))
+        # BE-A-003: check_same_thread=False allows the connection to be used
+        # from worker threads (search_sync ThreadPoolExecutor path). Cross-
+        # thread mutations are still serialized via self._db_write_lock.
+        self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
 
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS tools (
-                id INTEGER PRIMARY KEY,
-                name TEXT UNIQUE NOT NULL,
-                description TEXT NOT NULL,
-                category TEXT NOT NULL,
-                server TEXT NOT NULL,
-                parameters TEXT,  -- JSON
-                examples TEXT,    -- JSON
-                is_core INTEGER DEFAULT 0,
-                embedding_text TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
-            CREATE INDEX IF NOT EXISTS idx_tools_server ON tools(server);
-            CREATE INDEX IF NOT EXISTS idx_tools_name ON tools(name);
-            
-            CREATE TABLE IF NOT EXISTS index_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
+        with self._db_write_lock:
+            self.db.executescript("""
+                CREATE TABLE IF NOT EXISTS tools (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    server TEXT NOT NULL,
+                    parameters TEXT,  -- JSON
+                    examples TEXT,    -- JSON
+                    is_core INTEGER DEFAULT 0,
+                    embedding_text TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
 
-            CREATE TABLE IF NOT EXISTS embedding_cache (
-                text_hash TEXT PRIMARY KEY,
-                vector BLOB NOT NULL,
-                dim INTEGER NOT NULL,
-                provider TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        self.db.commit()
+                CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
+                CREATE INDEX IF NOT EXISTS idx_tools_server ON tools(server);
+                CREATE INDEX IF NOT EXISTS idx_tools_name ON tools(name);
+
+                CREATE TABLE IF NOT EXISTS index_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    text_hash TEXT PRIMARY KEY,
+                    vector BLOB NOT NULL,
+                    dim INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            self.db.commit()
 
         # Runtime cache hit/miss counters (IDX-FT-003). Reset only on process
         # lifetime — persisted cache entries live across runs.
@@ -227,21 +242,22 @@ class CompassIndex:
         # Empty tool set: clear state and initialize an empty HNSW index so
         # search() returns [] cleanly (see IDX-A-002 regression).
         if not tools:
-            self.db.execute("BEGIN IMMEDIATE")
-            try:
-                self.db.execute("DELETE FROM tools")
-                self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
-                self.index.init_index(
-                    max_elements=1000,
-                    ef_construction=HNSW_EF_CONSTRUCTION,
-                    M=HNSW_M,
-                )
-                self.index.set_ef(HNSW_EF_SEARCH)
-                self.index.save_index(str(self.index_path))
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-                raise
+            with self._db_write_lock:
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    self.db.execute("DELETE FROM tools")
+                    self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+                    self.index.init_index(
+                        max_elements=1000,
+                        ef_construction=HNSW_EF_CONSTRUCTION,
+                        M=HNSW_M,
+                    )
+                    self.index.set_ef(HNSW_EF_SEARCH)
+                    self.index.save_index(str(self.index_path))
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
             self._id_to_name = {}
             logger.info("build_index completed with 0 tools")
             return
@@ -698,68 +714,69 @@ class CompassIndex:
             )
             existing = cursor.fetchone()
 
-            self.db.execute("BEGIN IMMEDIATE")
-            try:
-                if existing:
-                    # Update existing tool
-                    tool_id = existing["id"]
+            with self._db_write_lock:
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    if existing:
+                        # Update existing tool
+                        tool_id = existing["id"]
 
-                    self.db.execute(
-                        """
-                        UPDATE tools SET
-                            description = ?, category = ?, server = ?,
-                            parameters = ?, examples = ?, is_core = ?,
-                            embedding_text = ?
-                        WHERE id = ?
-                    """,
-                        (
-                            tool.description,
-                            tool.category,
-                            tool.server,
-                            json.dumps(tool.parameters),
-                            json.dumps(tool.examples),
-                            1 if tool.is_core else 0,
-                            embedding_text,
-                            tool_id,
-                        ),
-                    )
-                else:
-                    # Insert new tool
-                    cursor = self.db.execute(
-                        """
-                        INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            tool.name,
-                            tool.description,
-                            tool.category,
-                            tool.server,
-                            json.dumps(tool.parameters),
-                            json.dumps(tool.examples),
-                            1 if tool.is_core else 0,
-                            embedding_text,
-                        ),
-                    )
-                    tool_id = cursor.lastrowid
+                        self.db.execute(
+                            """
+                            UPDATE tools SET
+                                description = ?, category = ?, server = ?,
+                                parameters = ?, examples = ?, is_core = ?,
+                                embedding_text = ?
+                            WHERE id = ?
+                        """,
+                            (
+                                tool.description,
+                                tool.category,
+                                tool.server,
+                                json.dumps(tool.parameters),
+                                json.dumps(tool.examples),
+                                1 if tool.is_core else 0,
+                                embedding_text,
+                                tool_id,
+                            ),
+                        )
+                    else:
+                        # Insert new tool
+                        cursor = self.db.execute(
+                            """
+                            INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                            (
+                                tool.name,
+                                tool.description,
+                                tool.category,
+                                tool.server,
+                                json.dumps(tool.parameters),
+                                json.dumps(tool.examples),
+                                1 if tool.is_core else 0,
+                                embedding_text,
+                            ),
+                        )
+                        tool_id = cursor.lastrowid
 
-                # Check if we need to resize the index
-                if self.index.get_current_count() >= self.index.get_max_elements() - 1:
-                    # Need to resize - HNSW doesn't support dynamic resize, so we extend
-                    new_max = self.index.get_max_elements() * 2
-                    self.index.resize_index(new_max)
-                    logger.info(f"Resized HNSW index to {new_max} elements")
+                    # Check if we need to resize the index
+                    if self.index.get_current_count() >= self.index.get_max_elements() - 1:
+                        # Need to resize - HNSW doesn't support dynamic resize, so we extend
+                        new_max = self.index.get_max_elements() * 2
+                        self.index.resize_index(new_max)
+                        logger.info(f"Resized HNSW index to {new_max} elements")
 
-                # Add to HNSW index
-                self.index.add_items(embedding.reshape(1, -1), [tool_id])
+                    # Add to HNSW index
+                    self.index.add_items(embedding.reshape(1, -1), [tool_id])
 
-                # Save index before committing SQLite.
-                self.index.save_index(str(self.index_path))
+                    # Save index before committing SQLite.
+                    self.index.save_index(str(self.index_path))
 
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-                raise
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
 
             # Update ID mapping (post-commit, in-memory only)
             self._id_to_name[tool_id] = tool.name
@@ -802,8 +819,9 @@ class CompassIndex:
             tool_id = row["id"]
 
             # Remove from database
-            self.db.execute("DELETE FROM tools WHERE id = ?", (tool_id,))
-            self.db.commit()
+            with self._db_write_lock:
+                self.db.execute("DELETE FROM tools WHERE id = ?", (tool_id,))
+                self.db.commit()
 
             # Remove from ID mapping
             self._id_to_name.pop(tool_id, None)

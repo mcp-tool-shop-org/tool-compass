@@ -293,10 +293,19 @@ class TestIndexBuilding:
 
     @pytest.mark.asyncio
     async def test_build_chain_index_empty(self, chain_indexer):
-        """Should handle empty chain list."""
+        """Should handle empty chain list by leaving the index unbuilt."""
+        # TS-A-006: pin the empty-list contract. chain_indexer.py:149-151
+        # returns early when chains is empty and never reassigns
+        # `self.index`; the indexer is freshly constructed here so it
+        # stays at its __init__ default of None. Earlier revisions left
+        # this branch unverified, so a regression where empty-list calls
+        # crashed or partially initialized the index would still pass.
+        assert chain_indexer.index is None
+
         await chain_indexer.build_chain_index([])
 
-        # Should not crash, index may be None or empty
+        # No crash and the empty input must not initialize an index.
+        assert chain_indexer.index is None
 
     @pytest.mark.asyncio
     async def test_build_chain_index_with_chains(self, chain_indexer, sample_chains):

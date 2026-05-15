@@ -485,6 +485,14 @@ async def compass(
         fallback_matches = _lexical_search_fallback(
             index, intent, top_k, category, server
         )
+        # BE-A-004: honour the user-supplied min_confidence on the fallback
+        # path. Lexical matches assign coarse heuristic confidences
+        # (0.6/0.4/0.3); without this filter, a caller passing
+        # min_confidence=0.9 would still receive 0.3-tier results when
+        # Ollama is down, violating the documented contract.
+        fallback_matches = [
+            m for m in fallback_matches if m["confidence"] >= min_confidence
+        ]
 
     # Search chains if enabled — chain search also relies on embeddings,
     # so a semantic outage will usually take this path down too. Don't let
@@ -1478,7 +1486,7 @@ def _run_http(port: int) -> None:
         try:
             idx = _compass_index
             if idx is not None and getattr(idx, "embedder", None) is not None:
-                breaker_state = idx.embedder.circuit_breaker_state
+                breaker_state = idx.embedder.circuit_breaker_state()
                 if breaker_state == "closed":
                     ollama_ok = True
         except Exception:
@@ -1561,7 +1569,7 @@ def _run_http(port: int) -> None:
         try:
             idx = _compass_index
             if idx is not None and getattr(idx, "embedder", None) is not None:
-                ollama_val = 1 if idx.embedder.circuit_breaker_state == "closed" else 0
+                ollama_val = 1 if idx.embedder.circuit_breaker_state() == "closed" else 0
         except Exception:
             pass
         lines.append("# HELP tool_compass_ollama_available 1 if the Ollama circuit breaker is closed, else 0.")

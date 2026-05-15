@@ -309,7 +309,7 @@ class ChainIndexer:
         embedding = await self.embedder.embed(embedding_text)
 
         # Insert into DB
-        cursor = db.execute(
+        db.execute(
             """
             INSERT INTO tool_chains (chain_name, chain_tools, description, embedding_text, is_auto_detected)
             VALUES (?, ?, ?, ?, ?)
@@ -326,9 +326,21 @@ class ChainIndexer:
                 1 if is_auto_detected else 0,
             ),
         )
-
-        chain_id = cursor.lastrowid
         db.commit()
+
+        # BE-A-005: cursor.lastrowid is unreliable after INSERT...ON CONFLICT
+        # DO UPDATE — on SQLite <3.35 it returns 0 because no actual INSERT
+        # happened on the conflict path, which would corrupt _id_to_chain and
+        # leave the chain unreachable in HNSW. Re-SELECT the canonical id by
+        # chain_name (the unique key the conflict resolves against).
+        id_row = db.execute(
+            "SELECT id FROM tool_chains WHERE chain_name = ?", (name,)
+        ).fetchone()
+        if id_row is None:
+            raise RuntimeError(
+                f"add_chain: row for chain_name={name!r} disappeared after INSERT"
+            )
+        chain_id = id_row["id"]
 
         chain = ToolChain(
             id=chain_id,

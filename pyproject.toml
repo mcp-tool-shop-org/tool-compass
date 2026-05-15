@@ -166,10 +166,11 @@ omit = [
 ]
 
 [tool.coverage.report]
-# TST-FT-001: conservative 55% floor gates regressions (v2.2.0 baseline
-# was ~58% — leave 3pt headroom for CI env drift). Ratchet up as
-# coverage improves.
-fail_under = 55
+# TST-FT-001: 60% floor — single source of truth, matches Makefile
+# `make test --cov-fail-under=60` and CHANGELOG 2.2.0 entry. v2.2.0
+# baseline was ~58%; the 60% floor is the documented target. Ratchet
+# up as coverage improves.
+fail_under = 60
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

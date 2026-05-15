@@ -303,14 +303,18 @@ Tool Compass is a **local-first** development tool. See [SECURITY.md](SECURITY.m
 
 ## Scorecard
 
+Per-category scores are regenerated post-swarm from `npx @mcptoolshop/shipcheck audit`.
+See [SCORECARD.md](SCORECARD.md) for the current authoritative breakdown — the table
+below mirrors it and is intentionally not hand-authored.
+
 | Category | Score | Notes |
 |----------|-------|-------|
-| A. Security | 10/10 | SECURITY.md, local-only, no telemetry, parameterized SQL |
-| B. Error Handling | 10/10 | Structured results, graceful Ollama fallback |
-| C. Operator Docs | 10/10 | README, CHANGELOG, CONTRIBUTING, API docs |
-| D. Shipping Hygiene | 10/10 | CI (lint + tests + coverage + pip-audit + Docker), verify script |
-| E. Identity | 10/10 | Logo, translations, landing page |
-| **Total** | **50/50** | |
+| A. Security | TBD | SECURITY.md present; pip-audit warn-only pending CVE baseline |
+| B. Error Handling | TBD | Structured results, graceful degradation, exit codes |
+| C. Operator Docs | TBD | README, CHANGELOG, LICENSE, Makefile `verify` |
+| D. Shipping Hygiene | TBD | CI consolidated; pytest config in pyproject.toml |
+| E. Identity (soft) | TBD | Logo, landing page, GitHub metadata present |
+| **Total** | **TBD** | Regenerate via `make scorecard` |
 
 ## License
 
