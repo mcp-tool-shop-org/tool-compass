@@ -1,5 +1,8 @@
 version: 2
 updates:
+  # =============================================================================
+  # pip — Python runtime + dev dependencies
+  # =============================================================================
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
@@ -13,6 +16,28 @@ updates:
         patterns: ["*"]
         update-types: ["minor", "patch"]
 
+  # Daily security-only overlay (CT-B-006) — CVE updates from the GitHub
+  # Advisory Database don't wait the monthly cadence. open-pull-requests-limit
+  # raised to 10 since these are infrequent and load-bearing.
+  # NOTE: Dependabot security advisories are auto-emitted; this second entry
+  # exists to give them their own schedule/labels/PR cap independent of the
+  # monthly version-update entry above. The `allow: dependency-type: all`
+  # block scopes this entry to all dependencies; security advisories are
+  # always opened regardless of the version-update grouping rules.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    allow:
+      - dependency-type: "all"
+    labels:
+      - "security"
+      - "dependencies"
+
+  # =============================================================================
+  # github-actions — workflow file action references
+  # =============================================================================
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
@@ -22,3 +47,43 @@ updates:
       all-github-actions:
         patterns: ["*"]
         update-types: ["minor", "patch"]
+
+  # Daily security-only overlay for actions (CT-B-006).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    allow:
+      - dependency-type: "all"
+    labels:
+      - "security"
+      - "dependencies"
+
+  # =============================================================================
+  # docker — Dockerfile base-image FROM directives (CT-B-005)
+  # =============================================================================
+  # Pairs with the digest-pinned `FROM python:3.11-slim@sha256:...` in
+  # Dockerfile (CT-B-003). Without this ecosystem entry the digest pin
+  # would become a stale anchor with no machine-readable refresh path.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 2
+    groups:
+      all-docker:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Daily security-only overlay for docker base images (CT-B-006).
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 10
+    allow:
+      - dependency-type: "all"
+    labels:
+      - "security"
+      - "dependencies"

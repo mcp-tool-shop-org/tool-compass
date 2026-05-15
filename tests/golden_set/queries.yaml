@@ -1,0 +1,194 @@
+# Golden-set retrieval benchmark for tool-compass.
+#
+# Purpose: pin retrieval correctness for the semantic-search gateway. Without
+# this benchmark, a regression that silently degrades retrieval (a tokenization
+# change, a normalization bug, a wrong dimension reduction) would pass every
+# existing plumbing-only test and ship.
+#
+# Format: each entry is a `query` plus the canonical `expected` tool names that
+# SHOULD appear in the top-k for that intent. The fixture corpus is defined in
+# `fixture_corpus.py` so the same tool set drives both the index build and the
+# expected-id list (no name drift).
+#
+# Scoring: Recall@k = |relevant ∩ retrieved_top_k| / |relevant|.
+#          nDCG@k applies discounted gain based on rank position.
+#
+# Tests run against a DETERMINISTIC mock embedder that maps known query and
+# tool tokens to known vectors. This is reproducible and runs without Ollama —
+# the goal is regression detection, not measuring an external embedding model.
+#
+# Editing this file is a deliberate fixture change. If you add a new tool,
+# add it to fixture_corpus.py AND list it in `expected` for any newly-covered
+# query. If retrieval expectations shift, the change should be reviewed like
+# any other contract change.
+
+# ---------------------------------------------------------------------------
+# File operations — basic read/write/delete
+# ---------------------------------------------------------------------------
+queries:
+  - query: "read a file from disk"
+    expected: ["fs:read_file"]
+    category: file_ops
+
+  - query: "open document and view contents"
+    expected: ["fs:read_file"]
+    category: file_ops
+
+  - query: "write content to a file"
+    expected: ["fs:write_file"]
+    category: file_ops
+
+  - query: "save content to disk"
+    expected: ["fs:write_file"]
+    category: file_ops
+
+  - query: "create a new file"
+    expected: ["fs:write_file"]
+    category: file_ops
+
+  - query: "delete a file"
+    expected: ["fs:delete_file"]
+    category: file_ops
+
+  - query: "remove file from filesystem"
+    expected: ["fs:delete_file"]
+    category: file_ops
+
+  - query: "list directory contents"
+    expected: ["fs:list_directory"]
+    category: file_ops
+
+  - query: "show files in folder"
+    expected: ["fs:list_directory"]
+    category: file_ops
+
+  # ---------------------------------------------------------------------------
+  # Git operations
+  # ---------------------------------------------------------------------------
+  - query: "git status"
+    expected: ["git:status"]
+    category: git_ops
+
+  - query: "show working tree changes"
+    expected: ["git:status"]
+    category: git_ops
+
+  - query: "git commit"
+    expected: ["git:commit"]
+    category: git_ops
+
+  - query: "save changes to repository"
+    expected: ["git:commit"]
+    category: git_ops
+
+  - query: "git push"
+    expected: ["git:push"]
+    category: git_ops
+
+  - query: "upload commits to remote"
+    expected: ["git:push"]
+    category: git_ops
+
+  - query: "git pull from origin"
+    expected: ["git:pull"]
+    category: git_ops
+
+  - query: "fetch upstream changes"
+    expected: ["git:pull"]
+    category: git_ops
+
+  # ---------------------------------------------------------------------------
+  # Search operations
+  # ---------------------------------------------------------------------------
+  - query: "search for text"
+    expected: ["search:grep"]
+    category: search_ops
+
+  - query: "grep through codebase"
+    expected: ["search:grep"]
+    category: search_ops
+
+  - query: "find files by name"
+    expected: ["search:find"]
+    category: search_ops
+
+  - query: "locate file in directory tree"
+    expected: ["search:find"]
+    category: search_ops
+
+  - query: "search documents"
+    expected: ["search:docs"]
+    category: search_ops
+
+  - query: "lookup documentation"
+    expected: ["search:docs"]
+    category: search_ops
+
+  # ---------------------------------------------------------------------------
+  # AI operations
+  # ---------------------------------------------------------------------------
+  - query: "generate an image from text"
+    expected: ["ai:generate_image"]
+    category: ai_ops
+
+  - query: "text to image"
+    expected: ["ai:generate_image"]
+    category: ai_ops
+
+  - query: "create artwork from prompt"
+    expected: ["ai:generate_image"]
+    category: ai_ops
+
+  - query: "transcribe audio to text"
+    expected: ["ai:transcribe_audio"]
+    category: ai_ops
+
+  - query: "speech to text"
+    expected: ["ai:transcribe_audio"]
+    category: ai_ops
+
+  - query: "summarize document"
+    expected: ["ai:summarize"]
+    category: ai_ops
+
+  - query: "create summary of text"
+    expected: ["ai:summarize"]
+    category: ai_ops
+
+  # ---------------------------------------------------------------------------
+  # Database operations
+  # ---------------------------------------------------------------------------
+  - query: "run sql query"
+    expected: ["db:query"]
+    category: db_ops
+
+  - query: "execute database query"
+    expected: ["db:query"]
+    category: db_ops
+
+  - query: "insert row into database"
+    expected: ["db:insert"]
+    category: db_ops
+
+  - query: "create database record"
+    expected: ["db:insert"]
+    category: db_ops
+
+  # ---------------------------------------------------------------------------
+  # HTTP operations
+  # ---------------------------------------------------------------------------
+  - query: "send http request"
+    expected: ["http:request"]
+    category: http_ops
+
+  - query: "make api call"
+    expected: ["http:request"]
+    category: http_ops
+
+  - query: "fetch url contents"
+    expected: ["http:fetch"]
+    category: http_ops
+
+  - query: "download web page"
+    expected: ["http:fetch"]
+    category: http_ops

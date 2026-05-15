@@ -85,10 +85,25 @@ class ChainIndexer:
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
     def _get_db(self) -> sqlite3.Connection:
-        """Get database connection (uses analytics DB)."""
+        """Get database connection (uses analytics DB).
+
+        BE-A-008 + BE-B-010: opened with check_same_thread=False because the
+        analytics DB is shared across analytics.py + sync_manager.py +
+        chain_indexer.py — these three each held independent connections
+        that raced for the file lock. WAL + busy_timeout serialize them
+        cleanly at the SQLite level.
+        """
         if self._db is None:
-            self._db = sqlite3.connect(str(ANALYTICS_DB_PATH))
+            self._db = sqlite3.connect(
+                str(ANALYTICS_DB_PATH), check_same_thread=False
+            )
             self._db.row_factory = sqlite3.Row
+            try:
+                self._db.execute("PRAGMA busy_timeout = 5000")
+                self._db.execute("PRAGMA journal_mode = WAL")
+                self._db.execute("PRAGMA synchronous = NORMAL")
+            except sqlite3.Error as e:
+                logger.debug(f"sqlite PRAGMA setup failed: {e}")
         return self._db
 
     def create_chain_embedding_text(self, chain: ToolChain) -> str:
@@ -164,10 +179,15 @@ class ChainIndexer:
 
         # Initialize HNSW index
         self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+        # BE-A2-002: allow_replace_deleted=True permits the ON CONFLICT path
+        # in add_chain to mark the old label deleted and re-add with
+        # replace_deleted=True. Without this flag, hnswlib raises on duplicate
+        # labels and the DB row updates while HNSW stays stale.
         self.index.init_index(
             max_elements=max(len(chains) * 2, 100),
             M=CHAIN_HNSW_M,
             ef_construction=CHAIN_HNSW_EF_CONSTRUCTION,
+            allow_replace_deleted=True,
         )
         self.index.set_ef(CHAIN_HNSW_EF_SEARCH)
 
@@ -206,7 +226,12 @@ class ChainIndexer:
                 return False
 
             self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
-            self.index.load_index(str(CHAIN_INDEX_PATH))
+            # BE-A2-002: pass allow_replace_deleted=True at load so the
+            # restored chain index supports mark_deleted + replace_deleted on
+            # add_chain's ON CONFLICT path after a restart.
+            self.index.load_index(
+                str(CHAIN_INDEX_PATH), allow_replace_deleted=True
+            )
             self.index.set_ef(CHAIN_HNSW_EF_SEARCH)
 
             # Build ID mapping
@@ -308,8 +333,17 @@ class ChainIndexer:
         # Generate embedding (use embed() for documents, embed_query() for searches)
         embedding = await self.embedder.embed(embedding_text)
 
+        # BE-A2-002: detect UPDATE vs INSERT BEFORE the write, so the HNSW
+        # branch below can mark_deleted + replace_deleted on the duplicate-
+        # label case. Without this, add_items raises after the DB row was
+        # already updated, leaving DB and HNSW divergent.
+        pre_existing_row = db.execute(
+            "SELECT id FROM tool_chains WHERE chain_name = ?", (name,)
+        ).fetchone()
+        is_update = pre_existing_row is not None
+
         # Insert into DB
-        cursor = db.execute(
+        db.execute(
             """
             INSERT INTO tool_chains (chain_name, chain_tools, description, embedding_text, is_auto_detected)
             VALUES (?, ?, ?, ?, ?)
@@ -326,9 +360,21 @@ class ChainIndexer:
                 1 if is_auto_detected else 0,
             ),
         )
-
-        chain_id = cursor.lastrowid
         db.commit()
+
+        # BE-A-005: cursor.lastrowid is unreliable after INSERT...ON CONFLICT
+        # DO UPDATE — on SQLite <3.35 it returns 0 because no actual INSERT
+        # happened on the conflict path, which would corrupt _id_to_chain and
+        # leave the chain unreachable in HNSW. Re-SELECT the canonical id by
+        # chain_name (the unique key the conflict resolves against).
+        id_row = db.execute(
+            "SELECT id FROM tool_chains WHERE chain_name = ?", (name,)
+        ).fetchone()
+        if id_row is None:
+            raise RuntimeError(
+                f"add_chain: row for chain_name={name!r} disappeared after INSERT"
+            )
+        chain_id = id_row["id"]
 
         chain = ToolChain(
             id=chain_id,
@@ -352,9 +398,29 @@ class ChainIndexer:
                 logger.info(f"Resized chain HNSW index to {new_max} elements")
 
             self._id_to_chain[chain_id] = chain
-            self.index.add_items(
-                embedding.reshape(1, -1).astype(np.float32), [chain_id]
-            )
+            # BE-A2-002: ON CONFLICT path re-uses an existing chain_id; HNSW
+            # default behavior raises on duplicate labels. Mark the old label
+            # deleted and re-add with replace_deleted=True so DB and HNSW
+            # stay consistent. allow_replace_deleted=True is enabled at
+            # init/load. mark_deleted is wrapped in try because it raises on
+            # unknown labels (e.g., HNSW/DB drift) — fall through to fresh
+            # add in that case.
+            if is_update:
+                try:
+                    self.index.mark_deleted(chain_id)
+                except RuntimeError as mark_err:
+                    logger.debug(
+                        f"mark_deleted({chain_id}) skipped: {mark_err}"
+                    )
+                self.index.add_items(
+                    embedding.reshape(1, -1).astype(np.float32),
+                    [chain_id],
+                    replace_deleted=True,
+                )
+            else:
+                self.index.add_items(
+                    embedding.reshape(1, -1).astype(np.float32), [chain_id]
+                )
             self.index.save_index(str(CHAIN_INDEX_PATH))
 
         logger.info(f"Added chain: {name} with {len(tools)} tools")

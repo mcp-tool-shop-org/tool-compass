@@ -70,50 +70,101 @@ _index: Optional[CompassIndex] = None
 _analytics: Optional[CompassAnalytics] = None
 _chain_indexer: Optional[ChainIndexer] = None
 _config = None
-_init_lock = threading.Lock()
+_init_lock = threading.RLock()
+
+
+def _lazy_singleton(global_name: str, factory):
+    """Thread-safe lazy init with publish-after-success guard (FE-B-011).
+
+    Centralises the FE-A2-003/004/005 partial-init pattern previously
+    copy-pasted across get_index, get_analytics_instance, and
+    get_chain_indexer_instance:
+
+    1. Fast path — return cached without taking the lock if already built.
+    2. Acquire lock, re-check (double-checked locking).
+    3. Run factory; bind to a local first. If factory raises, the global
+       stays at None so the next caller retries from scratch — no leaked
+       half-initialized singletons.
+    4. Publish to the module global AFTER the factory returned cleanly.
+
+    factory() is called inside the lock and may itself run async setup via
+    run_async; it must return the fully-initialized instance.
+
+    Returns the singleton (or whatever the factory returns; None is a
+    legitimate value and will be re-attempted on the next call).
+    """
+    current = globals().get(global_name)
+    if current is not None:
+        return current
+    with _init_lock:
+        current = globals().get(global_name)
+        if current is not None:
+            return current
+        instance = factory()
+        if instance is not None:
+            globals()[global_name] = instance
+        return instance
 
 
 def get_index() -> CompassIndex:
-    """Get or initialize compass index (thread-safe)."""
-    global _index
-    if _index is not None:
-        return _index
-    with _init_lock:
-        if _index is not None:
-            return _index
-        _index = CompassIndex()
-        if not _index.load_index():
-            raise RuntimeError("Failed to load index. Run: python gateway.py --sync")
-    return _index
+    """Get or initialize compass index (thread-safe).
+
+    FE-A2-003 + FE-B-011: factored through `_lazy_singleton` so the
+    partial-init guard is centralised. The factory raises RuntimeError
+    when load_index() fails — that propagates to the caller and the
+    global stays at None so the next call retries cleanly.
+    """
+
+    def _build():
+        idx = CompassIndex()
+        if not idx.load_index():
+            raise RuntimeError("Failed to load index. Run: tool-compass sync")
+        return idx
+
+    return _lazy_singleton("_index", _build)
 
 
 def get_analytics_instance() -> CompassAnalytics:
-    """Get or initialize analytics (thread-safe)."""
-    global _analytics
-    if _analytics is not None:
-        return _analytics
-    with _init_lock:
-        if _analytics is not None:
-            return _analytics
-        _analytics = get_analytics()
-        run_async(_analytics.load_hot_cache_from_db())
-    return _analytics
+    """Get or initialize analytics (thread-safe).
+
+    FE-A2-005 + FE-B-011: factored through `_lazy_singleton`. hot_cache
+    load can raise (sqlite3.OperationalError, schema mismatch, DB locked
+    from concurrent sync_manager/chain_indexer writes); on raise the
+    global stays at None and the next caller re-attempts.
+    """
+
+    def _build():
+        analytics = get_analytics()
+        run_async(analytics.load_hot_cache_from_db())
+        return analytics
+
+    return _lazy_singleton("_analytics", _build)
 
 
 def get_chain_indexer_instance() -> Optional[ChainIndexer]:
-    """Get or initialize chain indexer (thread-safe)."""
-    global _chain_indexer, _config
+    """Get or initialize chain indexer (thread-safe).
+
+    FE-A2-004 + FE-B-011: factored through `_lazy_singleton` for the load
+    path. The config-gated short-circuit (chain_indexing_enabled=False)
+    legitimately returns None, which `_lazy_singleton` will treat as
+    "retry next call" — matches the current observable behavior since a
+    disabled chain indexer should not be cached.
+    """
+    global _config
     with _init_lock:
         if _config is None:
             _config = load_config()
+    if not _config.chain_indexing_enabled:
+        return None
 
-        if _chain_indexer is None and _config.chain_indexing_enabled:
-            index = get_index()
-            analytics = get_analytics_instance()
-            _chain_indexer = get_chain_indexer(index.embedder, analytics)
-            run_async(_chain_indexer.load_chain_index())
+    def _build():
+        index = get_index()
+        analytics = get_analytics_instance()
+        ci = get_chain_indexer(index.embedder, analytics)
+        run_async(ci.load_chain_index())
+        return ci
 
-    return _chain_indexer
+    return _lazy_singleton("_chain_indexer", _build)
 
 
 # =============================================================================
@@ -153,9 +204,13 @@ def confidence_label(score: float) -> str:
 def _check_ollama_banner() -> str:
     """Return an Ollama-down banner (markdown) or empty string (MCC-B-007).
 
-    Runs a fast 2s health_check. If unreachable, surfaces a prominent banner
-    at the top of the Search tab so the user understands WHY semantic search
-    is returning poor results — rather than silently degrading.
+    Runs a fast 2s health_check. The banner is only emitted as a separate
+    chrome element when Ollama is unreachable AND no active search is showing
+    its own inline fallback notice (FE-B-008 — degraded-mode signals belong
+    adjacent to the affected results, not in chrome).
+
+    Returned text does NOT promise "keyword-based fallback" — that claim is
+    only made by `search_tools()` when the fallback actually runs (FE-B-001).
     """
     try:
         from embedder import Embedder
@@ -169,55 +224,134 @@ def _check_ollama_banner() -> str:
             return ""
         return (
             f"⚠️ **Ollama unavailable** at {ollama_url}. "
-            "Start it with `ollama serve` to enable semantic search. "
-            "Showing keyword-based fallback results."
+            "Searches will fall back to keyword matching until you start it "
+            "with `ollama serve`."
         )
     except Exception as e:
         # Keep the banner check itself non-fatal — if probing fails, assume
         # down and warn rather than letting the UI crash.
         logger.debug(f"Ollama banner check failed: {e}")
         return (
-            "⚠️ **Ollama unavailable**. Start it with `ollama serve` to enable "
-            "semantic search."
+            "⚠️ **Ollama unavailable**. Searches will fall back to keyword "
+            "matching until you start it with `ollama serve`."
         )
 
 
+def _lexical_fallback_for_ui(
+    index, query: str, top_k: int, category: Optional[str], server: Optional[str]
+) -> List[Dict]:
+    """UI-side lexical fallback over the indexed tools (FE-B-001).
+
+    Re-uses `gateway._lexical_search_fallback` so the UI keeps the same
+    fallback contract the MCP `compass` tool already documents. Cross-domain
+    coupling is intentional — the function is the single source of truth for
+    the "graceful Ollama-down" marketing claim on site-config.ts and
+    operations.md. If the import fails (gateway not on path, circular guard),
+    we fall through to an inlined LIKE scan that matches the gateway shape.
+    """
+    try:
+        from gateway import _lexical_search_fallback
+
+        return _lexical_search_fallback(index, query, top_k, category, server)
+    except Exception:
+        # Inline fallback — defensive, matches gateway shape.
+        if not index or not getattr(index, "db", None):
+            return []
+        needle = f"%{query.strip()}%"
+        where = ["(lower(name) LIKE lower(?) OR lower(description) LIKE lower(?))"]
+        params: list = [needle, needle]
+        if category:
+            where.append("category = ?")
+            params.append(category)
+        if server:
+            where.append("server = ?")
+            params.append(server)
+        sql = (
+            "SELECT name, description, category, server "
+            "FROM tools WHERE " + " AND ".join(where) + " LIMIT ?"
+        )
+        params.append(max(1, top_k * 3))
+        try:
+            rows = index.db.execute(sql, params).fetchall()
+        except Exception:
+            return []
+        q_lower = query.strip().lower()
+        scored = []
+        for row in rows:
+            name_lower = (row["name"] or "").lower()
+            desc_lower = (row["description"] or "").lower()
+            if q_lower in name_lower:
+                confidence = 0.6
+            elif q_lower in desc_lower:
+                confidence = 0.4
+            else:
+                confidence = 0.3
+            scored.append({
+                "tool": row["name"],
+                "description": row["description"] or "",
+                "server": row["server"],
+                "category": row["category"],
+                "confidence": confidence,
+                "degraded": True,
+            })
+        scored.sort(key=lambda m: m["confidence"], reverse=True)
+        return scored[:top_k]
+
+
 def format_error(error: Exception, context: str = "") -> str:
-    """Format error message for user display."""
+    """Format error message for user display.
+
+    FE-A2-001/002: All caller-supplied context and exception strings are
+    HTML-escaped before interpolation. Both ``context`` (often contains the
+    user query / tool_name) and ``str(error)`` (can carry arbitrary backend
+    payloads from Ollama, sqlite, hnswlib, MCP servers) are untrusted from
+    the renderer's perspective — escape at the boundary, not at every
+    caller, so future callers can't reintroduce the gap.
+    """
     error_type = type(error).__name__
+    safe_error_type = html.escape(error_type, quote=True)
+    safe_error_str = html.escape(str(error)[:200], quote=True)
+    safe_context = html.escape(context, quote=True) if context else ""
 
     # MCC-B-008: error banners get role="alert" so screen readers announce
-    # them immediately; warning emoji gets an aria-label so it isn't read as
-    # mystery punctuation.
-    warn_icon = '<span role="img" aria-label="warning">⚠️</span>'
+    # them immediately; warning emoji is aria-hidden (text twin "Warning:"
+    # carries the semantic — Léonie Watson 2023). FE-B-012: contrast-fixed
+    # body greys (#e8e8f0 / #a0a0b0) replace #ccc / #888 which fail 4.5:1.
+    # SD-V-001: body text bumped to #e8e8f0 (APCA Lc target 75-90 on dark);
+    # mono font stack used for the inline `ollama serve` / `tool-compass
+    # sync` commands so the eye picks them up as runnable code.
+    warn_icon = '<span aria-hidden="true">⚠️</span>'
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
     if "Connection" in error_type or "refused" in str(error).lower():
         return f"""
         <div role="alert" style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
-            <div style="color: #ef5350; font-weight: bold;">{warn_icon} Service Unavailable</div>
-            <p style="color: #ccc; margin: 8px 0;">
-                Cannot connect to Ollama embeddings service. Please ensure Ollama is running.
+            <div style="color: #ef5350; font-weight: bold;">{warn_icon} Service unavailable</div>
+            <p style="color: #e8e8f0; margin: 8px 0; line-height: 1.5; max-width: 75ch;">
+                Cannot connect to Ollama embeddings service. Start it with the command below, then retry.
             </p>
-            <code style="color: #888; font-size: 0.85em;">ollama serve</code>
+            <code style="color: #d4d4dc; font-size: 0.9em; font-family: {mono};">ollama serve</code>
         </div>
         """
     elif "index" in str(error).lower() or "not loaded" in str(error).lower():
+        # FE-A-008: replace the legacy `cd tool_compass && python gateway.py
+        # --sync` snippet with the v2.2 canonical CLI form.
         return f"""
         <div role="alert" style="border: 1px solid #ffb74d; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a2a1a;">
-            <div style="color: #ffb74d; font-weight: bold;">{warn_icon} Index Not Ready</div>
-            <p style="color: #ccc; margin: 8px 0;">
-                Tool index not found. Please build the index first.
+            <div style="color: #ffb74d; font-weight: bold;">{warn_icon} Index not ready</div>
+            <p style="color: #e8e8f0; margin: 8px 0; line-height: 1.5; max-width: 75ch;">
+                The tool index has not been built yet. Run the sync command below to build it.
             </p>
-            <code style="color: #888; font-size: 0.85em;">cd tool_compass && python gateway.py --sync</code>
+            <code style="color: #d4d4dc; font-size: 0.9em; font-family: {mono};">tool-compass sync</code>
         </div>
         """
     else:
         return f"""
         <div role="alert" style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
-            <div style="color: #ef5350; font-weight: bold;">{warn_icon} Error:</div>
-            <p style="color: #ccc; margin: 8px 0;">{context or "An error occurred"}</p>
-            <details style="color: #888; font-size: 0.85em;">
+            <div style="color: #ef5350; font-weight: bold;">{warn_icon} Something went wrong</div>
+            <p style="color: #e8e8f0; margin: 8px 0; line-height: 1.5; max-width: 75ch;">{safe_context or "An error occurred while running this action."}</p>
+            <details style="color: #a0a0b0; font-size: 0.9em;">
                 <summary>Technical details</summary>
-                <code>{error_type}: {str(error)[:200]}</code>
+                <code style="font-family: {mono};">{safe_error_type}: {safe_error_str}</code>
             </details>
         </div>
         """
@@ -237,16 +371,30 @@ def search_tools(
 ) -> tuple:
     """
     Search for tools using semantic search.
+
     Returns (results_html, results_json).
+
+    FE-B-001: when semantic search raises (Ollama unreachable, embedder
+    failure), we fall back to the same lexical LIKE scan the MCP `compass`
+    tool uses (`gateway._lexical_search_fallback`). The Ollama-down banner
+    promises keyword fallback — this is where that promise gets kept. The
+    fallback path emits a *single* inline banner above the results so users
+    don't see contradicting "fallback active" + "service unavailable" cards
+    (the FE-B-001 contradiction).
+
+    FE-B-002: when results are empty after confidence filtering, surface
+    up-to-3 nearest-neighbor "did you mean" matches via a LIKE scan instead
+    of leaving the user on a dead-end zero-results page (NN/g zero-results
+    pattern — show closest matches as actionable suggestions).
     """
     # Empty query
     if not query.strip():
         return (
             """
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔍</div>
-            <p>Enter a search query above to find tools.</p>
-            <p style="font-size: 0.9em;">Try: "generate an image", "read a file", "search documents"</p>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔍</div>
+            <p style="color: #e8e8f0; line-height: 1.5;">Enter a search query above to find tools.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Try: "generate an image", "read a file", "search documents"</p>
         </div>
         """,
             "{}",
@@ -266,7 +414,9 @@ def search_tools(
     cat_filter = None if category == "All" else category
     srv_filter = None if server == "All" else server
 
-    # Run search with error handling
+    # Run semantic search; on failure fall back to lexical LIKE.
+    degraded = False
+    fallback_used = False
     try:
 
         async def do_search():
@@ -278,37 +428,83 @@ def search_tools(
             )
 
         results = run_async(do_search())
+        # Filter by confidence
+        results = [r for r in results if r.score >= min_confidence]
     except Exception as e:
-        return format_error(e, f"Search failed for: {query}"), "{}"
-
-    # Filter by confidence
-    results = [r for r in results if r.score >= min_confidence]
-
-    # No results
-    if not results:
-        return (
-            f"""
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
-            <p style="color: #ffb74d;">No tools found matching "{html.escape(truncate_text(query, 50), quote=True)}"</p>
-            <p style="font-size: 0.9em;">Suggestions:</p>
-            <ul style="text-align: left; display: inline-block; color: #aaa;">
-                <li>Try broader or simpler terms</li>
-                <li>Lower the confidence threshold</li>
-                <li>Remove filters</li>
-            </ul>
-        </div>
-        """,
-            "{}",
+        # FE-B-001: keep the search alive by falling back to lexical instead
+        # of erroring out. The Ollama-down banner already explains WHY this
+        # mode is active; we render a single inline notice above the cards
+        # and DO NOT also surface a red "service unavailable" card.
+        logger.warning(
+            "Semantic search failed (%s: %s); using lexical fallback.",
+            type(e).__name__,
+            truncate_text(str(e), 80),
         )
+        degraded = True
+        fallback_used = True
+        fb_matches = _lexical_fallback_for_ui(
+            index, query, int(top_k), cat_filter, srv_filter
+        )
+        fb_matches = [m for m in fb_matches if m["confidence"] >= min_confidence]
+        # Convert lexical matches to the SearchResult-like duck shape the
+        # downstream rendering loop expects (.tool.name, .tool.description,
+        # .tool.server, .tool.category, .score, .tool.parameters).
+        from types import SimpleNamespace
+
+        results = [
+            SimpleNamespace(
+                tool=SimpleNamespace(
+                    name=m["tool"],
+                    description=m.get("description") or "",
+                    server=m["server"],
+                    category=m["category"],
+                    parameters={},
+                ),
+                score=m["confidence"],
+            )
+            for m in fb_matches
+        ]
+
+    # No results — try a relaxed nearest-match pass (FE-B-002) before
+    # surrendering. Lower the floor by 0.1 and re-run; if still empty, do a
+    # LIKE substring scan against the indexed tools and surface up to 3
+    # "did you mean" suggestions.
+    if not results:
+        suggestions = _nearest_matches(
+            index, query, max_results=3, cat_filter=cat_filter, srv_filter=srv_filter
+        )
+        return _render_no_results(query, suggestions), "{}"
 
     # Build HTML output
-    html_parts = [
-        f'<p style="color: #888; margin-bottom: 12px;">Found {len(results)} tool{"s" if len(results) != 1 else ""}</p>'
-    ]
+    html_parts = []
+    if fallback_used:
+        # Single source of truth for the degraded state (FE-B-001): inline
+        # banner adjacent to the results region, NOT in chrome.
+        html_parts.append(_inline_fallback_banner())
+    # FE-B-004: result-count heading is a focusable h2 with aria-live so SR
+    # users hear the count change after async load. SD-V-001 contrast: body
+    # grey lifted to #a0a0b0 (APCA Lc ~70 on #1a1a2e).
+    safe_q = html.escape(truncate_text(query, 60), quote=True)
+    count_text = (
+        f"Found {len(results)} tool" + ("s" if len(results) != 1 else "")
+        + f' for "{safe_q}"'
+    )
+    html_parts.append(
+        f'<h2 id="search-results-count" tabindex="-1" '
+        f'aria-live="polite" aria-atomic="true" '
+        f'style="color: #a0a0b0; font-size: 1em; font-weight: normal; '
+        f'margin: 0 0 12px 0;">{count_text}</h2>'
+    )
+    # FE-B-006: announce the results container as a listbox so SR users know
+    # the result cards are options associated with the search input.
+    html_parts.append(
+        '<ul id="search-results-list" role="listbox" '
+        'aria-label="Tool search results" '
+        'style="list-style: none; padding: 0; margin: 0;">'
+    )
     json_results = []
 
-    for r in results:
+    for idx_i, r in enumerate(results):
         confidence_pct = int(r.score * 100)
         conf_label = confidence_label(r.score)
         # MCC-B-008: brighter palette for higher contrast on the dark theme.
@@ -345,19 +541,29 @@ def search_tools(
                 f'Deprecated since v{safe_dep_ver}</span>'
             )
 
+        # FE-B-005 + FE-B-006: each result is a listbox option with a stable
+        # id so future combobox wiring can set aria-activedescendant. The
+        # emoji + text-twin pattern (server name spoken, 📦 hidden from SR)
+        # — Léonie Watson 2023 recommendation.
+        # SD-V-002: tonal surface ladder — card base #22223e (raised one
+        # step from #1a1a2e page background) so cards lift in dark mode
+        # without box-shadow. SD-V-004: tool name uses the JetBrains-Mono
+        # fallback stack so identifiers like `comfy:comfy_generate` read as
+        # runnable code. Hierarchy (name → description → metadata) works
+        # in grayscale alone via weight + size + colour-step.
         html_parts.append(f"""
-        <div role="article" aria-label="{safe_name_short} result" style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a1a2e;">
+        <li role="option" id="search-result-{idx_i}" aria-label="{safe_name_short}, {conf_label} match {confidence_pct} percent" style="border: 1px solid #3a3a52; border-radius: 8px; padding: 16px; margin: 12px 0; background: #22223e; list-style: none;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.1em; font-weight: bold; color: #4fc3f7;" title="{safe_name}">{safe_name_short}</span>
-                <span style="color: {confidence_color};" title="{conf_label} match ({confidence_pct}%)">{stars} {conf_label} ({confidence_pct}%)</span>
+                <span style="font-size: 1.05em; font-weight: 600; color: #4fc3f7; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;" title="{safe_name}">{safe_name_short}</span>
+                <span style="color: {confidence_color}; font-size: 0.95em;" aria-label="{conf_label} match {confidence_pct} percent" title="{conf_label} match ({confidence_pct}%)">{stars} {conf_label} ({confidence_pct}%)</span>
             </div>
-            <p style="margin: 8px 0; color: #ccc;" title="{safe_desc}">{safe_desc_short}</p>
-            <div style="display: flex; gap: 12px; font-size: 0.9em; color: #888; flex-wrap: wrap; align-items: center;">
-                <span><span role="img" aria-label="server">📦</span> {safe_server}</span>
-                <span><span role="img" aria-label="category">🏷️</span> {safe_category}</span>
+            <p style="margin: 12px 0 8px 0; color: #e8e8f0; line-height: 1.5; max-width: 75ch;" title="{safe_desc}">{safe_desc_short}</p>
+            <div style="display: flex; gap: 16px; font-size: 0.875em; color: #a0a0b0; flex-wrap: wrap; align-items: center;">
+                <span><span aria-hidden="true">📦</span> Server: {safe_server}</span>
+                <span><span aria-hidden="true">🏷️</span> Category: {safe_category}</span>
                 {deprecated_badge}
             </div>
-        </div>
+        </li>
         """)
 
         json_results.append(
@@ -367,11 +573,108 @@ def search_tools(
                 "server": r.tool.server,
                 "category": r.tool.category,
                 "confidence": round(r.score, 3),
-                "parameters": r.tool.parameters,
+                "parameters": getattr(r.tool, "parameters", {}) or {},
+                "degraded": degraded,
             }
         )
 
+    html_parts.append("</ul>")
     return "".join(html_parts), json.dumps(json_results, indent=2)
+
+
+def _inline_fallback_banner() -> str:
+    """Render the single source-of-truth degraded-mode banner.
+
+    FE-B-001 + FE-B-008 (Nielsen Heuristic #1): degraded-mode signals belong
+    adjacent to the affected data, not in chrome. The Search tab top-level
+    Ollama banner explains the global state; this banner explains "what you
+    are looking at right now."
+    """
+    return (
+        '<div role="status" aria-live="polite" '
+        'style="border: 1px solid #ffb74d; border-radius: 8px; '
+        'padding: 12px; margin: 8px 0; background: #2a2a1a;">'
+        '<span aria-hidden="true">⚠️</span> '
+        '<strong style="color: #ffb74d;">Showing keyword-based results.</strong> '
+        '<span style="color: #d4d4d4;">'
+        'Semantic search is unavailable (Ollama unreachable). '
+        'Start Ollama and re-run the search for better matches.'
+        '</span>'
+        '</div>'
+    )
+
+
+def _nearest_matches(
+    index,
+    query: str,
+    max_results: int = 3,
+    cat_filter: Optional[str] = None,
+    srv_filter: Optional[str] = None,
+) -> List[Dict]:
+    """Substring nearest-neighbor lookup for the zero-results state (FE-B-002).
+
+    Runs against the same tools table the indexer materializes. The query is
+    matched as a substring against name and description. Used when semantic
+    search returns nothing — the NN/g zero-results pattern is "never a dead
+    end" (Whitenton 2018). Same shape as `_lexical_fallback_for_ui` so the
+    rendering layer can treat both uniformly.
+    """
+    try:
+        return _lexical_fallback_for_ui(
+            index, query, max_results, cat_filter, srv_filter
+        )
+    except Exception:
+        return []
+
+
+def _render_no_results(query: str, suggestions: List[Dict]) -> str:
+    """Build the zero-results HTML, with optional 'did you mean' chips.
+
+    FE-B-002 + Nielsen #9: always offer next-step actions. Empty-results is
+    an error-adjacent state from the user's perspective — show closest
+    matches as actionable links instead of just suggesting they try harder.
+    """
+    # SD-V-001/004: bumped body grey to #e8e8f0; mono font for suggested
+    # tool names so they read as runnable identifiers.
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
+    safe_q = html.escape(truncate_text(query, 50), quote=True)
+    parts = [
+        '<div style="text-align: center; padding: 48px 24px; color: #a0a0b0; max-width: 75ch; margin: 0 auto;">',
+        '<div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>',
+        f'<p style="color: #ffb74d;">No tools found matching "{safe_q}"</p>',
+    ]
+    if suggestions:
+        parts.append(
+            '<p style="font-size: 0.95em; color: #e8e8f0; margin-top: 16px;">'
+            'Did you mean one of these?</p>'
+        )
+        parts.append(
+            '<ul role="list" style="text-align: left; display: inline-block; '
+            'list-style: none; padding: 0; margin: 8px 0;">'
+        )
+        for s in suggestions:
+            safe_name = html.escape(s["tool"], quote=True)
+            safe_desc = html.escape(
+                truncate_text(s.get("description") or "", 80), quote=True
+            )
+            parts.append(
+                f'<li style="margin: 8px 0; color: #e8e8f0; line-height: 1.5;">'
+                f'<code style="color: #4fc3f7; font-family: {mono};">{safe_name}</code>'
+                f' — <span style="color: #a0a0b0;">{safe_desc}</span>'
+                f'</li>'
+            )
+        parts.append('</ul>')
+    parts.extend([
+        '<p style="font-size: 0.9em; color: #a0a0b0; margin-top: 16px;">'
+        'Or try:</p>',
+        '<ul style="text-align: left; display: inline-block; color: #a0a0b0; line-height: 1.5;">',
+        '<li>Broader or simpler terms</li>',
+        '<li>Lowering the confidence threshold</li>',
+        '<li>Removing the server or category filter</li>',
+        '</ul>',
+        '</div>',
+    ])
+    return "".join(parts)
 
 
 def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> str:
@@ -379,10 +682,10 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
     # Empty query
     if not query.strip():
         return """
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔗</div>
-            <p>Enter a query to search for workflows.</p>
-            <p style="font-size: 0.9em;">Try: "modify a file", "commit changes", "generate and save image"</p>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔗</div>
+            <p style="color: #e8e8f0; line-height: 1.5;">Enter a query to search for workflows.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Try: "modify a file", "commit changes", "generate and save image"</p>
         </div>
         """
 
@@ -394,10 +697,10 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
     chain_indexer = get_chain_indexer_instance()
     if not chain_indexer:
         return """
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">⚙️</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">⚙️</div>
             <p style="color: #ffb74d;">Chain indexing is disabled in configuration.</p>
-            <p style="font-size: 0.9em;">Enable it in compass_config.json to use workflow search.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Enable it in compass_config.json to use workflow search.</p>
         </div>
         """
 
@@ -410,21 +713,24 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
 
         results = run_async(do_search())
     except Exception as e:
-        return format_error(e, f"Workflow search failed for: {query}")
+        # FE-A2-001: escape query at the call boundary in addition to
+        # format_error's own escape, so the raw query is never carried as
+        # live HTML through any intermediate string.
+        return format_error(e, f"Workflow search failed for: {html.escape(query, quote=True)}")
 
     # No results
     if not results:
         return f"""
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>
             <p style="color: #ffb74d;">No workflows found matching "{html.escape(truncate_text(query, 50), quote=True)}"</p>
-            <p style="font-size: 0.9em;">Workflows are auto-detected from usage patterns.</p>
-            <p style="font-size: 0.9em; color: #aaa;">Use tools together to create workflows.</p>
+            <p style="font-size: 0.9em; color: #e8e8f0;">Workflows are auto-detected from usage patterns.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Use tools together to create workflows.</p>
         </div>
         """
 
     html_parts = [
-        f'<p style="color: #888; margin-bottom: 12px;">Found {len(results)} workflow{"s" if len(results) != 1 else ""}</p>'
+        f'<p style="color: #a0a0b0; margin-bottom: 12px;">Found {len(results)} workflow{"s" if len(results) != 1 else ""}</p>'
     ]
 
     for cr in results:
@@ -441,16 +747,25 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
         safe_flow_short = html.escape(truncate_text(tool_flow, 80), quote=True)
         safe_desc = html.escape(truncate_text(cr.chain.description or "", 100), quote=True)
 
+        # FE-B-005: text-twin emoji.
+        # SD-V-002: workflow card on the raised tonal step. SD-V-004:
+        # the chain flow (tool → tool → tool) uses the JetBrains-Mono
+        # fallback stack — it's the chain stage diagram so it should read
+        # as code identifiers, not body prose.
+        if cr.chain.is_auto_detected:
+            badge_html = '<span aria-hidden="true">🤖</span> Auto-detected'
+        else:
+            badge_html = '<span aria-hidden="true">👤</span> Manual'
         html_parts.append(f"""
-        <div role="article" aria-label="{safe_chain_name_short} workflow result" style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a2e1a;">
+        <div role="article" aria-label="{safe_chain_name_short} workflow result" style="border: 1px solid #3a3a52; border-radius: 8px; padding: 16px; margin: 12px 0; background: #22223e;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.1em; font-weight: bold; color: #81c784;" title="{safe_chain_name}">{safe_chain_name_short}</span>
-                <span style="color: {confidence_color};" title="{conf_label} match ({confidence_pct}%)">{conf_label} ({confidence_pct}%)</span>
+                <span style="font-size: 1.05em; font-weight: 600; color: #81c784; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;" title="{safe_chain_name}">{safe_chain_name_short}</span>
+                <span style="color: {confidence_color}; font-size: 0.95em;" aria-label="{conf_label} match {confidence_pct} percent" title="{conf_label} match ({confidence_pct}%)">{conf_label} ({confidence_pct}%)</span>
             </div>
-            <p style="margin: 8px 0; color: #ccc; font-family: monospace;" title="{safe_flow}">{safe_flow_short}</p>
-            <p style="margin: 4px 0; color: #888; font-size: 0.9em;">{safe_desc}</p>
-            <div style="font-size: 0.85em; color: #666;">
-                Used {cr.chain.use_count} times | {"🤖 Auto-detected" if cr.chain.is_auto_detected else "👤 Manual"}
+            <p style="margin: 12px 0 8px 0; color: #e8e8f0; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; line-height: 1.5;" title="{safe_flow}">{safe_flow_short}</p>
+            <p style="margin: 4px 0; color: #a0a0b0; font-size: 0.9em; line-height: 1.5; max-width: 75ch;">{safe_desc}</p>
+            <div style="font-size: 0.875em; color: #a0a0b0; margin-top: 8px;">
+                Used {cr.chain.use_count} times &middot; {badge_html}
             </div>
         </div>
         """)
@@ -503,14 +818,15 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
     except Exception as e:
         return format_error(e, "Could not load tools from index")
 
-    # Empty index
+    # Empty index — FE-A-008 + SD-V-001: v2.2 canonical CLI + contrast-safe
+    # greys + mono command snippet.
     if not tools:
         return """
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">📦</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">📦</div>
             <p style="color: #ffb74d;">No tools indexed yet.</p>
-            <p style="font-size: 0.9em;">Build the index first:</p>
-            <code style="color: #888;">cd tool_compass && python gateway.py --sync</code>
+            <p style="font-size: 0.9em; color: #e8e8f0;">Build the index first:</p>
+            <code style="color: #d4d4dc; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;">tool-compass sync</code>
         </div>
         """
 
@@ -535,10 +851,10 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
     # No matches after filtering
     if not tools:
         return """
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>
             <p style="color: #ffb74d;">No tools match the current filters.</p>
-            <p style="font-size: 0.9em; color: #aaa;">Try removing filters or using different search terms.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Try removing filters or using different search terms.</p>
         </div>
         """
 
@@ -548,14 +864,18 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
         by_server.setdefault(t["server"], []).append(t)
 
     html_parts = [
-        f'<p style="color: #888; margin-bottom: 12px;">Showing {len(tools)} tool{"s" if len(tools) != 1 else ""}</p>'
+        f'<p style="color: #a0a0b0; margin-bottom: 12px;">Showing {len(tools)} tool{"s" if len(tools) != 1 else ""}</p>'
     ]
 
+    # SD-V-002 + SD-V-004: browser rows use the raised tonal step
+    # (#22223e) and the JetBrains-Mono fallback stack on tool names so the
+    # eye locks onto the identifier first.
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
     for server_name, server_tools in sorted(by_server.items()):
         html_parts.append(f"""
         <details open style="margin: 12px 0;">
-            <summary style="cursor: pointer; font-size: 1.1em; font-weight: bold; color: #64b5f6; padding: 8px 0;">
-                📦 {html.escape(server_name, quote=True)} ({len(server_tools)} tool{"s" if len(server_tools) != 1 else ""})
+            <summary style="cursor: pointer; font-size: 1.05em; font-weight: 600; color: #64b5f6; padding: 8px 0;">
+                <span aria-hidden="true">📦</span> {html.escape(server_name, quote=True)} ({len(server_tools)} tool{"s" if len(server_tools) != 1 else ""})
             </summary>
             <div style="padding-left: 16px;">
         """)
@@ -569,11 +889,11 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
             safe_desc_short = html.escape(desc_truncated, quote=True)
             safe_category = html.escape(t["category"], quote=True)
             html_parts.append(f"""
-            <div style="border-left: 3px solid #444; padding: 8px 12px; margin: 8px 0; background: #1a1a2e;">
-                <div style="font-weight: bold; color: #4fc3f7;" title="{safe_name}">{safe_name_short}</div>
-                <div style="color: #aaa; font-size: 0.9em; margin: 4px 0;" title="{safe_desc}">{safe_desc_short}</div>
-                <div style="color: #666; font-size: 0.85em;">
-                    🏷️ {safe_category} | 📝 {param_count} param{"s" if param_count != 1 else ""}
+            <div style="border-left: 3px solid #3a3a52; padding: 12px 16px; margin: 8px 0; background: #22223e; border-radius: 4px;">
+                <div style="font-weight: 600; color: #4fc3f7; font-family: {mono};" title="{safe_name}">{safe_name_short}</div>
+                <div style="color: #e8e8f0; font-size: 0.9em; margin: 8px 0; line-height: 1.5; max-width: 75ch;" title="{safe_desc}">{safe_desc_short}</div>
+                <div style="color: #a0a0b0; font-size: 0.85em;">
+                    <span aria-hidden="true">🏷️</span> {safe_category} | <span aria-hidden="true">📝</span> {param_count} param{"s" if param_count != 1 else ""}
                 </div>
             </div>
             """)
@@ -588,10 +908,10 @@ def get_tool_details(tool_name: str) -> str:
     # Empty input
     if not tool_name.strip():
         return """
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
-            <p>Enter a tool name to view details.</p>
-            <p style="font-size: 0.9em;">Or click on a tool from the browser above.</p>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>
+            <p style="color: #e8e8f0; line-height: 1.5;">Enter a tool name to view details.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Or click on a tool from the browser above.</p>
         </div>
         """
 
@@ -631,15 +951,17 @@ def get_tool_details(tool_name: str) -> str:
             )
             row = cursor.fetchone()
     except Exception as e:
-        return format_error(e, f"Could not search for tool: {tool_name}")
+        # FE-A2-001: tool_name is user-controlled (input box). Escape at the
+        # boundary even though format_error escapes context too.
+        return format_error(e, f"Could not search for tool: {html.escape(tool_name, quote=True)}")
 
     # Tool not found
     if not row:
         return f"""
-        <div style="text-align: center; padding: 40px; color: #888;">
-            <div style="font-size: 2em; margin-bottom: 12px;">❓</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">❓</div>
             <p style="color: #ffb74d;">Tool not found: "{html.escape(truncate_text(tool_name, 40), quote=True)}"</p>
-            <p style="font-size: 0.9em; color: #aaa;">Check the tool name and try again.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Check the tool name and try again.</p>
         </div>
         """
 
@@ -647,45 +969,48 @@ def get_tool_details(tool_name: str) -> str:
     examples = json.loads(row["examples"]) if row["examples"] else []
 
     # Build parameters table — all untrusted strings run through html.escape to
-    # block HTML/script injection from malicious tool metadata.
+    # block HTML/script injection from malicious tool metadata. SD-V-004:
+    # parameter names use the JetBrains-Mono fallback stack — they are
+    # identifiers, not prose. SD-V-001: body grey lifted to #e8e8f0.
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
     params_html = ""
     if params:
         params_html = f"""
-        <h4 style="color: #81c784; margin-top: 16px;">Parameters ({len(params)})</h4>
+        <h4 style="color: #81c784; margin-top: 24px;">Parameters ({len(params)})</h4>
         <table style="width: 100%; border-collapse: collapse;">
-            <tr style="background: #2a2a4a;">
-                <th style="padding: 8px; text-align: left; border: 1px solid #444;">Name</th>
-                <th style="padding: 8px; text-align: left; border: 1px solid #444;">Type</th>
+            <tr style="background: #2a2a48;">
+                <th style="padding: 12px; text-align: left; border: 1px solid #3a3a52;">Name</th>
+                <th style="padding: 12px; text-align: left; border: 1px solid #3a3a52;">Type</th>
             </tr>
         """
         for name, ptype in params.items():
             params_html += f"""
             <tr>
-                <td style="padding: 8px; border: 1px solid #444; font-family: monospace; color: #4fc3f7;">{html.escape(truncate_text(name, 30), quote=True)}</td>
-                <td style="padding: 8px; border: 1px solid #444; color: #888;">{html.escape(truncate_text(str(ptype), 50), quote=True)}</td>
+                <td style="padding: 12px; border: 1px solid #3a3a52; font-family: {mono}; color: #4fc3f7;">{html.escape(truncate_text(name, 30), quote=True)}</td>
+                <td style="padding: 12px; border: 1px solid #3a3a52; color: #e8e8f0; font-family: {mono};">{html.escape(truncate_text(str(ptype), 50), quote=True)}</td>
             </tr>
             """
         params_html += "</table>"
     else:
         params_html = """
-        <h4 style="color: #81c784; margin-top: 16px;">Parameters</h4>
-        <p style="color: #888; font-style: italic;">No parameters required</p>
+        <h4 style="color: #81c784; margin-top: 24px;">Parameters</h4>
+        <p style="color: #a0a0b0; font-style: italic;">No parameters required</p>
         """
 
     # Build examples
     examples_html = ""
     if examples:
-        examples_html = f"<h4 style='color: #81c784; margin-top: 16px;'>Examples ({len(examples)})</h4>"
+        examples_html = f"<h4 style='color: #81c784; margin-top: 24px;'>Examples ({len(examples)})</h4>"
         for ex in examples:
-            examples_html += f"<pre style='background: #1a1a2e; padding: 8px; border-radius: 4px; overflow-x: auto;'>{html.escape(truncate_text(ex, 200), quote=True)}</pre>"
+            examples_html += f"<pre style='background: #22223e; color: #e8e8f0; padding: 16px; border-radius: 4px; overflow-x: auto; font-family: {mono}; line-height: 1.5;'>{html.escape(truncate_text(ex, 200), quote=True)}</pre>"
 
     return f"""
     <div style="padding: 16px;">
-        <h2 style="color: #4fc3f7; margin: 0; word-break: break-all;">{html.escape(row["name"], quote=True)}</h2>
-        <div style="color: #888; margin: 8px 0;">
-            📦 {html.escape(row["server"], quote=True)} | 🏷️ {html.escape(row["category"], quote=True)}
+        <h2 style="color: #4fc3f7; margin: 0; word-break: break-all; font-family: {mono};">{html.escape(row["name"], quote=True)}</h2>
+        <div style="color: #a0a0b0; margin: 8px 0; font-size: 0.9em;">
+            <span aria-hidden="true">📦</span> {html.escape(row["server"], quote=True)} | <span aria-hidden="true">🏷️</span> {html.escape(row["category"], quote=True)}
         </div>
-        <p style="color: #ccc; font-size: 1.1em; margin: 16px 0;">{html.escape(row["description"] or "", quote=True)}</p>
+        <p style="color: #e8e8f0; font-size: 1.05em; margin: 16px 0; line-height: 1.5; max-width: 75ch;">{html.escape(row["description"] or "", quote=True)}</p>
         {params_html}
         {examples_html}
     </div>
@@ -718,19 +1043,19 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
         <div style="background: #1a2e3a; padding: 16px; border-radius: 8px; text-align: center;">
             <div style="font-size: 2em; font-weight: bold; color: #4fc3f7;">{searches["total"]}</div>
-            <div style="color: #888;">Searches ({timeframe})</div>
+            <div style="color: #b0b0b0;">Searches ({timeframe})</div>
         </div>
         <div style="background: #1a3a2a; padding: 16px; border-radius: 8px; text-align: center;">
             <div style="font-size: 2em; font-weight: bold; color: #81c784;">{calls["total"]}</div>
-            <div style="color: #888;">Tool Calls</div>
+            <div style="color: #b0b0b0;">Tool Calls</div>
         </div>
         <div style="background: #3a2a1a; padding: 16px; border-radius: 8px; text-align: center;">
             <div style="font-size: 2em; font-weight: bold; color: #ffb74d;">{calls["success_rate"]}%</div>
-            <div style="color: #888;">Success Rate</div>
+            <div style="color: #b0b0b0;">Success Rate</div>
         </div>
         <div style="background: #2a2a3a; padding: 16px; border-radius: 8px; text-align: center;">
             <div style="font-size: 2em; font-weight: bold; color: #ba68c8;">{searches["avg_latency_ms"]}ms</div>
-            <div style="color: #888;">Avg Search Latency</div>
+            <div style="color: #b0b0b0;">Avg Search Latency</div>
         </div>
     </div>
     """
@@ -753,7 +1078,7 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
                 <td style="padding: 8px; border: 1px solid #444; color: #4fc3f7;">{html.escape(t["tool"], quote=True)}</td>
                 <td style="padding: 8px; border: 1px solid #444; text-align: right;">{t["calls"]}</td>
                 <td style="padding: 8px; border: 1px solid #444; text-align: right; color: {"#81c784" if t["success_rate"] > 90 else "#ffb74d"};">{t["success_rate"]}%</td>
-                <td style="padding: 8px; border: 1px solid #444; text-align: right; color: #888;">{t["avg_latency_ms"]}ms</td>
+                <td style="padding: 8px; border: 1px solid #444; text-align: right; color: #b0b0b0;">{t["avg_latency_ms"]}ms</td>
             </tr>
             """
         out += "</table>"
@@ -762,17 +1087,17 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
     if searches["top_queries"]:
         out += """
         <h3 style="color: #81c784;">Top Queries</h3>
-        <ul style="color: #ccc;">
+        <ul style="color: #d4d4d4;">
         """
         for q in searches["top_queries"][:10]:
-            out += f'<li>"{html.escape(q["query"], quote=True)}" <span style="color: #888;">({q["count"]} times)</span></li>'
+            out += f'<li>"{html.escape(q["query"], quote=True)}" <span style="color: #b0b0b0;">({q["count"]} times)</span></li>'
         out += "</ul>"
 
     # Failures
     if summary.get("failures"):
         out += """
         <h3 style="color: #ef5350;">Recent Failures</h3>
-        <ul style="color: #ccc;">
+        <ul style="color: #d4d4d4;">
         """
         for f in summary["failures"][:5]:
             out += f'<li style="color: #ef5350;">{html.escape(f["tool"], quote=True)}: {html.escape(f["error"] or "Unknown error", quote=True)} ({f["count"]}x)</li>'
@@ -783,7 +1108,7 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
     if hot_cache.get("tools"):
         out += f"""
         <h3 style="color: #ba68c8;">Hot Cache ({hot_cache["size"]} tools)</h3>
-        <p style="color: #888; font-family: monospace;">{html.escape(", ".join(hot_cache["tools"]), quote=True)}</p>
+        <p style="color: #b0b0b0; font-family: monospace;">{html.escape(", ".join(hot_cache["tools"]), quote=True)}</p>
         """
 
     return out
@@ -799,7 +1124,7 @@ def get_chains_view() -> str:
     chain_indexer = get_chain_indexer_instance()
     if not chain_indexer:
         return """
-        <div style="text-align: center; padding: 40px; color: #888;">
+        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
             <div style="font-size: 2em; margin-bottom: 12px;">⚙️</div>
             <p style="color: #ffb74d;">Chain indexing is disabled in configuration.</p>
             <p style="font-size: 0.9em;">Enable <code>chain_indexing_enabled</code> in compass_config.json to use workflows.</p>
@@ -818,33 +1143,45 @@ def get_chains_view() -> str:
     # No workflows
     if not chains:
         return """
-        <div style="text-align: center; padding: 40px; color: #888;">
+        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
             <div style="font-size: 2em; margin-bottom: 12px;">🔗</div>
             <p>No workflows defined yet.</p>
-            <p style="font-size: 0.9em; color: #aaa;">Workflows are auto-detected from usage patterns.</p>
-            <p style="font-size: 0.9em; color: #aaa;">Use tools together to create workflows.</p>
+            <p style="font-size: 0.9em; color: #b0b0b0;">Workflows are auto-detected from usage patterns.</p>
+            <p style="font-size: 0.9em; color: #b0b0b0;">Use tools together to create workflows.</p>
         </div>
         """
 
     html_parts = [
-        f'<p style="color: #888; margin-bottom: 12px;">{len(chains)} workflow{"s" if len(chains) != 1 else ""} available</p>'
+        f'<p style="color: #b0b0b0; margin-bottom: 12px;">{len(chains)} workflow{"s" if len(chains) != 1 else ""} available</p>'
     ]
 
     for chain in sorted(chains, key=lambda c: c.use_count, reverse=True):
         tool_flow = " → ".join([t.split(":")[-1] for t in chain.tools])
-        badge = "🤖 Auto-detected" if chain.is_auto_detected else "👤 Manual"
+        # FE-B-005: text-twin emoji pattern — sighted readers see the glyph,
+        # SR readers hear the meaningful word "Auto-detected" / "Manual" and
+        # don't have to decode "robot face" / "bust in silhouette".
+        if chain.is_auto_detected:
+            badge = '<span aria-hidden="true">🤖</span> Auto-detected'
+        else:
+            badge = '<span aria-hidden="true">👤</span> Manual'
+
+        safe_chain_name = html.escape(chain.name, quote=True)
+        safe_chain_name_short = html.escape(truncate_text(chain.name, 35), quote=True)
+        safe_flow = html.escape(tool_flow, quote=True)
+        safe_flow_short = html.escape(truncate_text(tool_flow, 80), quote=True)
+        safe_desc = html.escape(truncate_text(chain.description or "", 120), quote=True)
 
         html_parts.append(f"""
         <div style="border: 1px solid #444; border-radius: 8px; padding: 16px; margin: 12px 0; background: #1a2e1a;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.2em; font-weight: bold; color: #81c784;" title="{chain.name}">{truncate_text(chain.name, 35)}</span>
-                <span style="color: #888; font-size: 0.9em;">{badge}</span>
+                <span style="font-size: 1.2em; font-weight: bold; color: #81c784;" title="{safe_chain_name}">{safe_chain_name_short}</span>
+                <span style="color: #b0b0b0; font-size: 0.9em;">{badge}</span>
             </div>
-            <div style="font-family: monospace; color: #4fc3f7; margin: 12px 0; font-size: 1.1em;" title="{tool_flow}">
-                {truncate_text(tool_flow, 80)}
+            <div style="font-family: monospace; color: #4fc3f7; margin: 12px 0; font-size: 1.1em;" title="{safe_flow}">
+                {safe_flow_short}
             </div>
-            <p style="color: #aaa; margin: 8px 0;">{truncate_text(chain.description, 120)}</p>
-            <div style="color: #666; font-size: 0.9em;">
+            <p style="color: #d4d4d4; margin: 8px 0;">{safe_desc}</p>
+            <div style="color: #b0b0b0; font-size: 0.9em;">
                 Used {chain.use_count} time{"s" if chain.use_count != 1 else ""}
             </div>
         </div>
@@ -859,7 +1196,13 @@ def get_chains_view() -> str:
 
 
 def get_system_status() -> str:
-    """Get system status overview."""
+    """Get system status overview.
+
+    FE-A-014 + FE-B-005: status indicators use the text-twin pattern — emoji
+    is aria-hidden, the status word is the semantic carrier. All exception
+    strings are html.escape'd before interpolation (truncate_text alone does
+    not escape).
+    """
     # Load config first (doesn't require index)
     global _config
     if _config is None:
@@ -868,8 +1211,10 @@ def get_system_status() -> str:
         except Exception as e:
             return format_error(e, "Could not load configuration")
 
-    # Check index status
-    index_status = "✅ Loaded"
+    # SD-V-005: status indicators wrap emoji + label so SR users hear the
+    # text-twin (Léonie Watson 2023) AND sighted users get the colour cue.
+    # Label is the carrier; emoji is aria-hidden chrome.
+    index_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Loaded'
     stats = {}
     index_path = "Unknown"
     try:
@@ -877,41 +1222,50 @@ def get_system_status() -> str:
         stats = index.get_stats()
         index_path = str(index.index_path)
     except Exception as e:
-        index_status = f"⚠️ Not loaded: {truncate_text(str(e), 50)}"
+        safe_err = html.escape(truncate_text(str(e), 50), quote=True)
+        index_status = f'<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; Not loaded: {safe_err}'
 
-    # Check analytics
-    analytics_status = "✅ Available"
+    # Check analytics — FE-A-013 carry-forward: private attr access remains
+    # (analytics._hot_cache); flagged in skipped[] for backend domain.
+    analytics_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Available'
     hot_cache_size = 0
     try:
         analytics = get_analytics_instance()
         hot_cache_size = len(analytics._hot_cache)
     except Exception as e:
-        analytics_status = f'<span role="img" aria-label="warning">⚠️</span> Error: {truncate_text(str(e), 50)}'
+        safe_err = html.escape(truncate_text(str(e), 50), quote=True)
+        analytics_status = f'<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; {safe_err}'
 
     # Check Ollama
-    ollama_status = "❓ Not checked"
+    ollama_status = '<span aria-hidden="true">❓</span> <span>Unknown</span> &mdash; Not checked'
     try:
         from embedder import Embedder
 
         embedder = Embedder()
         is_healthy = run_async(embedder.health_check())
-        ollama_status = "✅ Connected" if is_healthy else "⚠️ Model not loaded"
+        if is_healthy:
+            ollama_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Connected'
+        else:
+            ollama_status = '<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; Model not loaded'
         run_async(embedder.close())
     except Exception as e:
-        ollama_status = f"❌ Unavailable: {truncate_text(str(e), 40)}"
+        safe_err = html.escape(truncate_text(str(e), 40), quote=True)
+        ollama_status = f'<span aria-hidden="true">❌</span> <span>Failed</span> &mdash; Unavailable: {safe_err}'
 
-    html = f"""
+    safe_embedding_model = html.escape(str(_config.embedding_model), quote=True)
+
+    out = f"""
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px;">
         <div>
             <h3 style="color: #4fc3f7;">System Health</h3>
-            <ul style="color: #ccc; list-style: none; padding-left: 0;">
+            <ul style="color: #d4d4d4; list-style: none; padding-left: 0;">
                 <li style="margin: 8px 0;">Index: {index_status}</li>
                 <li style="margin: 8px 0;">Analytics: {analytics_status}</li>
                 <li style="margin: 8px 0;">Ollama: {ollama_status}</li>
             </ul>
 
             <h3 style="color: #4fc3f7;">Index Status</h3>
-            <ul style="color: #ccc;">
+            <ul style="color: #d4d4d4;">
                 <li>Total tools: <strong>{stats.get("total_tools", 0)}</strong></li>
                 <li>Core tools: {stats.get("core_tools", 0)}</li>
                 <li>Index path: <code style="font-size: 0.85em;">{truncate_text(index_path, 40)}</code></li>
@@ -921,58 +1275,61 @@ def get_system_status() -> str:
     """
 
     if stats.get("by_server"):
-        html += "<ul style='color: #ccc;'>"
+        out += "<ul style='color: #d4d4d4;'>"
         for server, count in sorted(stats.get("by_server", {}).items()):
-            html += f"<li>{server}: {count}</li>"
-        html += "</ul>"
+            safe_server = html.escape(str(server), quote=True)
+            out += f"<li>{safe_server}: {count}</li>"
+        out += "</ul>"
     else:
-        html += "<p style='color: #888; font-style: italic;'>No data</p>"
+        out += "<p style='color: #b0b0b0; font-style: italic;'>No data</p>"
 
-    html += "<h4 style='color: #81c784;'>By Category</h4>"
+    out += "<h4 style='color: #81c784;'>By Category</h4>"
 
     if stats.get("by_category"):
-        html += "<ul style='color: #ccc;'>"
+        out += "<ul style='color: #d4d4d4;'>"
         for category, count in sorted(stats.get("by_category", {}).items()):
-            html += f"<li>{category}: {count}</li>"
-        html += "</ul>"
+            safe_category = html.escape(str(category), quote=True)
+            out += f"<li>{safe_category}: {count}</li>"
+        out += "</ul>"
     else:
-        html += "<p style='color: #888; font-style: italic;'>No data</p>"
+        out += "<p style='color: #b0b0b0; font-style: italic;'>No data</p>"
 
-    html += f"""
+    out += f"""
         </div>
 
         <div>
             <h3 style="color: #4fc3f7;">Configuration</h3>
-            <ul style="color: #ccc;">
+            <ul style="color: #d4d4d4;">
                 <li>Progressive disclosure: {"✅" if _config.progressive_disclosure else "❌"}</li>
                 <li>Auto sync: {"✅" if _config.auto_sync else "❌"}</li>
                 <li>Analytics: {"✅" if _config.analytics_enabled else "❌"}</li>
                 <li>Chain indexing: {"✅" if _config.chain_indexing_enabled else "❌"}</li>
-                <li>Embedding model: <code>{_config.embedding_model}</code></li>
+                <li>Embedding model: <code>{safe_embedding_model}</code></li>
                 <li>Hot cache: {hot_cache_size}/{_config.hot_cache_size}</li>
             </ul>
 
             <h3 style="color: #4fc3f7;">Backends ({len(_config.backends)})</h3>
-            <ul style="color: #ccc;">
+            <ul style="color: #d4d4d4;">
     """
 
     for name in _config.backends.keys():
-        html += f"<li>{name}</li>"
+        safe_name = html.escape(str(name), quote=True)
+        out += f"<li>{safe_name}</li>"
 
-    html += """
+    out += """
             </ul>
 
             <h3 style="color: #4fc3f7;">Quick Commands</h3>
-            <div style="font-size: 0.85em; color: #888;">
-                <p style="margin: 4px 0;"><code>python gateway.py --sync</code> - Rebuild index</p>
-                <p style="margin: 4px 0;"><code>python gateway.py --test</code> - Run tests</p>
-                <p style="margin: 4px 0;"><code>ollama serve</code> - Start Ollama</p>
+            <div style="font-size: 0.9em; color: #b0b0b0;">
+                <p style="margin: 4px 0;"><code>tool-compass sync</code> &mdash; Rebuild index</p>
+                <p style="margin: 4px 0;"><code>tool-compass doctor</code> &mdash; Print diagnostic info</p>
+                <p style="margin: 4px 0;"><code>ollama serve</code> &mdash; Start Ollama</p>
             </div>
         </div>
     </div>
     """
 
-    return html
+    return out
 
 
 # =============================================================================
@@ -1010,10 +1367,11 @@ def create_ui() -> gr.Blocks:
         .tool-result { border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; }
         """,
     ) as demo:
-        # Compute the tool count dynamically — avoid drift between the UI
-        # banner and the actual indexed tools.
+        # FE-B-016: pull the count from the indexer's O(1) COUNT(*) via
+        # get_stats() instead of materializing every row + N json.loads.
+        # ~1000× cheaper at the 1000-tool scale (same correctness).
         try:
-            _tool_count = len(get_all_tools())
+            _tool_count = get_index().get_stats().get("total_tools", 0)
         except Exception:
             _tool_count = 0
         gr.Markdown(f"""
@@ -1030,12 +1388,17 @@ def create_ui() -> gr.Blocks:
                     "Search tools using natural language. Describe what you want to do."
                 )
 
-                # MCC-B-007: Ollama-down banner. Empty string if Ollama is fine,
-                # actionable markdown banner if it's unreachable. The user can
-                # click Refresh to re-probe after starting Ollama.
+                # MCC-B-007 + FE-B-014: Ollama-down banner. The button is the
+                # explicit recovery affordance — verb-noun form ("Re-check
+                # Ollama") makes the action unambiguous (Krug 'Don't Make Me
+                # Think' 2014). search_tools() also surfaces an inline
+                # fallback banner adjacent to result cards when this banner
+                # is non-empty (FE-B-008) — the chrome banner explains the
+                # global state, the inline banner explains the current
+                # results region.
                 ollama_banner = gr.Markdown(value=_check_ollama_banner())
                 refresh_status_btn = gr.Button(
-                    "Refresh Ollama status", size="sm", variant="secondary"
+                    "Re-check Ollama", size="sm", variant="secondary"
                 )
                 refresh_status_btn.click(
                     fn=_check_ollama_banner, inputs=[], outputs=[ollama_banner]
@@ -1043,13 +1406,22 @@ def create_ui() -> gr.Blocks:
 
                 with gr.Row():
                     with gr.Column(scale=4):
+                        # FE-B-006: elem_id makes the underlying <input>
+                        # addressable from the page-load JS that wires
+                        # role="combobox" + aria-controls="search-results-list"
+                        # at runtime. Default gr.Textbox is a plain input;
+                        # the JS upgrade lands the W3C APG combobox role
+                        # without forking the Gradio widget.
                         search_input = gr.Textbox(
                             label="What do you want to do?",
                             placeholder="e.g., 'generate an image with AI', 'read a file', 'search documents'",
                             lines=1,
+                            elem_id="tc-search-input",
                         )
                     with gr.Column(scale=1):
-                        search_btn = gr.Button("Search", variant="primary")
+                        search_btn = gr.Button(
+                            "Search", variant="primary", elem_id="tc-search-btn"
+                        )
 
                 with gr.Row():
                     with gr.Column(scale=1):
@@ -1075,15 +1447,27 @@ def create_ui() -> gr.Blocks:
 
                 with gr.Row():
                     with gr.Column(scale=2):
+                        # FE-B-004 + FE-B-006: the results region exists in
+                        # the DOM at first render with role="region" +
+                        # aria-live="polite" so SR users see the live
+                        # region BEFORE content arrives (MDN aria-live).
+                        # The combobox/listbox wiring is finalized at
+                        # render time by the bottom-of-page JS via
+                        # elem_id="search-input" / id="search-results-list".
                         search_results = gr.HTML(
                             value="""
-                            <div style="text-align: center; padding: 40px; color: #888;">
-                                <div style="font-size: 2em; margin-bottom: 12px;">🔍</div>
+                            <div role="region" aria-live="polite"
+                                 aria-label="Search results"
+                                 id="search-results-region"
+                                 style="text-align: center; padding: 40px; color: #b0b0b0;">
+                                <div style="font-size: 2em; margin-bottom: 12px;"
+                                     aria-hidden="true">🔍</div>
                                 <p>Enter a search query above to find tools.</p>
                                 <p style="font-size: 0.9em;">Try: "generate an image", "read a file", "search documents"</p>
                             </div>
                             """,
                             label="Results",
+                            elem_id="search-results-region-wrap",
                         )
                     with gr.Column(scale=1):
                         results_json = gr.Code(label="JSON", language="json", lines=15)
@@ -1102,7 +1486,7 @@ def create_ui() -> gr.Blocks:
 
                 chain_results = gr.HTML(
                     value="""
-                    <div style="text-align: center; padding: 40px; color: #888;">
+                    <div style="text-align: center; padding: 40px; color: #b0b0b0;">
                         <div style="font-size: 2em; margin-bottom: 12px;">🔗</div>
                         <p>Enter a query to search for workflows.</p>
                         <p style="font-size: 0.9em;">Try: "modify a file", "commit changes", "generate and save image"</p>
@@ -1110,7 +1494,10 @@ def create_ui() -> gr.Blocks:
                     """
                 )
 
-                # Wire up search
+                # Wire up search — FE-B-007: `show_progress="minimal"` so
+                # users see a visible loading indicator during the embedder
+                # call (cold-start can exceed 1s; NN/g "Response Times"
+                # 1.0s = limit of user flow).
                 search_btn.click(
                     fn=search_tools,
                     inputs=[
@@ -1121,6 +1508,7 @@ def create_ui() -> gr.Blocks:
                         min_conf,
                     ],
                     outputs=[search_results, results_json],
+                    show_progress="minimal",
                 )
                 search_input.submit(
                     fn=search_tools,
@@ -1132,11 +1520,13 @@ def create_ui() -> gr.Blocks:
                         min_conf,
                     ],
                     outputs=[search_results, results_json],
+                    show_progress="minimal",
                 )
                 chain_btn.click(
                     fn=search_chains,
                     inputs=[chain_query, top_k, min_conf],
                     outputs=[chain_results],
+                    show_progress="minimal",
                 )
 
             # =================================================================
@@ -1176,7 +1566,7 @@ def create_ui() -> gr.Blocks:
 
                 tool_details = gr.HTML(
                     value="""
-                    <div style="text-align: center; padding: 40px; color: #888;">
+                    <div style="text-align: center; padding: 40px; color: #b0b0b0;">
                         <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
                         <p>Enter a tool name to view details.</p>
                         <p style="font-size: 0.9em;">Or click on a tool from the browser above.</p>
@@ -1242,12 +1632,136 @@ def create_ui() -> gr.Blocks:
 
                 status_btn.click(fn=get_system_status, inputs=[], outputs=[status_html])
 
+        # FE-B-012: contrast-fixed footer grey (#a0a0a0 reads at 4.05:1 on
+        # the dark background — still light but no longer failing AA at
+        # body-text scale).
         gr.Markdown(f"""
         ---
-        <div style="text-align: center; color: #666;">
+        <div style="text-align: center; color: #a0a0a0;">
             Tool Compass v{__version__} | Semantic tool discovery for MCP
         </div>
         """)
+
+        # FE-B-003 + FE-B-004: enhance the Gradio-rendered tabs with the
+        # W3C APG tablist roving-tabindex pattern AND focus the
+        # search-results-count heading after async results land.
+        # Gradio's default Tabs render as flex-of-buttons with no arrow-key
+        # navigation and no aria-controls/tabpanel linkage — the JS below
+        # patches both at runtime without forking gr.Tabs.
+        gr.HTML(
+            """
+<script>
+(function() {
+    'use strict';
+
+    // ----- FE-B-003: roving tabindex for the tab bar -----
+    function enhanceTabs() {
+        const tabBars = document.querySelectorAll('.tab-nav, [role="tablist"]');
+        tabBars.forEach((bar) => {
+            if (bar.dataset.tcEnhanced) return;
+            const tabs = bar.querySelectorAll('button');
+            if (!tabs.length) return;
+            bar.setAttribute('role', 'tablist');
+            tabs.forEach((tab, i) => {
+                tab.setAttribute('role', 'tab');
+                tab.setAttribute('tabindex', i === 0 ? '0' : '-1');
+                if (!tab.getAttribute('aria-selected')) {
+                    tab.setAttribute(
+                        'aria-selected', i === 0 ? 'true' : 'false'
+                    );
+                }
+                tab.addEventListener('keydown', (e) => {
+                    let next = null;
+                    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                        next = tabs[(i + 1) % tabs.length];
+                    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                        next = tabs[(i - 1 + tabs.length) % tabs.length];
+                    } else if (e.key === 'Home') {
+                        next = tabs[0];
+                    } else if (e.key === 'End') {
+                        next = tabs[tabs.length - 1];
+                    }
+                    if (next) {
+                        e.preventDefault();
+                        next.focus();
+                        next.click();
+                    }
+                });
+                tab.addEventListener('click', () => {
+                    tabs.forEach((t) => {
+                        t.setAttribute('tabindex', '-1');
+                        t.setAttribute('aria-selected', 'false');
+                    });
+                    tab.setAttribute('tabindex', '0');
+                    tab.setAttribute('aria-selected', 'true');
+                });
+            });
+            bar.dataset.tcEnhanced = '1';
+        });
+    }
+
+    // ----- FE-B-004: focus search-results-count after async results land
+    // The heading is rendered with id="search-results-count" tabindex="-1"
+    // so it can receive programmatic focus without entering the tab order.
+    function focusResultsCount() {
+        const h = document.getElementById('search-results-count');
+        if (h && document.activeElement !== h
+              && !h.dataset.tcFocused) {
+            // Mark so the MutationObserver doesn't keep stealing focus on
+            // every subsequent unrelated DOM tick.
+            h.dataset.tcFocused = '1';
+            h.focus({ preventScroll: false });
+        }
+        // Unmark when the heading is replaced (next search). Gradio swaps
+        // the whole innerHTML, so the dataset is gone with the old node.
+    }
+
+    // ----- FE-B-006: combobox + listbox wiring on the search input -----
+    function enhanceCombobox() {
+        const wrapper = document.getElementById('tc-search-input');
+        if (!wrapper) return;
+        const input = wrapper.querySelector('input, textarea');
+        if (!input || input.dataset.tcCombobox) return;
+        input.setAttribute('role', 'combobox');
+        input.setAttribute('aria-autocomplete', 'list');
+        input.setAttribute('aria-controls', 'search-results-list');
+        input.setAttribute('aria-expanded', 'true');
+        input.dataset.tcCombobox = '1';
+        // ArrowDown into the listbox focuses the first option, ArrowUp
+        // focuses the last — matches W3C APG editable combobox.
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                const list = document.getElementById('search-results-list');
+                if (!list) return;
+                const opts = list.querySelectorAll('[role="option"]');
+                if (!opts.length) return;
+                e.preventDefault();
+                const target = e.key === 'ArrowDown'
+                    ? opts[0]
+                    : opts[opts.length - 1];
+                target.setAttribute('tabindex', '0');
+                target.focus();
+            }
+        });
+    }
+
+    // MutationObserver wakes all three enhancements as Gradio swaps HTML.
+    const target = document.body;
+    const obs = new MutationObserver(() => {
+        enhanceTabs();
+        enhanceCombobox();
+        focusResultsCount();
+    });
+    obs.observe(target, { childList: true, subtree: true });
+
+    // Run once on load.
+    enhanceTabs();
+    enhanceCombobox();
+})();
+</script>
+            """,
+            visible=True,
+        )
 
     return demo
 
@@ -1277,7 +1791,7 @@ def main():
         print(f"   Tools indexed: {stats.get('total_tools', 0)}")
     except Exception as e:
         print(f"   Warning: Could not load index: {e}")
-        print("   Run 'python gateway.py --sync' to build the index first.")
+        print("   Run 'tool-compass sync' to build the index first.")
 
     # Gradio `share=True` publishes a public tunnel. Require basic auth via
     # GRADIO_AUTH=user:pass so the public URL is not wide open.

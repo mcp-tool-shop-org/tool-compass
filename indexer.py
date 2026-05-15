@@ -8,7 +8,9 @@ import sqlite3
 import json
 import asyncio
 import hashlib
+import threading
 import numpy as np
+from collections import deque
 from pathlib import Path
 from typing import List, Dict, Optional
 from dataclasses import dataclass
@@ -25,10 +27,15 @@ DB_DIR = Path(__file__).parent / "db"
 HNSW_INDEX_PATH = DB_DIR / "compass.hnsw"
 SQLITE_DB_PATH = DB_DIR / "tools.db"
 
-# HNSW Parameters (tuned for ~100-1000 tools)
+# HNSW Parameters (tuned for ~100-1000 tools). Defaults preserved here;
+# CompassConfig (BE-B-008) overrides them at CompassIndex.__init__.
 HNSW_M = 16  # Number of connections per element
 HNSW_EF_CONSTRUCTION = 200  # Size of dynamic candidate list during construction
 HNSW_EF_SEARCH = 50  # Size of dynamic candidate list during search
+
+# BE-B-008: log a one-time warning when corpus crosses this threshold so
+# operators consider raising M / ef_search before recall starts drifting.
+_HNSW_SCALE_WARN_TOOLS = 5000
 
 
 @dataclass
@@ -55,18 +62,48 @@ class CompassIndex:
         index_path: Path = HNSW_INDEX_PATH,
         db_path: Path = SQLITE_DB_PATH,
         embedder: Optional[Embedder] = None,
+        hnsw_m: Optional[int] = None,
+        hnsw_ef_construction: Optional[int] = None,
+        hnsw_ef_search: Optional[int] = None,
     ):
+        """Initialize CompassIndex.
+
+        BE-B-008: hnsw_m / hnsw_ef_construction / hnsw_ef_search are now
+        runtime-tunable via CompassConfig. Defaults preserved; callers pass
+        explicit overrides when they have a config in hand.
+        """
         self.index_path = Path(index_path)
         self.db_path = Path(db_path)
         self.embedder = embedder or Embedder()
+        self.hnsw_m = int(hnsw_m) if hnsw_m is not None else HNSW_M
+        self.hnsw_ef_construction = (
+            int(hnsw_ef_construction)
+            if hnsw_ef_construction is not None
+            else HNSW_EF_CONSTRUCTION
+        )
+        self.hnsw_ef_search = (
+            int(hnsw_ef_search) if hnsw_ef_search is not None else HNSW_EF_SEARCH
+        )
 
         self.index: Optional[hnswlib.Index] = None
         self.db: Optional[sqlite3.Connection] = None
         self._id_to_name: Dict[int, str] = {}
+        # BE-B-008: histogram of returned similarity scores (bounded) to
+        # surface recall drift before users complain.
+        self._score_samples: deque = deque(maxlen=2000)
+        self._scale_warn_emitted = False
 
         # Embedding cache counters (IDX-FT-003).
         self._cache_hits = 0
         self._cache_misses = 0
+
+        # BE-A-003: serialize DB writes across threads. search_sync() dispatches
+        # search() to a worker thread via ThreadPoolExecutor when called from
+        # inside a running event loop (Gradio, nested MCP). The sqlite3
+        # connection is opened with check_same_thread=False (below in _init_db)
+        # so cross-thread access is permitted, but concurrent writes would
+        # still race; this lock guards mutating execs and commits.
+        self._db_write_lock = threading.Lock()
 
         # Ensure db directory exists
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,10 +140,11 @@ class CompassIndex:
         dim = int(row["dim"])
         if dim != EMBEDDING_DIM:
             # Stale entry from a different-dim model — drop and miss.
-            self.db.execute(
-                "DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,)
-            )
-            self.db.commit()
+            with self._db_write_lock:
+                self.db.execute(
+                    "DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,)
+                )
+                self.db.commit()
             return None
         vector = np.frombuffer(row["vector"], dtype=np.float32).reshape(dim)
         # frombuffer returns a read-only view; copy so hnswlib can use it.
@@ -120,14 +158,15 @@ class CompassIndex:
             return
         vec_f32 = np.asarray(vector, dtype=np.float32).reshape(-1)
         try:
-            self.db.execute(
-                """
-                INSERT OR REPLACE INTO embedding_cache (text_hash, vector, dim, provider)
-                VALUES (?, ?, ?, ?)
-                """,
-                (text_hash, vec_f32.tobytes(), int(dim), provider),
-            )
-            self.db.commit()
+            with self._db_write_lock:
+                self.db.execute(
+                    """
+                    INSERT OR REPLACE INTO embedding_cache (text_hash, vector, dim, provider)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (text_hash, vec_f32.tobytes(), int(dim), provider),
+                )
+                self.db.commit()
         except sqlite3.OperationalError as e:
             logger.debug(f"embedding_cache put failed: {e}")
 
@@ -153,41 +192,45 @@ class CompassIndex:
 
     def _init_db(self):
         """Initialize SQLite database for tool metadata."""
-        self.db = sqlite3.connect(str(self.db_path))
+        # BE-A-003: check_same_thread=False allows the connection to be used
+        # from worker threads (search_sync ThreadPoolExecutor path). Cross-
+        # thread mutations are still serialized via self._db_write_lock.
+        self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.db.row_factory = sqlite3.Row
 
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS tools (
-                id INTEGER PRIMARY KEY,
-                name TEXT UNIQUE NOT NULL,
-                description TEXT NOT NULL,
-                category TEXT NOT NULL,
-                server TEXT NOT NULL,
-                parameters TEXT,  -- JSON
-                examples TEXT,    -- JSON
-                is_core INTEGER DEFAULT 0,
-                embedding_text TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            
-            CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
-            CREATE INDEX IF NOT EXISTS idx_tools_server ON tools(server);
-            CREATE INDEX IF NOT EXISTS idx_tools_name ON tools(name);
-            
-            CREATE TABLE IF NOT EXISTS index_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
+        with self._db_write_lock:
+            self.db.executescript("""
+                CREATE TABLE IF NOT EXISTS tools (
+                    id INTEGER PRIMARY KEY,
+                    name TEXT UNIQUE NOT NULL,
+                    description TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    server TEXT NOT NULL,
+                    parameters TEXT,  -- JSON
+                    examples TEXT,    -- JSON
+                    is_core INTEGER DEFAULT 0,
+                    embedding_text TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
 
-            CREATE TABLE IF NOT EXISTS embedding_cache (
-                text_hash TEXT PRIMARY KEY,
-                vector BLOB NOT NULL,
-                dim INTEGER NOT NULL,
-                provider TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        """)
-        self.db.commit()
+                CREATE INDEX IF NOT EXISTS idx_tools_category ON tools(category);
+                CREATE INDEX IF NOT EXISTS idx_tools_server ON tools(server);
+                CREATE INDEX IF NOT EXISTS idx_tools_name ON tools(name);
+
+                CREATE TABLE IF NOT EXISTS index_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+
+                CREATE TABLE IF NOT EXISTS embedding_cache (
+                    text_hash TEXT PRIMARY KEY,
+                    vector BLOB NOT NULL,
+                    dim INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            self.db.commit()
 
         # Runtime cache hit/miss counters (IDX-FT-003). Reset only on process
         # lifetime — persisted cache entries live across runs.
@@ -227,24 +270,48 @@ class CompassIndex:
         # Empty tool set: clear state and initialize an empty HNSW index so
         # search() returns [] cleanly (see IDX-A-002 regression).
         if not tools:
-            self.db.execute("BEGIN IMMEDIATE")
-            try:
-                self.db.execute("DELETE FROM tools")
-                self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
-                self.index.init_index(
-                    max_elements=1000,
-                    ef_construction=HNSW_EF_CONSTRUCTION,
-                    M=HNSW_M,
-                )
-                self.index.set_ef(HNSW_EF_SEARCH)
-                self.index.save_index(str(self.index_path))
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-                raise
+            built_at = time.time()
+            with self._db_write_lock:
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    self.db.execute("DELETE FROM tools")
+                    self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+                    # BE-A2-001: allow_replace_deleted=True permits re-adding a
+                    # previously-deleted label on the UPDATE path in
+                    # add_single_tool. Without it, hnswlib raises on duplicate
+                    # labels and silently breaks updates of changed tools.
+                    self.index.init_index(
+                        max_elements=1000,
+                        ef_construction=self.hnsw_ef_construction,
+                        M=self.hnsw_m,
+                        allow_replace_deleted=True,
+                    )
+                    self.index.set_ef(self.hnsw_ef_search)
+                    self.index.save_index(str(self.index_path))
+                    # BE-A-013: persist a wall-clock timestamp so
+                    # tool_compass_index_age_seconds can compute real age.
+                    self.db.execute(
+                        "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
+                        "('built_at_unix', ?), ('tool_count', '0')",
+                        (str(built_at),),
+                    )
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
             self._id_to_name = {}
             logger.info("build_index completed with 0 tools")
-            return
+            # BE-A-012: callers (gateway.sync_from_backends) read
+            # result['tools_indexed']; previously this branch returned None
+            # and the caller TypeError'd on subscription. Return the same
+            # dict shape as the populated branch.
+            return {
+                "tools_indexed": 0,
+                "embedding_time": 0.0,
+                "total_time": time.time() - start_time,
+                "index_path": str(self.index_path),
+                "db_path": str(self.db_path),
+            }
 
         # Wrap the DELETE → INSERT → embed → add_items sequence in a single
         # transaction. Only commit AFTER HNSW save succeeds, so a failure
@@ -352,21 +419,40 @@ class CompassIndex:
 
             # Build HNSW index
             logger.info("Building HNSW index...")
+            # BE-B-008: scale warning when corpus is large enough to warrant
+            # operator review of the HNSW knobs.
+            if len(tools) >= _HNSW_SCALE_WARN_TOOLS and not self._scale_warn_emitted:
+                logger.warning(
+                    f"Indexing {len(tools)} tools — at this scale, consider "
+                    f"reviewing hnsw_m ({self.hnsw_m}), hnsw_ef_construction "
+                    f"({self.hnsw_ef_construction}), hnsw_ef_search "
+                    f"({self.hnsw_ef_search}) in CompassConfig."
+                )
+                self._scale_warn_emitted = True
+
             self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+            # BE-A2-001: allow_replace_deleted=True permits replacing a label
+            # marked deleted on the UPDATE path in add_single_tool. Without
+            # this flag, hnswlib raises on duplicate labels and silently fails
+            # updates of changed tools.
             self.index.init_index(
                 max_elements=max(len(tools) * 2, 1000),  # Room to grow
-                ef_construction=HNSW_EF_CONSTRUCTION,
-                M=HNSW_M,
+                ef_construction=self.hnsw_ef_construction,
+                M=self.hnsw_m,
+                allow_replace_deleted=True,
             )
 
             # Add vectors with tool IDs
             self.index.add_items(embeddings, tool_ids)
-            self.index.set_ef(HNSW_EF_SEARCH)
+            self.index.set_ef(self.hnsw_ef_search)
 
             # Save index — only after this succeeds do we commit SQLite.
             self.index.save_index(str(self.index_path))
 
-            # Update metadata
+            # Update metadata.
+            # BE-A-013: persist both build_time (elapsed seconds; legacy) and
+            # built_at_unix (wall-clock timestamp). get_stats() reads
+            # built_at_unix so tool_compass_index_age_seconds is accurate.
             self.db.execute(
                 """
                 INSERT OR REPLACE INTO index_meta (key, value) VALUES
@@ -374,14 +460,18 @@ class CompassIndex:
                 ('embedding_dim', ?),
                 ('hnsw_m', ?),
                 ('hnsw_ef_construction', ?),
-                ('build_time', ?)
+                ('hnsw_ef_search', ?),
+                ('build_time', ?),
+                ('built_at_unix', ?)
             """,
                 (
                     str(len(tools)),
                     str(EMBEDDING_DIM),
-                    str(HNSW_M),
-                    str(HNSW_EF_CONSTRUCTION),
+                    str(self.hnsw_m),
+                    str(self.hnsw_ef_construction),
+                    str(self.hnsw_ef_search),
                     str(time.time() - start_time),
+                    str(time.time()),
                 ),
             )
             self.db.commit()
@@ -451,8 +541,14 @@ class CompassIndex:
 
             # Load HNSW index
             self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
-            self.index.load_index(str(self.index_path))
-            self.index.set_ef(HNSW_EF_SEARCH)
+            # BE-A2-001: pass allow_replace_deleted=True at load so the
+            # restored index supports mark_deleted + replace_deleted on the
+            # add_single_tool UPDATE path. Without it, persisted indexes
+            # silently revert to default-strict mode after restart.
+            self.index.load_index(
+                str(self.index_path), allow_replace_deleted=True
+            )
+            self.index.set_ef(self.hnsw_ef_search)
 
             # Post-load sanity: HNSW count vs DB mapping. A mismatch hurts
             # recall but isn't fatal — warn and continue. Rebuild via sync
@@ -534,12 +630,27 @@ class CompassIndex:
 
         # Search HNSW (get more than needed for filtering), clamped to [1, count].
         search_k = max(1, min(top_k * 3, count))
+        # BE-B-002: time the HNSW search separately from Ollama-side latency
+        # so dashboards can split slow-HNSW-with-healthy-Ollama from the
+        # inverse failure mode.
+        knn_start = time.monotonic()
         labels, distances = self.index.knn_query(
             query_embedding.reshape(1, -1), k=search_k
         )
+        knn_latency_ms = (time.monotonic() - knn_start) * 1000.0
+        if not hasattr(self, "_hnsw_latency_samples"):
+            self._hnsw_latency_samples = deque(maxlen=1000)
+        self._hnsw_latency_samples.append(knn_latency_ms)
 
         # Convert distances to similarities (hnswlib returns 1 - cosine for cosine space)
         similarities = 1 - distances[0]
+        # BE-B-008: track score samples so a leftward drift in p50 surfaces
+        # degrading recall (e.g. corpus outgrew the HNSW knobs).
+        for s in similarities[: min(top_k, len(similarities))]:
+            try:
+                self._score_samples.append(float(s))
+            except Exception:
+                pass
 
         results = []
         for label, similarity in zip(labels[0], similarities):
@@ -616,22 +727,27 @@ class CompassIndex:
         cursor = self.db.execute("SELECT key, value FROM index_meta")
         stats["index_meta"] = {row["key"]: row["value"] for row in cursor.fetchall()}
 
-        # Index age + orphan counts (IDX-B-008).
-        # build_time is stored as seconds-elapsed during build, NOT a wall
-        # timestamp — so we read it as-is and expose it under last_build_at
-        # for callers that already understand the meta layout. index_age is
-        # left blank when we don't have a wall timestamp to compute against.
+        # Index age + orphan counts (IDX-B-008 + BE-A-013).
+        # build_time is the duration of the most recent build in seconds.
+        # built_at_unix (added in BE-A-013) is the wall-clock timestamp of
+        # when that build completed; tool_compass_index_age_seconds reads
+        # this. We keep build_time around for backwards compatibility but
+        # prefer built_at_unix where present.
         build_time_raw = stats["index_meta"].get("build_time")
-        stats["last_build_at"] = build_time_raw
+        built_at_raw = stats["index_meta"].get("built_at_unix")
+        stats["last_build_at"] = built_at_raw or build_time_raw
+        stats["index_age_seconds"] = None
         try:
-            # If build_time happens to be a unix timestamp (future rev), this
-            # branch gives a real age. Otherwise it's a build-duration and
-            # the "age" is effectively undefined — leave as None.
-            bt = float(build_time_raw) if build_time_raw is not None else None
-            if bt is not None and bt > 1_000_000_000:  # past 2001 → unix ts
-                stats["index_age_seconds"] = max(0.0, time.time() - bt)
-            else:
-                stats["index_age_seconds"] = None
+            if built_at_raw is not None:
+                stats["index_age_seconds"] = max(
+                    0.0, time.time() - float(built_at_raw)
+                )
+            elif build_time_raw is not None:
+                # Legacy: if build_time happens to look like a unix timestamp,
+                # treat it as one. Otherwise leave as None.
+                bt = float(build_time_raw)
+                if bt > 1_000_000_000:
+                    stats["index_age_seconds"] = max(0.0, time.time() - bt)
         except (TypeError, ValueError):
             stats["index_age_seconds"] = None
 
@@ -642,6 +758,9 @@ class CompassIndex:
                 "current_count": hnsw_count,
                 "max_elements": self.index.get_max_elements(),
                 "ef": self.index.ef,
+                "m": self.hnsw_m,
+                "ef_construction": self.hnsw_ef_construction,
+                "ef_search": self.hnsw_ef_search,
             }
             # Orphaned vectors = HNSW has entries that aren't in the DB
             # mapping. Clamp at 0 — DB can legitimately have rows not yet
@@ -652,6 +771,29 @@ class CompassIndex:
             )
         else:
             stats["orphaned_vector_count"] = 0
+
+        # BE-B-002: HNSW search-latency percentiles (separate from Ollama).
+        hnsw_samples = list(getattr(self, "_hnsw_latency_samples", []) or [])
+        if hnsw_samples:
+            sorted_s = sorted(hnsw_samples)
+            n = len(sorted_s)
+            stats["hnsw_search_latency_ms_p50"] = sorted_s[n // 2]
+            stats["hnsw_search_latency_ms_p95"] = sorted_s[min(n - 1, int(n * 0.95))]
+        else:
+            stats["hnsw_search_latency_ms_p50"] = 0.0
+            stats["hnsw_search_latency_ms_p95"] = 0.0
+
+        # BE-B-008: returned similarity score percentiles. A persistent
+        # leftward drift in p50 means recall is degrading.
+        score_samples = list(self._score_samples or [])
+        if score_samples:
+            sorted_sc = sorted(score_samples)
+            n = len(sorted_sc)
+            stats["search_score_p50"] = sorted_sc[n // 2]
+            stats["search_score_p95"] = sorted_sc[min(n - 1, int(n * 0.95))]
+        else:
+            stats["search_score_p50"] = 0.0
+            stats["search_score_p95"] = 0.0
 
         # Embedder metrics (IDX-B-003 + IDX-B-008 surface).
         try:
@@ -698,68 +840,90 @@ class CompassIndex:
             )
             existing = cursor.fetchone()
 
-            self.db.execute("BEGIN IMMEDIATE")
-            try:
-                if existing:
-                    # Update existing tool
-                    tool_id = existing["id"]
+            with self._db_write_lock:
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    if existing:
+                        # Update existing tool
+                        tool_id = existing["id"]
 
-                    self.db.execute(
-                        """
-                        UPDATE tools SET
-                            description = ?, category = ?, server = ?,
-                            parameters = ?, examples = ?, is_core = ?,
-                            embedding_text = ?
-                        WHERE id = ?
-                    """,
-                        (
-                            tool.description,
-                            tool.category,
-                            tool.server,
-                            json.dumps(tool.parameters),
-                            json.dumps(tool.examples),
-                            1 if tool.is_core else 0,
-                            embedding_text,
-                            tool_id,
-                        ),
-                    )
-                else:
-                    # Insert new tool
-                    cursor = self.db.execute(
-                        """
-                        INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                        (
-                            tool.name,
-                            tool.description,
-                            tool.category,
-                            tool.server,
-                            json.dumps(tool.parameters),
-                            json.dumps(tool.examples),
-                            1 if tool.is_core else 0,
-                            embedding_text,
-                        ),
-                    )
-                    tool_id = cursor.lastrowid
+                        self.db.execute(
+                            """
+                            UPDATE tools SET
+                                description = ?, category = ?, server = ?,
+                                parameters = ?, examples = ?, is_core = ?,
+                                embedding_text = ?
+                            WHERE id = ?
+                        """,
+                            (
+                                tool.description,
+                                tool.category,
+                                tool.server,
+                                json.dumps(tool.parameters),
+                                json.dumps(tool.examples),
+                                1 if tool.is_core else 0,
+                                embedding_text,
+                                tool_id,
+                            ),
+                        )
+                    else:
+                        # Insert new tool
+                        cursor = self.db.execute(
+                            """
+                            INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                            (
+                                tool.name,
+                                tool.description,
+                                tool.category,
+                                tool.server,
+                                json.dumps(tool.parameters),
+                                json.dumps(tool.examples),
+                                1 if tool.is_core else 0,
+                                embedding_text,
+                            ),
+                        )
+                        tool_id = cursor.lastrowid
 
-                # Check if we need to resize the index
-                if self.index.get_current_count() >= self.index.get_max_elements() - 1:
-                    # Need to resize - HNSW doesn't support dynamic resize, so we extend
-                    new_max = self.index.get_max_elements() * 2
-                    self.index.resize_index(new_max)
-                    logger.info(f"Resized HNSW index to {new_max} elements")
+                    # Check if we need to resize the index
+                    if self.index.get_current_count() >= self.index.get_max_elements() - 1:
+                        # Need to resize - HNSW doesn't support dynamic resize, so we extend
+                        new_max = self.index.get_max_elements() * 2
+                        self.index.resize_index(new_max)
+                        logger.info(f"Resized HNSW index to {new_max} elements")
 
-                # Add to HNSW index
-                self.index.add_items(embedding.reshape(1, -1), [tool_id])
+                    # BE-A2-001: on the UPDATE path, hnswlib raises on a
+                    # duplicate label by default. The index is initialized
+                    # with allow_replace_deleted=True so we can mark the old
+                    # label deleted and re-add with replace_deleted=True. This
+                    # is the supported way to overwrite an existing vector.
+                    if existing:
+                        try:
+                            self.index.mark_deleted(tool_id)
+                        except RuntimeError as mark_err:
+                            # mark_deleted raises if the label is already
+                            # marked deleted (idempotent for our purposes) or
+                            # not present in the index (HNSW/DB drift — treat
+                            # as a fresh add). Log and continue.
+                            logger.debug(
+                                f"mark_deleted({tool_id}) skipped: {mark_err}"
+                            )
+                        self.index.add_items(
+                            embedding.reshape(1, -1),
+                            [tool_id],
+                            replace_deleted=True,
+                        )
+                    else:
+                        self.index.add_items(embedding.reshape(1, -1), [tool_id])
 
-                # Save index before committing SQLite.
-                self.index.save_index(str(self.index_path))
+                    # Save index before committing SQLite.
+                    self.index.save_index(str(self.index_path))
 
-                self.db.commit()
-            except Exception:
-                self.db.rollback()
-                raise
+                    self.db.commit()
+                except Exception:
+                    self.db.rollback()
+                    raise
 
             # Update ID mapping (post-commit, in-memory only)
             self._id_to_name[tool_id] = tool.name
@@ -802,8 +966,9 @@ class CompassIndex:
             tool_id = row["id"]
 
             # Remove from database
-            self.db.execute("DELETE FROM tools WHERE id = ?", (tool_id,))
-            self.db.commit()
+            with self._db_write_lock:
+                self.db.execute("DELETE FROM tools WHERE id = ?", (tool_id,))
+                self.db.commit()
 
             # Remove from ID mapping
             self._id_to_name.pop(tool_id, None)

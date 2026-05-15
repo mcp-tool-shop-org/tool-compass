@@ -13,6 +13,9 @@ Each tool has:
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -816,14 +819,25 @@ def _rebuild_alias_map() -> None:
 
     Exposed for tests that monkeypatch TOOLS; production code should not
     need to call this directly.
+
+    BE-B-016: warn loudly on alias collisions. Two tools cannot legitimately
+    share a deprecated alias — silent last-writer-wins would route analytics
+    for the colliding alias to the wrong canonical tool. The TOOLS list is
+    curated today, so this should never fire in production; if it does, the
+    log line names both offenders.
     """
     _ALIAS_TO_CANONICAL.clear()
     for tool in TOOLS:
         # Canonical name maps to itself so a single lookup always works.
         _ALIAS_TO_CANONICAL[tool.name] = tool.name
         for alias in tool.deprecated_aliases:
-            # Last-writer-wins on alias collisions; log would belong here if
-            # we ever see a real one. For now the TOOLS list is curated.
+            prev = _ALIAS_TO_CANONICAL.get(alias)
+            if prev is not None and prev != tool.name:
+                logger.warning(
+                    f"alias collision: {alias!r} claimed by both "
+                    f"{prev!r} and {tool.name!r} — last writer wins. "
+                    f"Analytics for {alias!r} will route to {tool.name!r}."
+                )
             _ALIAS_TO_CANONICAL[alias] = tool.name
 
 

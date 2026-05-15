@@ -4,12 +4,18 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tool-compass"
-version = "2.2.2"
+version = "2.3.0"
 description = "Semantic MCP tool discovery gateway - find tools by intent, not memory"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10,<3.15"
 authors = [
+    { name = "mcp-tool-shop", email = "64996768+mcp-tool-shop@users.noreply.github.com" }
+]
+# Explicit maintainers per PEP 621 — currently the same identity as authors,
+# but having both fields populated is the convention for projects where
+# authorship and on-call maintenance might diverge (CT-B-019).
+maintainers = [
     { name = "mcp-tool-shop", email = "64996768+mcp-tool-shop@users.noreply.github.com" }
 ]
 keywords = [
@@ -33,7 +39,11 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    # Python :: 3.13 classifier intentionally omitted (CT-B-019). hnswlib
+    # 0.8.0's cp313 wheel SIGILLs on common runners (see ci.yml matrix
+    # comment); re-add once hnswlib ships a working cp313 wheel or
+    # IDX-FT-001 lands a pluggable vector backend. `requires-python`
+    # still allows install on 3.13 — this only controls PyPI search filters.
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -43,6 +53,12 @@ dependencies = [
     "numpy>=1.26.0,<2.2.0",  # <2.2.0: numpy 2.2+ wheels SIGILL on Py 3.13 runners
     "httpx>=0.27.0,<1.0.0",
     "mcp>=1.0.0,<2.0.0",
+    # Rich powers the Stage D CLI polish: colored output (4-color discipline),
+    # progress spinners on `doctor`/`sync`, and structured help. Always
+    # available so the CLI surface is consistent regardless of install extras.
+    # Disabled at runtime when stdout is non-TTY, NO_COLOR is set, TERM=dumb,
+    # or --no-color is passed — see cli._should_color().
+    "rich>=13.0.0,<15.0.0",
 ]
 
 [project.optional-dependencies]
@@ -148,6 +164,7 @@ timeout_method = "thread"
 markers = [
     "integration: marks tests requiring external services (Ollama, backends)",
     "slow: marks tests that take a long time to run",
+    "golden: marks the frozen golden-set retrieval benchmark (TS-B-006)",
 ]
 # Narrowed from blanket DeprecationWarning ignore to known-noisy modules only,
 # so new deprecations in our own code still surface.
@@ -166,10 +183,11 @@ omit = [
 ]
 
 [tool.coverage.report]
-# TST-FT-001: conservative 55% floor gates regressions (v2.2.0 baseline
-# was ~58% — leave 3pt headroom for CI env drift). Ratchet up as
-# coverage improves.
-fail_under = 55
+# TST-FT-001: 80% floor — production-grade coverage bar. Wave-12 of
+# the v2.3.0 dogfood swarm raised the floor from the v2.2.x value of 60
+# by adding focused test coverage for ui.py, gateway.py, cli.py, and
+# backend_client_simple.py (the previous low-coverage hotspots).
+fail_under = 80
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

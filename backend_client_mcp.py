@@ -7,6 +7,17 @@ the canonical runtime client, which uses direct subprocess JSON-RPC to avoid
 anyio task group conflicts when nested inside another MCP server.
 
 Kept for reference and potential future use when MCP SDK nesting is stable.
+
+If/when this module is reactivated:
+
+- BR-A-015: the SDK path passes ``env=None`` to ``StdioServerParameters`` when
+  no extras are configured, which makes the SDK inherit the parent
+  environment. The runtime client (``backend_client_simple.py``) gives the
+  operator an env-inheritance policy via the ``__env_inheritance__`` reserved
+  key; mirror that here before reactivation so the two code paths agree.
+- BR-B-001: the runtime client returns a structured error envelope with an
+  ``error_kind`` field. The shim below builds the same envelope shape so
+  switching back to this client does not break downstream consumers.
 """
 
 import asyncio
@@ -333,7 +344,12 @@ class BackendManager:
             if not server_name:
                 return {
                     "success": False,
-                    "error": f"Tool not found: {qualified_name}. Use format 'server:tool_name'.",
+                    "error_kind": "backend_unavailable",
+                    "error": (
+                        f"Tool not found: {qualified_name}. "
+                        "Use format 'server:tool_name'."
+                    ),
+                    "retryable": False,
                 }
 
         # Get backend
@@ -345,16 +361,26 @@ class BackendManager:
                 if not success:
                     return {
                         "success": False,
-                        "error": f"Failed to connect to backend: {server_name}",
+                        "error_kind": "backend_unavailable",
+                        "error": (
+                            f"Failed to connect to backend: {server_name}"
+                        ),
+                        "backend": server_name,
+                        "retryable": True,
                     }
                 conn = self._backends.get(server_name)
             else:
                 return {
                     "success": False,
+                    "error_kind": "backend_unavailable",
                     "error": f"Unknown backend: {server_name}",
+                    "backend": server_name,
+                    "retryable": False,
                 }
 
-        # Execute with timeout protection
+        # Execute with timeout protection. Envelope shape matches the runtime
+        # client's contract (see backend_client_simple.make_error_envelope)
+        # so a future swap-over does not break downstream consumers.
         try:
             result = await asyncio.wait_for(
                 conn.call_tool(tool_name, arguments), timeout=timeout
@@ -362,11 +388,20 @@ class BackendManager:
 
             # Parse result
             if result.isError:
+                # MCP isError — tool_error. Preserve the content array.
+                content_list = list(result.content) if result.content else []
+                error_text_parts = []
+                for item in content_list:
+                    if hasattr(item, "text"):
+                        error_text_parts.append(item.text)
+                error_text = "".join(error_text_parts) or "Tool returned error"
                 return {
                     "success": False,
-                    "error": str(result.content)
-                    if result.content
-                    else "Tool returned error",
+                    "error_kind": "tool_error",
+                    "error": error_text,
+                    "backend": server_name,
+                    "retryable": True,
+                    "content": content_list,
                 }
 
             # Extract content
@@ -390,13 +425,19 @@ class BackendManager:
             logger.error(f"Tool execution timed out after {timeout}s: {qualified_name}")
             return {
                 "success": False,
+                "error_kind": "timeout",
                 "error": f"Tool execution timed out after {timeout}s",
+                "backend": server_name,
+                "retryable": True,
             }
         except Exception as e:
             logger.error(f"Error executing {qualified_name}: {e}")
             return {
                 "success": False,
+                "error_kind": "transport_error",
                 "error": str(e),
+                "backend": server_name,
+                "retryable": False,
             }
 
     def get_stats(self) -> Dict[str, Any]:

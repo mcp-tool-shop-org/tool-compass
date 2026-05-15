@@ -9,9 +9,11 @@ import pytest
 import asyncio
 from pathlib import Path
 from unittest.mock import Mock, AsyncMock
-import sys
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# TS-B-011: sys.path.insert is unnecessary — pyproject.toml sets
+# `pythonpath = ['.']` for pytest. The manual insertion would only matter
+# when running this file outside of pytest, which is not the supported entry
+# point. Keeping the canonical pytest pathway as the single source of truth.
 
 from backend_client_simple import (
     SimpleBackendManager,

@@ -32,7 +32,13 @@ curl http://localhost:11434/api/tags
 
 ## Installation
 
-Clone the repository and set up a virtual environment:
+Install Tool Compass from PyPI:
+
+```bash
+pip install tool-compass
+```
+
+Or clone the repository for local development:
 
 ```bash
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
@@ -41,29 +47,32 @@ cd tool-compass
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-pip install -r requirements.txt
+pip install -e .
 ```
 
 Build the search index (this embeds all tool descriptions into vectors):
 
 ```bash
-python gateway.py --sync
+tool-compass sync
 ```
 
 Start the MCP gateway server:
 
 ```bash
-python gateway.py
+tool-compass
 ```
 
 If you prefer Docker, see the [Getting Started](/tool-compass/handbook/getting-started/) page for Docker Compose instructions.
 
-To explore tools interactively in a browser, launch the Gradio UI instead:
+To explore tools interactively in a browser, install the UI extra and launch the Gradio surface:
 
 ```bash
 pip install "tool-compass[ui]"
-python ui.py
+tool-compass ui
 ```
+
+(`tool-compass-ui` remains available as a backward-compatible alias for
+existing scripts.)
 
 This opens a web interface at `http://localhost:7860` where you can search, browse categories, and view analytics.
 

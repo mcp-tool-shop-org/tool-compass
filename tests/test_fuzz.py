@@ -592,3 +592,120 @@ class TestBackendConfigFuzzing:
         backend = HttpBackend(url=url)
         assert backend.url == url
         assert backend.type == "http"
+
+
+# =============================================================================
+# RETRIEVAL FUZZING (TS-B-007)
+# =============================================================================
+# Property-based coverage for the retrieval surface itself. The existing
+# fuzz tests cover inputs to ToolDefinition / CompassConfig / analytics, but
+# nothing pumped arbitrary text through index.search(). These tests close
+# that gap: long queries, mixed-script unicode, control characters, and
+# argument-hash determinism all flow through the real production paths.
+#
+# Research basis: Liu et al. 2018 'A Survey of Adversarial Attacks on
+# Information Retrieval Systems' (arXiv:1812.02565) documents that
+# retrieval systems break on inputs example-based tests rarely cover.
+
+
+class TestRetrievalPropertyBased:
+    """Property-based tests for the retrieval pipeline (TS-B-007)."""
+
+    @pytest.mark.slow
+    @given(st.text(min_size=0, max_size=1000))
+    @settings(max_examples=50, deadline=None,
+              suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_search_never_crashes_on_arbitrary_text(self, test_index, query):
+        """search() must return a list (not raise) for any text input.
+
+        The contract: search returns a list[SearchResult]; it never raises
+        for input-shape reasons. Property covers empty queries, very long
+        queries, unicode salad, control characters, mixed-script content.
+        """
+        import asyncio
+        results = asyncio.run(test_index.search(query, top_k=5))
+        assert isinstance(results, list)
+        # Top_k is honored even for adversarial queries.
+        assert len(results) <= 5
+
+    @pytest.mark.slow
+    @given(
+        st.text(
+            alphabet=st.characters(
+                whitelist_categories=("L", "N", "P", "Z"),
+                blacklist_categories=("Cs",),
+            ),
+            min_size=1,
+            max_size=200,
+        )
+    )
+    @settings(max_examples=50, deadline=None,
+              suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_unicode_search_does_not_crash(self, test_index, query):
+        """Every printable-category unicode codepoint in the query is safe.
+
+        Surrogate halves (Cs) are excluded — they're not valid as standalone
+        codepoints in str. Everything else (Letter, Number, Punctuation,
+        Space) must pump through to a result list cleanly.
+        """
+        import asyncio
+        results = asyncio.run(test_index.search(query, top_k=3))
+        assert isinstance(results, list)
+
+    @given(
+        st.dictionaries(
+            keys=st.text(min_size=1, max_size=20),
+            values=st.one_of(
+                st.text(max_size=50),
+                st.integers(),
+                st.booleans(),
+                st.none(),
+            ),
+            min_size=0,
+            max_size=8,
+        )
+    )
+    @settings(max_examples=100, deadline=None)
+    def test_arguments_hash_is_deterministic(self, args):
+        """analytics.arguments_hash must be deterministic per-value.
+
+        Property: hash(args) == hash(args) for the same dict (across two
+        independent calls). This is the contract MCC-A-003 (regression test
+        already exists for same-keys-different-values producing different
+        hashes; this test asserts the reverse — same args produce the same
+        hash).
+        """
+        import asyncio
+        import tempfile
+        from analytics import CompassAnalytics
+
+        with tempfile.TemporaryDirectory() as tmp:
+            analytics = CompassAnalytics(db_path=Path(tmp) / "test.db")
+            try:
+                asyncio.run(analytics.record_tool_call(
+                    "fuzz:hash_check",
+                    success=True,
+                    latency_ms=1.0,
+                    arguments=args,
+                ))
+                asyncio.run(analytics.record_tool_call(
+                    "fuzz:hash_check",
+                    success=True,
+                    latency_ms=1.0,
+                    arguments=args,
+                ))
+
+                db = analytics._get_db()
+                rows = db.execute(
+                    "SELECT arguments_hash FROM tool_calls "
+                    "WHERE tool_name='fuzz:hash_check' ORDER BY id"
+                ).fetchall()
+            finally:
+                analytics.close()
+
+            assert len(rows) == 2
+            # Same args -> same hash. Different runs -> same hash.
+            assert rows[0]["arguments_hash"] == rows[1]["arguments_hash"], (
+                "TS-B-007 property violation: same arguments produced "
+                "different hashes — arguments_hash is not deterministic."
+            )

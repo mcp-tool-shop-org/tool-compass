@@ -126,14 +126,36 @@ class CompassAnalytics:
         The connection is opened with check_same_thread=False so it can be
         shared across Gradio's thread pool. All mutations are protected by
         self._lock — see record_search / record_tool_call / _save_chain_pattern.
+
+        BE-A-011 + BE-B-010: WAL journal mode lets one writer + many readers
+        coexist cleanly. busy_timeout=5000ms makes SQLite back off on
+        SQLITE_BUSY rather than fail — the three-module write topology
+        (analytics + sync_manager + chain_indexer) needs both to not race
+        for the file lock.
         """
         if self.db is None:
             self.db = sqlite3.connect(
                 str(self.db_path), check_same_thread=False
             )
             self.db.row_factory = sqlite3.Row
+            self._apply_sqlite_pragmas(self.db)
             self._init_db()
         return self.db
+
+    @staticmethod
+    def _apply_sqlite_pragmas(db: sqlite3.Connection) -> None:
+        """Apply BE-B-010 pragmas: WAL + busy_timeout.
+
+        Best-effort: WAL setup can fail on shared filesystems (network mounts),
+        in which case journal_mode falls back to the default rollback journal
+        and busy_timeout still helps. We swallow rather than crash.
+        """
+        try:
+            db.execute("PRAGMA busy_timeout = 5000")
+            db.execute("PRAGMA journal_mode = WAL")
+            db.execute("PRAGMA synchronous = NORMAL")
+        except sqlite3.Error as e:
+            logger.debug(f"sqlite PRAGMA setup failed: {e}")
 
     def _init_db(self):
         """Initialize analytics database with all tables."""

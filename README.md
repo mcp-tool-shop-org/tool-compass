@@ -51,7 +51,25 @@ Tool Compass uses **semantic search** to find relevant tools from a natural lang
 
 📖 **Full documentation:** See the [Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) for installation, configuration, and architecture deep-dives.
 
-### Option 1: Local Installation
+### Option 1: npm (zero-prerequisite, no Python install)
+
+```bash
+npx @mcptoolshop/tool-compass --help
+npx @mcptoolshop/tool-compass serve     # MCP gateway
+npx @mcptoolshop/tool-compass ui        # Gradio UI
+npx @mcptoolshop/tool-compass doctor    # Diagnose setup
+```
+
+Downloads a verified platform binary on first run (SHA256-checked against the GitHub Release). Cached locally — subsequent invocations launch instantly. See [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) on npm.
+
+### Option 2: PyPI
+
+```bash
+pip install tool-compass
+tool-compass --help
+```
+
+### Option 3: Local clone
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -69,16 +87,16 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Build the search index
-python gateway.py --sync
+tool-compass sync
 
 # Run the MCP server
-python gateway.py
+tool-compass serve
 
 # Or launch the Gradio UI
-python ui.py
+tool-compass ui
 ```
 
-### Option 2: Docker
+### Option 4: Docker
 
 ```bash
 # Clone the repo
@@ -303,14 +321,22 @@ Tool Compass is a **local-first** development tool. See [SECURITY.md](SECURITY.m
 
 ## Scorecard
 
+Per-category scores are regenerated post-swarm via
+`bash scripts/regenerate-scorecard.sh` (which wraps `npx
+@mcptoolshop/shipcheck audit`). See [SCORECARD.md](SCORECARD.md) for the
+current authoritative breakdown — the table below mirrors it and is
+intentionally not hand-authored. Hand-curated sections (Known Gaps,
+Remediation History) live outside the `<!-- SHIPCHECK-AUTO-START/END -->`
+markers in SCORECARD.md and survive regenerations.
+
 | Category | Score | Notes |
 |----------|-------|-------|
-| A. Security | 10/10 | SECURITY.md, local-only, no telemetry, parameterized SQL |
-| B. Error Handling | 10/10 | Structured results, graceful Ollama fallback |
-| C. Operator Docs | 10/10 | README, CHANGELOG, CONTRIBUTING, API docs |
-| D. Shipping Hygiene | 10/10 | CI (lint + tests + coverage + pip-audit + Docker), verify script |
-| E. Identity | 10/10 | Logo, translations, landing page |
-| **Total** | **50/50** | |
+| A. Security | TBD | SHA-pinned actions; digest-pinned base image; SLSA provenance + SBOM on PyPI + GHCR; pre-commit secrets scan |
+| B. Error Handling | TBD | Structured results, graceful degradation, exit codes |
+| C. Operator Docs | TBD | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Shipping Hygiene | TBD | CI consolidated; timeout-minutes + retention-days on every job; pytest config in pyproject.toml |
+| E. Identity (soft) | TBD | Logo, landing page, GitHub metadata; explicit maintainers in pyproject.toml |
+| **Total** | **TBD** | Regenerate via `make scorecard` |
 
 ## License
 

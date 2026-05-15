@@ -98,25 +98,62 @@ class CompassConfig:
     chain_detection_min_occurrences: int = 3
     top_chains_cache_size: int = 5
 
+    # Circuit breaker / retry tuning (BE-B-014). Promoted from module-level
+    # constants in embedder.py so operators can tune without code edits.
+    # Ranges clamped in validate_and_clamp() to keep the behavior sane.
+    ollama_breaker_failure_threshold: int = 3
+    ollama_breaker_open_seconds: float = 30.0
+    ollama_retry_attempts: int = 3
+    ollama_retry_backoffs: List[float] = field(
+        default_factory=lambda: [0.5, 1.0, 2.0]
+    )
+
+    # HNSW parameters (BE-B-008). Promoted from module-level constants in
+    # indexer.py so operators can re-tune at scale without forking.
+    hnsw_m: int = 16
+    hnsw_ef_construction: int = 200
+    hnsw_ef_search: int = 50
+
     @classmethod
     def from_file(cls, path: Path) -> "CompassConfig":
         """Load config from JSON file with variable substitution.
 
-        On corrupt/unreadable config (MCC-B-001), backs up the bad file
-        alongside the original and falls back to default config rather than
-        crashing startup. User gets an actionable log line with the backup
-        path and reset instructions.
+        On corrupt/unreadable config (MCC-B-001 + BE-A-006), MOVES the bad
+        file aside (rather than copy) so repeated load_config() calls don't
+        spawn a new .bak.<ts> on every restart. The user gets a single,
+        durable rescue copy and an actionable log line.
         """
         try:
             with open(path) as f:
                 data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
-            backup_path = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
+            # BE-A-006: use a deterministic sentinel name (single .bak suffix)
+            # so the backup count stays at 1 regardless of restart count. We
+            # only stamp a timestamp if the .bak slot is already taken (to
+            # preserve the FIRST corruption, which is usually the diagnostic
+            # one). Move (rename) not copy so the original is gone — that
+            # prevents next-restart from re-triggering the same branch.
+            base_backup = path.with_suffix(path.suffix + ".bak")
+            if base_backup.exists():
+                backup_path: Optional[Path] = path.with_suffix(
+                    path.suffix + f".bak.{int(time.time())}"
+                )
+            else:
+                backup_path = base_backup
             try:
-                shutil.copy2(path, backup_path)
+                # Path.rename atomically replaces / removes the source. Falls
+                # back to copy+unlink if rename across filesystems fails.
+                try:
+                    path.rename(backup_path)
+                except OSError:
+                    shutil.copy2(path, backup_path)
+                    try:
+                        path.unlink()
+                    except OSError:
+                        pass
             except OSError:
-                # If even the backup copy fails (e.g. path vanished), still
-                # fall back rather than crash — the user needs a working tool.
+                # If even the backup fails (e.g. path vanished), still fall
+                # back rather than crash — the user needs a working tool.
                 backup_path = None
             logger.error(
                 f"Config file at {path} is corrupt: {e}.\n"
@@ -128,10 +165,23 @@ class CompassConfig:
         # Get defaults for variable substitution
         defaults = data.get("defaults", {})
 
-        # Also check environment variables (env vars take precedence)
+        # BE-A-015: track unresolved ${VAR} references so doctor() can flag
+        # them. Substitution silently leaving ${FOO} in args is a debugging
+        # trap — the backend then receives the literal string and fails
+        # opaquely.
+        unresolved: List[str] = []
+
         def resolve_var(match):
             var_name = match.group(1)
-            return os.environ.get(var_name, defaults.get(var_name, match.group(0)))
+            env_val = os.environ.get(var_name)
+            if env_val is not None:
+                return env_val
+            default_val = defaults.get(var_name)
+            if default_val is not None:
+                return default_val
+            if var_name not in unresolved:
+                unresolved.append(var_name)
+            return match.group(0)
 
         # Recursively substitute ${VAR} patterns
         def substitute(obj):
@@ -144,7 +194,20 @@ class CompassConfig:
             return obj
 
         data = substitute(data)
-        return cls.from_dict(data)
+        cfg = cls.from_dict(data)
+        # Stash unresolved names on the instance (non-serialized) for doctor().
+        # The field isn't a declared dataclass attribute, so we attach it
+        # directly — dataclasses without slots permit dynamic attributes.
+        try:
+            cfg._unresolved_vars = list(unresolved)
+        except Exception:
+            pass
+        if unresolved:
+            logger.warning(
+                f"Config at {path} references unresolved variables: "
+                f"{', '.join(unresolved)}. Set them in env or defaults block."
+            )
+        return cfg
 
     @classmethod
     def from_dict(cls, data: dict) -> "CompassConfig":
@@ -209,6 +272,33 @@ class CompassConfig:
             "top_chains_cache_size", config.top_chains_cache_size
         )
 
+        # Circuit breaker / retry tuning (BE-B-014)
+        config.ollama_breaker_failure_threshold = data.get(
+            "ollama_breaker_failure_threshold",
+            config.ollama_breaker_failure_threshold,
+        )
+        config.ollama_breaker_open_seconds = data.get(
+            "ollama_breaker_open_seconds", config.ollama_breaker_open_seconds
+        )
+        config.ollama_retry_attempts = data.get(
+            "ollama_retry_attempts", config.ollama_retry_attempts
+        )
+        backoffs = data.get("ollama_retry_backoffs")
+        if backoffs is not None:
+            try:
+                config.ollama_retry_backoffs = [float(b) for b in backoffs]
+            except (TypeError, ValueError):
+                logger.warning(
+                    "ollama_retry_backoffs must be a list of numbers; ignoring."
+                )
+
+        # HNSW tuning (BE-B-008)
+        config.hnsw_m = data.get("hnsw_m", config.hnsw_m)
+        config.hnsw_ef_construction = data.get(
+            "hnsw_ef_construction", config.hnsw_ef_construction
+        )
+        config.hnsw_ef_search = data.get("hnsw_ef_search", config.hnsw_ef_search)
+
         # MCC-B-002: clamp out-of-range values rather than letting them slip
         # through and silently produce weird search/cache behavior downstream.
         config.validate_and_clamp()
@@ -268,6 +358,67 @@ class CompassConfig:
             )
             self.chain_detection_min_occurrences = clamped
 
+        # BE-B-014: clamp circuit-breaker tuning to safe ranges.
+        if not 1 <= self.ollama_breaker_failure_threshold <= 20:
+            original = self.ollama_breaker_failure_threshold
+            clamped = max(1, min(20, int(self.ollama_breaker_failure_threshold)))
+            logger.warning(
+                f"Config value ollama_breaker_failure_threshold clamped from "
+                f"{original} to {clamped}"
+            )
+            self.ollama_breaker_failure_threshold = clamped
+
+        if not 1.0 <= self.ollama_breaker_open_seconds <= 600.0:
+            original = self.ollama_breaker_open_seconds
+            clamped = max(1.0, min(600.0, float(self.ollama_breaker_open_seconds)))
+            logger.warning(
+                f"Config value ollama_breaker_open_seconds clamped from "
+                f"{original} to {clamped}"
+            )
+            self.ollama_breaker_open_seconds = clamped
+
+        if not 0 <= self.ollama_retry_attempts <= 10:
+            original = self.ollama_retry_attempts
+            clamped = max(0, min(10, int(self.ollama_retry_attempts)))
+            logger.warning(
+                f"Config value ollama_retry_attempts clamped from "
+                f"{original} to {clamped}"
+            )
+            self.ollama_retry_attempts = clamped
+
+        if not isinstance(self.ollama_retry_backoffs, list) or not all(
+            isinstance(b, (int, float)) and b >= 0 for b in self.ollama_retry_backoffs
+        ):
+            logger.warning(
+                "ollama_retry_backoffs must be a list of non-negative numbers; "
+                "resetting to [0.5, 1.0, 2.0]"
+            )
+            self.ollama_retry_backoffs = [0.5, 1.0, 2.0]
+
+        # BE-B-008: clamp HNSW knobs to safe ranges.
+        if not 4 <= self.hnsw_m <= 64:
+            original = self.hnsw_m
+            self.hnsw_m = max(4, min(64, int(self.hnsw_m)))
+            logger.warning(
+                f"Config value hnsw_m clamped from {original} to {self.hnsw_m}"
+            )
+        if not 40 <= self.hnsw_ef_construction <= 800:
+            original = self.hnsw_ef_construction
+            self.hnsw_ef_construction = max(
+                40, min(800, int(self.hnsw_ef_construction))
+            )
+            logger.warning(
+                f"Config value hnsw_ef_construction clamped from "
+                f"{original} to {self.hnsw_ef_construction}"
+            )
+        if not 10 <= self.hnsw_ef_search <= 400:
+            original = self.hnsw_ef_search
+            self.hnsw_ef_search = max(10, min(400, int(self.hnsw_ef_search)))
+            logger.warning(
+                f"Config value hnsw_ef_search clamped from "
+                f"{original} to {self.hnsw_ef_search}"
+            )
+
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
         backends = {}
@@ -310,6 +461,13 @@ class CompassConfig:
             "chain_indexing_enabled": self.chain_indexing_enabled,
             "chain_detection_min_occurrences": self.chain_detection_min_occurrences,
             "top_chains_cache_size": self.top_chains_cache_size,
+            "ollama_breaker_failure_threshold": self.ollama_breaker_failure_threshold,
+            "ollama_breaker_open_seconds": self.ollama_breaker_open_seconds,
+            "ollama_retry_attempts": self.ollama_retry_attempts,
+            "ollama_retry_backoffs": list(self.ollama_retry_backoffs),
+            "hnsw_m": self.hnsw_m,
+            "hnsw_ef_construction": self.hnsw_ef_construction,
+            "hnsw_ef_search": self.hnsw_ef_search,
         }
 
     def save(self, path: Path):
@@ -615,12 +773,17 @@ def doctor() -> dict:
             # Old DB without schema_meta is fine — just report unknown.
             analytics_schema_version = None
 
+    unresolved_vars = list(getattr(cfg, "_unresolved_vars", []) or [])
+
     return {
         "version": __version__,
         "python_version": sys.version,
         "platform": _platform.platform(),
         "config_path": str(cfg_path),
         "config": cfg_dict,
+        # BE-A-015: surface unresolved ${VAR} references so bug reports
+        # capture them. Empty list means the config substituted cleanly.
+        "config_unresolved_vars": unresolved_vars,
         "base_path": str(base_path),
         "data_dir": str(data_dir),
         "python_executable": python_exe,

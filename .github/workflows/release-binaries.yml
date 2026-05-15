@@ -1,0 +1,268 @@
+# Builds platform binaries on release, uploads to the GitHub Release with
+# SHA256 checksums. Consumed by the @mcptoolshop/tool-compass npm wrapper
+# (via @mcptoolshop/npm-launcher) for zero-prerequisite `npx` installs.
+#
+# Asset naming convention (must match npm-launcher expectations):
+#   binary:    tool-compass-<version>-<os>-<arch>[.exe]
+#   checksums: checksums-<version>.txt
+name: Release Binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build binaries for (e.g. v2.3.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TOOL_NAME: tool-compass
+  ENTRYPOINT: cli.py
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            ext: ""
+          - os: macos-latest
+            target: darwin-arm64
+            ext: ""
+          - os: windows-latest
+            target: win-x64
+            ext: ".exe"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Install package + PyInstaller
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install . "pyinstaller>=6.9.0"
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build single-file binary
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # --collect-submodules covers dynamic imports MCP / Gradio / Rich pull in.
+          # --console keeps stdout/stderr behavior identical to `python cli.py`.
+          pyinstaller --onefile \
+            --name "${{ env.TOOL_NAME }}" \
+            --console \
+            --collect-submodules mcp \
+            --collect-submodules hnswlib \
+            --collect-submodules numpy \
+            --collect-submodules httpx \
+            "${{ env.ENTRYPOINT }}"
+          OUTNAME="${{ env.TOOL_NAME }}-${VERSION}-${{ matrix.target }}${{ matrix.ext }}"
+          mv "dist/${{ env.TOOL_NAME }}${{ matrix.ext }}" "dist/${OUTNAME}"
+          echo "Built: dist/${OUTNAME}"
+          ls -la "dist/${OUTNAME}"
+
+      - name: Smoke test binary
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          BIN="dist/${{ env.TOOL_NAME }}-${VERSION}-${{ matrix.target }}${{ matrix.ext }}"
+          # --version is wired on the root parser as of v2.2.1 (a942a67).
+          "$BIN" --version
+          "$BIN" --help
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/${{ env.TOOL_NAME }}-*
+          retention-days: 7
+
+  attach:
+    name: Attach binaries + checksums to release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Download all binaries
+        uses: actions/download-artifact@d3f86a106a0bac45b6f43a9e15dcdfde08ad5097 # v5
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        shell: bash
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          VERSION="${TAG#v}"
+          cd artifacts
+          sha256sum * > "checksums-${VERSION}.txt"
+          echo "--- checksums-${VERSION}.txt ---"
+          cat "checksums-${VERSION}.txt"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
+        with:
+          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
+          files: artifacts/*
+          fail_on_unmatched_files: true
+
+  publish-npm:
+    name: Publish npm wrapper
+    needs: attach
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    environment: npm
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Resolve version + tag
+        id: version
+        shell: bash
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Sync npm wrapper version to release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          cd npm
+          # package.json version
+          node -e "const p=require('./package.json');p.version='${VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,2)+'\n');"
+          # bin shim version + tag (matches sync-version.mjs locally)
+          node -e "
+            const fs=require('fs');
+            let s=fs.readFileSync('bin/tool-compass.js','utf8');
+            s=s.replace(/version:\s*\"[^\"]+\"/,'version: \"${VERSION}\"');
+            s=s.replace(/tag:\s*\"[^\"]+\"/,'tag: \"${TAG}\"');
+            fs.writeFileSync('bin/tool-compass.js',s);
+          "
+          echo '--- Synced npm/package.json ---'
+          grep '"version"' package.json
+          echo '--- Synced npm/bin/tool-compass.js ---'
+          grep -E 'version|tag' bin/tool-compass.js
+
+      - name: Copy translated READMEs from repo root into npm wrapper
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ github.workspace }}"
+          # Source README translations live at repo root; the npm wrapper bundles
+          # them via package.json "files": ["README*.md", ...]. Copy at publish
+          # time so the single source of truth stays at the repo root.
+          for lang in ja zh es fr hi it pt-BR; do
+            if [ -f "README.${lang}.md" ]; then
+              cp "README.${lang}.md" "npm/README.${lang}.md"
+              echo "Copied README.${lang}.md → npm/"
+            else
+              echo "::warning::Missing README.${lang}.md at repo root — npm wrapper will ship without ${lang} translation"
+            fi
+          done
+          ls -la npm/README*.md
+
+      - name: Install + run wrapper smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd npm
+          npm install --no-fund --no-audit
+          npm test
+
+      - name: Wait for GitHub Release binaries to be available
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          # npm-launcher will fetch checksums-<version>.txt and the platform
+          # binary from this release tag on every fresh npx install. Fail loud
+          # rather than ship a wrapper that points at missing assets.
+          for _ in $(seq 1 12); do
+            assets=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+            if echo "$assets" | grep -q "checksums-${{ steps.version.outputs.version }}.txt" \
+               && echo "$assets" | grep -q "tool-compass-${{ steps.version.outputs.version }}-linux-x64" \
+               && echo "$assets" | grep -q "tool-compass-${{ steps.version.outputs.version }}-darwin-arm64" \
+               && echo "$assets" | grep -q "tool-compass-${{ steps.version.outputs.version }}-win-x64.exe"; then
+              echo "All expected binaries present on release ${TAG}:"
+              echo "$assets"
+              exit 0
+            fi
+            echo "Waiting for binaries on release ${TAG}…"
+            sleep 10
+          done
+          echo "::error::Release ${TAG} missing required binaries after 2 minutes"
+          gh release view "$TAG" --repo "${{ github.repository }}" --json assets
+          exit 1
+
+      - name: Publish to npm with provenance
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd npm
+          # --provenance emits a SLSA build attestation tied to this workflow's
+          # OIDC identity; npm verifies it before serving the package.
+          # --access public is required for first-publish of scoped packages.
+          npm publish --provenance --access public
+
+      - name: Post-publish smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          # npm registry propagation
+          for _ in $(seq 1 12); do
+            if npm view "@mcptoolshop/tool-compass@${VERSION}" version 2>/dev/null | grep -Fq "${VERSION}"; then
+              echo "npm registry has @mcptoolshop/tool-compass@${VERSION}"
+              break
+            fi
+            sleep 10
+          done
+          npm view "@mcptoolshop/tool-compass@${VERSION}" --json | jq '{name, version, dist}'

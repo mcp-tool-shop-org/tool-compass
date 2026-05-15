@@ -6,7 +6,7 @@
 
 <p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
 
-**Navegador semántico para herramientas MCP: Encuentra la herramienta adecuada por intención, no por memoria**
+**Navegador semántico para herramientas MCP: Encuentra la herramienta adecuada según la intención, no por memoria**
 
 <a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
@@ -20,7 +20,7 @@
 
 [Instalación](#quick-start) • [Uso](#usage) • [Docker](#option-2-docker) • [Manual de usuario](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [Rendimiento](#performance) • [Contribuciones](#contributing)
 
-</div
+</div>
 
 ---
 
@@ -47,11 +47,29 @@ Tool Compass utiliza la **búsqueda semántica** para encontrar herramientas rel
 </p>
 -->
 
-## Cómo empezar
+## Comienzo rápido
 
 📖 **Documentación completa:** Consulta el [Manual de usuario de Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) para obtener información sobre la instalación, la configuración y la arquitectura.
 
-### Opción 1: Instalación local
+### Opción 1: npm (sin requisitos previos, no requiere instalación de Python)
+
+```bash
+npx @mcptoolshop/tool-compass --help
+npx @mcptoolshop/tool-compass serve     # MCP gateway
+npx @mcptoolshop/tool-compass ui        # Gradio UI
+npx @mcptoolshop/tool-compass doctor    # Diagnose setup
+```
+
+Descarga un binario de plataforma verificado en la primera ejecución (verificado con SHA256 contra el lanzamiento de GitHub). Se guarda en caché localmente; las invocaciones posteriores se ejecutan instantáneamente. Consulta [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) en npm.
+
+### Opción 2: PyPI
+
+```bash
+pip install tool-compass
+tool-compass --help
+```
+
+### Opción 3: Clon local
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -69,16 +87,16 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Build the search index
-python gateway.py --sync
+tool-compass sync
 
 # Run the MCP server
-python gateway.py
+tool-compass serve
 
 # Or launch the Gradio UI
-python ui.py
+tool-compass ui
 ```
 
-### Opción 2: Docker
+### Opción 4: Docker
 
 ```bash
 # Clone the repo
@@ -95,14 +113,14 @@ docker-compose --profile with-ollama up
 ```
 
 > La imagen de GHCR (`ghcr.io/mcp-tool-shop-org/tool-compass`) es compatible con
-> `linux/amd64` y `linux/arm64`, por lo que la misma versión se ejecuta en servidores x86_64
-> y en estaciones de trabajo Apple Silicon / ARM.
+> `linux/amd64` y `linux/arm64`, por lo que la misma etiqueta se ejecuta en servidores x86_64
+> y estaciones de trabajo Apple Silicon / ARM.
 
 ## Características
 
 - **Búsqueda semántica:** Encuentra herramientas describiendo lo que quieres hacer.
 - **Divulgación progresiva:** `compass()` → `describe()` → `execute()`
-- **Caché dinámica:** Las herramientas de uso frecuente se cargan previamente.
+- **Caché rápido:** Las herramientas de uso frecuente se cargan previamente.
 - **Detección de cadenas:** Descubre automáticamente los flujos de trabajo comunes de las herramientas.
 - **Analítica:** Realiza un seguimiento de los patrones de uso y el rendimiento de las herramientas.
 - **Multiplataforma:** Windows, macOS, Linux.
@@ -169,8 +187,8 @@ Devuelve:
 | `compass_categories()` | Lista categorías y servidores |
 | `compass_status()` | Estado y configuración del sistema |
 | `compass_analytics(timeframe)` | Estadísticas de uso |
-| `compass_chains(action)` | Gestiona los flujos de trabajo de las herramientas |
-| `compass_sync(force)` | Reconstruye el índice a partir de los backends |
+| `compass_chains(action)` | Administra los flujos de trabajo de las herramientas |
+| `compass_sync(force)` | Reconstruye el índice desde los backends |
 | `compass_audit()` | Informe completo del sistema |
 
 ### Patrón de divulgación progresiva
@@ -222,7 +240,7 @@ El campo `hint` en los resultados de `compass` guía este flujo, sugiriendo cuá
 - **macOS:** `~/Library/Application Support/tool-compass/`
 - **Linux:** `~/.config/tool-compass/` (o `$XDG_CONFIG_HOME/tool-compass/`)
 
-Consulta [`.env.example`](.env.example) para todas las opciones.
+Consulte el archivo [`.env.example`](.env.example) para todas las opciones.
 
 ## Rendimiento
 
@@ -231,7 +249,7 @@ Consulta [`.env.example`](.env.example) para todas las opciones.
 | Tiempo de construcción del índice | ~5 segundos para 44 herramientas |
 | Latencia de la consulta | ~15 ms (incluyendo la incrustación) |
 | Ahorro de tokens | ~95% (38K → 2K) |
-| Precisión@3 | ~95% (herramienta correcta en el top 3) |
+| Precisión@3 | ~95% (herramienta correcta en las 3 primeras posiciones) |
 
 ## Pruebas
 
@@ -255,15 +273,15 @@ Si los registros de Claude Desktop muestran errores de análisis JSON:
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**Causa**: Las sentencias `print()` corrompen el protocolo JSON-RPC.
+**Causa:** Las declaraciones `print()` corrompen el protocolo JSON-RPC.
 
-**Solución**: Utilice el registro o `file=sys.stderr`:
+**Solución:** Utilice el registro o `file=sys.stderr`:
 ```python
 import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Conexión a Ollama fallida
+### Conexión de Ollama fallida
 
 ```bash
 # Check Ollama is running
@@ -281,11 +299,11 @@ python gateway.py --sync
 
 ## Proyectos relacionados
 
-Parte de la **suite Compass** para el desarrollo impulsado por IA:
+Parte de la **Suite Compass** para el desarrollo impulsado por IA:
 
 - [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Búsqueda semántica de archivos
 - [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Componentes de Gradio con incrustaciones vectoriales
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de LLM sin cabeza
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de LLM sin interfaz
 - [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sin la complejidad
 
 ## Contribuciones
@@ -296,21 +314,25 @@ Parte de la **suite Compass** para el desarrollo impulsado por IA:
 
 Tool Compass es una herramienta de desarrollo que funciona **principalmente en local**. Consulte [SECURITY.md](SECURITY.md) para obtener la política completa.
 
-- **Datos que se utilizan:** Descripciones de las herramientas indexadas en una base de vectores HNSW local, consultas de búsqueda registradas en una base de datos SQLite local (`compass_analytics.db`), incrustaciones generadas a través de Ollama local.
-- **Datos que NO se utilizan:** Ningún código de usuario, ningún contenido de archivo, ninguna credencial. Los argumentos de las llamadas a las herramientas se hash, no se almacenan en texto plano.
-- **Red:** Se conecta a Ollama local para las incrustaciones. La interfaz de usuario Gradio opcional se vincula a localhost. No hay telemetría externa.
-- **Sin telemetría:** No recopila nada externamente. Los análisis son solo locales.
+- **Datos accedidos:** Descripciones de herramientas indexadas en una base de datos vectorial HNSW local, consultas de búsqueda registradas en una base de datos SQLite local (`compass_analytics.db`), incrustaciones generadas mediante Ollama local.
+- **Datos NO accedidos:** ningún código de usuario, ningún contenido de archivo, ninguna credencial. Los argumentos de la llamada a la herramienta se codifican hash, no se almacenan en texto plano.
+- **Red:** se conecta a Ollama local para las incrustaciones. La interfaz de usuario Gradio opcional se vincula a localhost. No hay telemetría externa.
+- **Sin telemetría:** no recopila nada externamente. Los análisis son solo locales.
 
-## Cuadro de evaluación
+## Cuadro de puntuación
+
+Las puntuaciones por categoría se regeneran después del proceso de evaluación a través de
+`bash scripts/regenerate-scorecard.sh` (que envuelve `npx
+@mcptoolshop/shipcheck audit`). Consulte [SCORECARD.md](SCORECARD.md) para obtener el desglose autorizado actual; la tabla a continuación lo refleja y está intencionalmente no escrita a mano. Las secciones curadas manualmente (Brechas conocidas, Historial de corrección) se encuentran fuera de los marcadores `<!-- SHIPCHECK-AUTO-START/END -->` en SCORECARD.md y sobreviven a las regeneraciones.
 
 | Categoría | Puntuación | Notas |
 |----------|-------|-------|
-| A. Seguridad | 10/10 | SECURITY.md, solo local, sin telemetría, SQL parametrizado |
-| B. Manejo de errores | 10/10 | Resultados estructurados, alternativa de Ollama. |
-| C. Documentación para operadores | 10/10 | README, CHANGELOG, CONTRIBUTING, documentación de la API |
-| D. Higiene de la entrega | 10/10 | CI (lint + pruebas + cobertura + pip-audit + Docker), script de verificación |
-| E. Identidad | 10/10 | Logotipo, traducciones, página de inicio |
-| **Total** | **50/50** | |
+| A. Seguridad | Por determinar | Acciones con pines SHA; imagen base con pines de resumen; procedencia SLSA + SBOM en PyPI + GHCR; análisis de secretos pre-commit |
+| B. Manejo de errores | Por determinar | Resultados estructurados, degradación gradual, códigos de salida |
+| C. Documentación para el operador | Por determinar | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Higiene de la implementación | Por determinar | CI consolidado; tiempo de espera máximo + días de retención en cada trabajo; configuración de pytest en pyproject.toml |
+| E. Identidad (suave) | Por determinar | Logotipo, página de inicio, metadatos de GitHub; mantenedores explícitos en pyproject.toml |
+| **Total** | **TBD** | Regenerar con `make scorecard` |
 
 ## Licencia
 

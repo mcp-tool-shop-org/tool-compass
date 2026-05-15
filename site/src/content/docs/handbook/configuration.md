@@ -16,7 +16,7 @@ sidebar:
 | `COMFYUI_URL` | ComfyUI server URL (used by the comfy backend) | `http://localhost:8188` |
 | `PORT` | Set to enable HTTP (streamable-http) transport instead of stdio | unset (stdio mode) |
 | `HOST` | HTTP bind address (only used when `PORT` is set) | `127.0.0.1` (loopback) |
-| `GRADIO_AUTH` | `user:pass` required when launching `tool-compass-ui --share` | unset (refuses `--share` without it) |
+| `GRADIO_AUTH` | `user:pass` required when launching `tool-compass ui --share` (also settable via `--auth user:pass`) | unset (refuses `--share` without it) |
 | `HYPOTHESIS_PROFILE` | `dev` / `ci` / `nightly` profile for fuzz tests | `dev` |
 
 :::caution
@@ -116,10 +116,10 @@ ollama pull nomic-embed-text
 
 ### Index not found
 
-Rebuild the index:
+Rebuild the index using the v2.2 canonical CLI:
 
 ```bash
-python gateway.py --sync
+tool-compass sync
 ```
 
 ### Backend not connecting

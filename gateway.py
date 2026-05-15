@@ -37,6 +37,7 @@ import json
 import sqlite3
 import time
 import uuid
+from collections import defaultdict
 from typing import Optional, List, Dict, Any
 
 from _version import __version__
@@ -45,7 +46,12 @@ from _version import __version__
 try:
     from mcp.server.fastmcp import FastMCP
 except ImportError:
-    print("FastMCP not installed. Install with: pip install mcp")
+    import sys as _sys
+
+    # BE-A-016: diagnostics belong on stderr, not stdout — MCP stdio mode
+    # treats stdout as JSON-RPC framing, so a print() here corrupts the
+    # protocol envelope.
+    print("FastMCP not installed. Install with: pip install mcp", file=_sys.stderr)
     raise
 
 from indexer import CompassIndex, SearchResult
@@ -95,17 +101,219 @@ _health_state: Dict[str, Any] = {
 }
 
 
+# BE-B-011: registered by _run_http() so health-state changes invalidate
+# the /ready cache immediately. Module-level so tests don't import HTTP code.
+_ready_cache_invalidators: List[Any] = []
+
+
+def _invalidate_ready_cache() -> None:
+    """Call every registered ready-cache invalidator (BE-B-011)."""
+    for fn in _ready_cache_invalidators:
+        try:
+            fn()
+        except Exception as e:
+            logger.debug(f"ready cache invalidator failed: {e}")
+
+
 def _mark_ollama_down(err: BaseException) -> None:
     """Record an Ollama failure so status + hints can surface it."""
     _health_state["ollama_available"] = False
     _health_state["last_ollama_check"] = time.time()
     _health_state["last_ollama_error"] = f"{type(err).__name__}: {err}"
+    _invalidate_ready_cache()
 
 
 def _mark_ollama_up() -> None:
     _health_state["ollama_available"] = True
     _health_state["last_ollama_check"] = time.time()
     _health_state["last_ollama_error"] = None
+    _invalidate_ready_cache()
+
+
+# ---------------------------------------------------------------------------
+# BE-B-001: structured error envelope.
+#
+# All @mcp.tool() entry points that previously returned a bare
+# `{error: "..."}` string now route through _error_envelope(). The shape mirrors
+# RFC 9457 (Problem Details), MCP `isError`, and Stripe's 3-level taxonomy:
+#
+#   {type, title, code, category, detail, retryable, instance: trace_id,
+#    retry_after_seconds?, suggestions?, nearest_tools?}
+#
+# LLM consumers can switch strategies on `code` (e.g. "tool_not_found" ->
+# present nearest_tools), `category` ("validation" vs "service_unavailable"),
+# and `retryable` (bool — don't re-issue the same call on validation errors).
+# ---------------------------------------------------------------------------
+
+# Closed enum of error categories. Keep this list small — LLM consumers
+# pattern-match on it.
+_ERROR_CATEGORIES = {
+    "validation",
+    "not_found",
+    "backend_error",
+    "service_unavailable",
+    "configuration",
+}
+
+# Closed enum of error codes (extend deliberately, not opportunistically).
+_ERROR_CODES = {
+    "tool_not_found",
+    "backend_unreachable",
+    "backend_timeout",
+    "backend_connect_failed",
+    "ollama_unavailable",
+    "index_unhealthy",
+    "invalid_argument",
+    "invalid_action",
+    "sync_disabled",
+    "analytics_disabled",
+    "chain_indexing_disabled",
+    "analytics_unavailable",
+    "chain_indexer_unavailable",
+    "sync_manager_unavailable",
+    "execute_unhandled_exception",
+}
+
+
+def _error_envelope(
+    code: str,
+    title: str,
+    detail: str,
+    *,
+    category: str = "backend_error",
+    retryable: bool = False,
+    trace_id: Optional[str] = None,
+    retry_after_seconds: Optional[float] = None,
+    nearest_tools: Optional[List[Dict[str, Any]]] = None,
+    suggestions: Optional[List[str]] = None,
+    **extras: Any,
+) -> Dict[str, Any]:
+    """Build a structured error envelope (BE-B-001).
+
+    Args:
+        code: Short machine-readable code from _ERROR_CODES. Unknown codes log
+            a warning but pass through — never raise from an error helper.
+        title: One-line human-readable summary (Nielsen #9: name the failure
+            mode discretely).
+        detail: Longer human-readable explanation. Safe to interpolate
+            user-supplied values; never include secrets.
+        category: One of _ERROR_CATEGORIES.
+        retryable: True iff the caller may retry the same call and reasonably
+            expect a different outcome (e.g. transient network error). False
+            for validation / not-found.
+        trace_id: Correlation id (used as the `instance` field per RFC 9457).
+        retry_after_seconds: Hint for transient failures.
+        nearest_tools: For tool_not_found, an array of {tool, score, server,
+            category} entries the user might have meant. Critical LLM-recovery
+            signal — let the agent retry against the suggested name without
+            hallucinating.
+        suggestions: Generic free-form next-action hints (legacy "hint" field
+            ports cleanly into this).
+
+    Returns:
+        Dict with stable keys. Always carries `error: True` for fast detection
+        AND `error: <legacy string>` shape compatibility via the "error" key
+        being a dict with `code`, etc. Existing callers checking
+        ``if "error" in resp`` keep working; new callers can branch on
+        ``resp["error"]["code"]``.
+    """
+    if code not in _ERROR_CODES:
+        logger.warning(f"_error_envelope: unknown code {code!r}")
+    if category not in _ERROR_CATEGORIES:
+        logger.warning(f"_error_envelope: unknown category {category!r}")
+
+    payload: Dict[str, Any] = {
+        "type": f"compass.error.{code}",
+        "title": title,
+        "code": code,
+        "category": category,
+        "detail": detail,
+        "retryable": bool(retryable),
+    }
+    if trace_id is not None:
+        payload["instance"] = trace_id
+    if retry_after_seconds is not None:
+        payload["retry_after_seconds"] = float(retry_after_seconds)
+    if nearest_tools:
+        payload["nearest_tools"] = nearest_tools
+    if suggestions:
+        payload["suggestions"] = suggestions
+    for k, v in extras.items():
+        payload[k] = v
+
+    return {
+        # Legacy callers (and tests) check `"error" in resp` — keep that True
+        # by surfacing the string form here in addition to the structured
+        # envelope. The structured form is canonical for LLM consumers.
+        "error": detail,
+        "error_envelope": payload,
+        "trace_id": trace_id,
+    }
+
+
+def _augment_with_health(response: Dict[str, Any]) -> Dict[str, Any]:
+    """Stamp `degraded` + `degraded_reasons` onto a response (BE-B-003).
+
+    Idempotent — re-applying never doubles up reasons. Safe to call on
+    error envelopes (they're dicts).
+
+    Hystrix / Nygard pattern: every response that was served from a fallback
+    path (or whose surrounding subsystem is in degraded state) MUST carry a
+    structured boolean, not just a human-readable warning. LLM agents skip
+    prose warnings but act on structured flags.
+    """
+    if not isinstance(response, dict):
+        return response
+
+    reasons: List[str] = []
+    if not _health_state.get("ollama_available", True):
+        reasons.append("ollama_unavailable")
+    if not _health_state.get("index_available", True):
+        reasons.append("index_unhealthy")
+
+    # If the response itself already declared degraded=True, preserve that.
+    already_degraded = bool(response.get("degraded"))
+    is_degraded = already_degraded or bool(reasons)
+    response["degraded"] = is_degraded
+    if reasons:
+        existing = response.get("degraded_reasons") or []
+        merged: List[str] = []
+        for r in list(existing) + reasons:
+            if r not in merged:
+                merged.append(r)
+        response["degraded_reasons"] = merged
+    elif "degraded_reasons" not in response and is_degraded:
+        response["degraded_reasons"] = []
+    return response
+
+
+# Process-wide counters for /metrics (BE-B-002).
+# Kept here so all four signals live in one place. Locks unnecessary in MCP
+# stdio mode (single async event loop); in HTTP mode the GIL + atomic int
+# increments are sufficient for the precision Prometheus expects.
+_metric_counters: Dict[str, Any] = {
+    "lexical_fallback_total": 0,
+    "degraded_responses_total": defaultdict(int),  # keyed by reason
+    "circuit_breaker_transitions_total": defaultdict(int),  # keyed by from->to
+    "fallback_invocations_total": defaultdict(int),  # keyed by type
+}
+
+
+def _record_lexical_fallback() -> None:
+    _metric_counters["lexical_fallback_total"] = (
+        _metric_counters["lexical_fallback_total"] + 1
+    )
+    _metric_counters["fallback_invocations_total"]["lexical"] += 1
+
+
+def _record_degraded_response(reason: str) -> None:
+    _metric_counters["degraded_responses_total"][reason] += 1
+
+
+def _record_breaker_transition(from_state: str, to_state: str) -> None:
+    key = f"{from_state}->{to_state}"
+    _metric_counters["circuit_breaker_transitions_total"][key] += 1
+
 
 # Async locks to prevent race conditions during singleton initialization
 _index_lock = asyncio.Lock()
@@ -148,7 +356,26 @@ async def get_index() -> CompassIndex:
         if _compass_index is not None:
             return _compass_index
 
-        index = CompassIndex()
+        # BE-B-014 + BE-B-008: pass tunables from CompassConfig so operators
+        # can re-shape the index + breaker without code edits. BE-B-002:
+        # on_breaker_transition fires the breaker_transitions_total counter.
+        cfg = get_config()
+        from embedder import Embedder
+        embedder = Embedder(
+            base_url=cfg.ollama_url,
+            model=cfg.embedding_model,
+            breaker_failure_threshold=cfg.ollama_breaker_failure_threshold,
+            breaker_open_seconds=cfg.ollama_breaker_open_seconds,
+            retry_attempts=cfg.ollama_retry_attempts,
+            retry_backoffs=tuple(cfg.ollama_retry_backoffs),
+            on_breaker_transition=_record_breaker_transition,
+        )
+        index = CompassIndex(
+            embedder=embedder,
+            hnsw_m=cfg.hnsw_m,
+            hnsw_ef_construction=cfg.hnsw_ef_construction,
+            hnsw_ef_search=cfg.hnsw_ef_search,
+        )
 
         # Try to load existing index
         if index.load_index():
@@ -337,6 +564,36 @@ async def maybe_startup_sync():
 # =============================================================================
 
 
+# BE-B-007: cap user-supplied query length at the boundary so semantic and
+# lexical paths don't waste cycles on accidental 10MB pastes. 512 chars is
+# generous for natural-language intent.
+_MAX_QUERY_LEN = 512
+
+
+def _clamp_query(query: Optional[str]) -> str:
+    """Strip + length-clamp a user-supplied query (BE-B-007)."""
+    if not query:
+        return ""
+    q = query.strip()
+    if len(q) > _MAX_QUERY_LEN:
+        logger.warning(
+            f"query length {len(q)} exceeds {_MAX_QUERY_LEN}; truncating"
+        )
+        q = q[:_MAX_QUERY_LEN]
+    return q
+
+
+def _escape_like(s: str) -> str:
+    """Escape SQL LIKE wildcards in user input (BE-A-007).
+
+    SQLite LIKE treats % and _ as wildcards. The query is bound via a
+    parameter so there's no SQL injection risk, but a user query containing
+    'foo%bar' would otherwise match 'foobar', 'fooXbar', etc. We escape
+    with a backslash and pair the LIKE clause with ``ESCAPE '\\'``.
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _lexical_search_fallback(
     index: CompassIndex,
     query: str,
@@ -351,13 +608,22 @@ def _lexical_search_fallback(
     Confidence is a coarse heuristic: 0.6 for name match, 0.4 for description
     match — enough to produce a sensible ordering without pretending it's a
     real similarity score.
+
+    BE-B-007: empty queries return [] immediately rather than '%%' matching
+    the whole catalog. BE-A-007: % and _ in user input are escaped so they
+    don't act as wildcards.
     """
     if not index or not getattr(index, "db", None):
         return []
 
-    needle = f"%{query.strip()}%"
+    q = _clamp_query(query)
+    if not q:
+        return []
+
+    needle = f"%{_escape_like(q)}%"
     where = [
-        "(lower(name) LIKE lower(?) OR lower(description) LIKE lower(?))"
+        "(lower(name) LIKE lower(?) ESCAPE '\\' "
+        "OR lower(description) LIKE lower(?) ESCAPE '\\')"
     ]
     params: List[Any] = [needle, needle]
     if category:
@@ -374,7 +640,7 @@ def _lexical_search_fallback(
     params.append(max(1, top_k * 3))
 
     rows = index.db.execute(sql, params).fetchall()
-    q_lower = query.strip().lower()
+    q_lower = q.lower()
 
     scored: List[Dict[str, Any]] = []
     for row in rows:
@@ -446,6 +712,10 @@ async def compass(
     top_k = max(1, min(10, top_k))
     min_confidence = max(0.0, min(1.0, min_confidence))
 
+    # BE-B-007: clamp the user-supplied intent at the boundary so a 10MB
+    # paste doesn't become a 10MB Ollama call or a 10MB LIKE parameter.
+    intent = _clamp_query(intent)
+
     warnings: List[str] = []
     degraded = False
 
@@ -473,6 +743,9 @@ async def compass(
     except Exception as e:
         _mark_ollama_down(e)
         degraded = True
+        # BE-B-002: count the fallback invocation so /metrics can alert on
+        # "served 100 lexical responses in 60s" before users notice.
+        _record_lexical_fallback()
         logger.warning(
             f"[compass] [{trace_id}] semantic search failed ({type(e).__name__}: {e}); "
             "falling back to lexical search"
@@ -485,6 +758,14 @@ async def compass(
         fallback_matches = _lexical_search_fallback(
             index, intent, top_k, category, server
         )
+        # BE-A-004: honour the user-supplied min_confidence on the fallback
+        # path. Lexical matches assign coarse heuristic confidences
+        # (0.6/0.4/0.3); without this filter, a caller passing
+        # min_confidence=0.9 would still receive 0.3-tier results when
+        # Ollama is down, violating the documented contract.
+        fallback_matches = [
+            m for m in fallback_matches if m["confidence"] >= min_confidence
+        ]
 
     # Search chains if enabled — chain search also relies on embeddings,
     # so a semantic outage will usually take this path down too. Don't let
@@ -589,6 +870,12 @@ async def compass(
     if warnings:
         response["warnings"] = warnings
 
+    # BE-B-003: standardize degraded + degraded_reasons on every response.
+    response = _augment_with_health(response)
+    # BE-B-002: record degraded-response counter for /metrics.
+    if response.get("degraded"):
+        for reason in response.get("degraded_reasons", []) or ["unknown"]:
+            _record_degraded_response(reason)
     return response
 
 
@@ -635,7 +922,7 @@ async def describe(tool_name: str) -> Dict[str, Any]:
             params = json.loads(row["parameters"]) if row["parameters"] else {}
             examples = json.loads(row["examples"]) if row["examples"] else []
 
-            return {
+            response = {
                 "trace_id": trace_id,
                 "tool": row["name"],
                 "description": row["description"],
@@ -645,12 +932,13 @@ async def describe(tool_name: str) -> Dict[str, Any]:
                 "examples": examples,
                 "hint": f"Use execute('{tool_name}', {{...}}) to run this tool.",
             }
+            return _augment_with_health(response)
 
     # Try backends if connected
     manager = await get_backends()
     schema = manager.get_tool_schema(tool_name)
     if schema:
-        response: Dict[str, Any] = {
+        response = {
             "trace_id": trace_id,
             **schema,
             "hint": f"Use execute('{tool_name}', {{...}}) to run this tool.",
@@ -660,19 +948,47 @@ async def describe(tool_name: str) -> Dict[str, Any]:
                 "Index database unhealthy — served schema from backend directly. "
                 "Try compass_sync(force=True) to rebuild the index."
             ]
-        return response
+        return _augment_with_health(response)
 
-    response = {
-        "trace_id": trace_id,
-        "error": f"Tool not found: {tool_name}",
-        "hint": "Use compass() to search for available tools.",
-    }
+    # BE-B-001: emit a structured error envelope with nearest_tools so the
+    # caller (especially an LLM agent) can recover from a typo without a
+    # second round-trip. nearest_tools[] is the single most actionable
+    # signal — "tool_not_found: 'brige:redafile'" gets the agent nowhere,
+    # but "nearest_tools=[{'tool': 'bridge:read_file', score: 0.6}]" lets
+    # it switch strategies deterministically.
+    nearest = _lexical_search_fallback(index, tool_name, top_k=3, category=None, server=None)
+    nearest_envelope: Optional[List[Dict[str, Any]]] = None
+    if nearest:
+        nearest_envelope = [
+            {
+                "tool": m["tool"],
+                "score": m["confidence"],
+                "server": m.get("server"),
+                "category": m.get("category"),
+            }
+            for m in nearest
+        ]
+
+    response = _error_envelope(
+        code="tool_not_found",
+        title="Tool not found",
+        detail=f"Tool not found: {tool_name}",
+        category="not_found",
+        retryable=False,
+        trace_id=trace_id,
+        nearest_tools=nearest_envelope,
+        suggestions=[
+            "Use compass() to search for available tools.",
+            "If you have a typo, try the nearest_tools[] suggestions.",
+        ],
+    )
     if not _health_state.get("index_available", True):
         response["warnings"] = [
             "Index database unhealthy — lookup may be incomplete. "
             "Try compass_sync(force=True) to rebuild the index."
         ]
-    return response
+    response["hint"] = "Use compass() to search for available tools."
+    return _augment_with_health(response)
 
 
 @mcp.tool()
@@ -727,15 +1043,61 @@ async def execute(
                 logger.warning(
                     f"[execute] [{trace_id}] backend connect failed: {server_name}"
                 )
-                return {
-                    "trace_id": trace_id,
-                    "success": False,
-                    "error": f"Failed to connect to backend: {server_name}",
-                    "hint": "Check that the backend server is configured correctly.",
-                }
+                envelope = _error_envelope(
+                    code="backend_connect_failed",
+                    title="Backend connect failed",
+                    detail=f"Failed to connect to backend: {server_name}",
+                    category="service_unavailable",
+                    retryable=True,
+                    retry_after_seconds=5.0,
+                    trace_id=trace_id,
+                    suggestions=[
+                        "Check that the backend server is configured correctly.",
+                        "Inspect compass_status() for backend health.",
+                    ],
+                )
+                envelope["success"] = False
+                envelope["hint"] = (
+                    "Check that the backend server is configured correctly."
+                )
+                return _augment_with_health(envelope)
 
-    # Execute
-    result = await manager.execute_tool(tool_name, arguments)
+    # BE-B-004: wrap manager.execute_tool() so an unhandled raise from the
+    # backend client doesn't propagate a Python traceback through the MCP
+    # JSON-RPC envelope. The MCP spec requires tool handlers to return a
+    # structured payload, never raise unhandled.
+    try:
+        result = await manager.execute_tool(tool_name, arguments)
+    except Exception as e:
+        latency_ms = (time.time() - start_time) * 1000
+        error_text = f"{type(e).__name__}: {e}"
+        logger.error(
+            f"[execute] [{trace_id}] tool={tool_name!r} unhandled exception: {error_text}"
+        )
+        if analytics:
+            try:
+                await analytics.record_tool_call(
+                    tool_name,
+                    success=False,
+                    latency_ms=latency_ms,
+                    error_message=error_text,
+                )
+            except Exception as rec_err:
+                logger.debug(f"analytics record failed: {rec_err}")
+        envelope = _error_envelope(
+            code="execute_unhandled_exception",
+            title="Tool execution failed (unhandled)",
+            detail=error_text,
+            category="backend_error",
+            retryable=False,
+            trace_id=trace_id,
+            suggestions=[
+                "Inspect server logs (search for the trace_id).",
+                "Verify the backend is healthy via compass_status().",
+            ],
+        )
+        envelope["success"] = False
+        return _augment_with_health(envelope)
 
     # Record analytics
     latency_ms = (time.time() - start_time) * 1000
@@ -775,6 +1137,7 @@ async def execute(
             logger.info(
                 f"[execute] [{trace_id}] tool={tool_name!r} ok in {latency_ms:.1f}ms"
             )
+        return _augment_with_health(result)
     return result
 
 
@@ -788,12 +1151,13 @@ async def compass_categories() -> Dict[str, Any]:
     index = await get_index()
     stats = index.get_stats()
 
-    return {
+    response = {
         "categories": stats.get("by_category", {}),
         "servers": stats.get("by_server", {}),
         "total_tools": stats.get("total_tools", 0),
         "hint": "Use compass(intent, category='file') to filter searches.",
     }
+    return _augment_with_health(response)
 
 
 @mcp.tool()
@@ -805,71 +1169,92 @@ async def compass_status() -> Dict[str, Any]:
     hot cache status, and sync status.
     """
     config = get_config()
-    index = await get_index()
-    manager = await get_backends()
-
-    index_stats = index.get_stats()
-    backend_stats = manager.get_stats()
-
     trace_id = uuid.uuid4().hex[:8]
     logger.info(f"[compass_status] [{trace_id}]")
 
-    response = {
-        "trace_id": trace_id,
-        "index": {
+    # BE-B-004: each subsystem block is wrapped independently so a single
+    # failure degrades that section rather than aborting the whole status.
+    response: Dict[str, Any] = {"trace_id": trace_id}
+
+    index_stats: Dict[str, Any] = {}
+    try:
+        index = await get_index()
+        index_stats = index.get_stats()
+        response["index"] = {
             "total_tools": index_stats.get("total_tools", 0),
             "by_category": index_stats.get("by_category", {}),
             "by_server": index_stats.get("by_server", {}),
-        },
-        "backends": backend_stats,
-        "config": {
-            "progressive_disclosure": config.progressive_disclosure,
-            "auto_sync": config.auto_sync,
-            "embedding_model": config.embedding_model,
-            "analytics_enabled": config.analytics_enabled,
-            "chain_indexing_enabled": config.chain_indexing_enabled,
-        },
-        # GW-B-001 / GW-B-009: expose degraded-mode flags so users / operators
-        # can tell at a glance when compass() is serving lexical fallbacks or
-        # when the index DB has gone sour.
-        "health": {
-            "ollama_available": _health_state["ollama_available"],
-            "last_ollama_error": _health_state["last_ollama_error"],
-            "index_available": _health_state["index_available"],
-            "last_index_error": _health_state["last_index_error"],
-            "degraded_mode": (
-                not _health_state["ollama_available"]
-                or not _health_state["index_available"]
-            ),
-        },
+        }
+    except Exception as e:
+        logger.error(f"[compass_status] [{trace_id}] index stats failed: {e}")
+        response["index"] = {"error": f"{type(e).__name__}: {e}", "trace_id": trace_id}
+
+    try:
+        manager = await get_backends()
+        response["backends"] = manager.get_stats()
+    except Exception as e:
+        logger.error(f"[compass_status] [{trace_id}] backend stats failed: {e}")
+        response["backends"] = {"error": f"{type(e).__name__}: {e}", "trace_id": trace_id}
+
+    response["config"] = {
+        "progressive_disclosure": config.progressive_disclosure,
+        "auto_sync": config.auto_sync,
+        "embedding_model": config.embedding_model,
+        "analytics_enabled": config.analytics_enabled,
+        "chain_indexing_enabled": config.chain_indexing_enabled,
+    }
+    # GW-B-001 / GW-B-009: expose degraded-mode flags so users / operators
+    # can tell at a glance when compass() is serving lexical fallbacks or
+    # when the index DB has gone sour.
+    response["health"] = {
+        "ollama_available": _health_state["ollama_available"],
+        "last_ollama_error": _health_state["last_ollama_error"],
+        "index_available": _health_state["index_available"],
+        "last_index_error": _health_state["last_index_error"],
+        "degraded_mode": (
+            not _health_state["ollama_available"]
+            or not _health_state["index_available"]
+        ),
     }
 
     # Add analytics info if enabled
     if config.analytics_enabled:
-        analytics = await get_analytics_instance()
-        if analytics:
-            response["hot_cache"] = {
-                "size": len(analytics._hot_cache),
-                "tools": list(analytics._hot_cache.keys()),
-            }
+        try:
+            analytics = await get_analytics_instance()
+            if analytics:
+                response["hot_cache"] = {
+                    "size": len(analytics._hot_cache),
+                    "tools": list(analytics._hot_cache.keys()),
+                }
+        except Exception as e:
+            logger.error(f"[compass_status] [{trace_id}] analytics failed: {e}")
+            response["hot_cache"] = {"error": f"{type(e).__name__}: {e}"}
 
     # Add sync status if enabled
     if config.auto_sync:
-        sync_manager = await get_sync_manager_instance()
-        if sync_manager:
-            response["sync"] = await sync_manager.get_sync_status()
+        try:
+            sync_manager = await get_sync_manager_instance()
+            if sync_manager:
+                response["sync"] = await sync_manager.get_sync_status()
+        except Exception as e:
+            logger.error(f"[compass_status] [{trace_id}] sync status failed: {e}")
+            response["sync"] = {"error": f"{type(e).__name__}: {e}"}
 
     # Add chain info if enabled
     if config.chain_indexing_enabled:
-        chain_indexer = await get_chain_indexer_instance()
-        if chain_indexer:
-            chains = await chain_indexer.load_chains_from_db()
-            response["chains"] = {
-                "total": len(chains),
-                "cached": len(chain_indexer._chain_cache),
-            }
+        try:
+            chain_indexer = await get_chain_indexer_instance()
+            if chain_indexer:
+                chains = await chain_indexer.load_chains_from_db()
+                response["chains"] = {
+                    "total": len(chains),
+                    "cached": len(chain_indexer._chain_cache),
+                }
+        except Exception as e:
+            logger.error(f"[compass_status] [{trace_id}] chain info failed: {e}")
+            response["chains"] = {"error": f"{type(e).__name__}: {e}"}
 
-    return response
+    return _augment_with_health(response)
 
 
 @mcp.tool()
@@ -890,23 +1275,47 @@ async def compass_analytics(
         Comprehensive analytics including top tools, failure rates, chains, etc.
     """
     config = get_config()
+    trace_id = uuid.uuid4().hex[:8]
 
     if not config.analytics_enabled:
-        return {
-            "error": "Analytics is disabled",
-            "hint": "Enable analytics_enabled in config to track usage",
-        }
+        return _augment_with_health(_error_envelope(
+            code="analytics_disabled",
+            title="Analytics is disabled",
+            detail="Analytics is disabled.",
+            category="configuration",
+            retryable=False,
+            trace_id=trace_id,
+            suggestions=["Enable analytics_enabled in config to track usage."],
+        ))
 
     analytics = await get_analytics_instance()
     if not analytics:
-        return {"error": "Analytics not initialized"}
+        return _augment_with_health(_error_envelope(
+            code="analytics_unavailable",
+            title="Analytics not initialized",
+            detail="Analytics not initialized.",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
 
-    summary = await analytics.get_analytics_summary(timeframe)
+    try:
+        summary = await analytics.get_analytics_summary(timeframe)
+    except Exception as e:
+        logger.error(f"[compass_analytics] [{trace_id}] failed: {e}")
+        return _augment_with_health(_error_envelope(
+            code="analytics_unavailable",
+            title="Analytics query failed",
+            detail=f"{type(e).__name__}: {e}",
+            category="backend_error",
+            retryable=True,
+            trace_id=trace_id,
+        ))
 
     if not include_failures:
         summary.pop("failures", None)
 
-    return summary
+    return _augment_with_health(summary)
 
 
 @mcp.tool()
@@ -932,20 +1341,33 @@ async def compass_chains(
         Chain information based on action
     """
     config = get_config()
+    trace_id = uuid.uuid4().hex[:8]
 
     if not config.chain_indexing_enabled:
-        return {
-            "error": "Chain indexing is disabled",
-            "hint": "Enable chain_indexing_enabled in config",
-        }
+        return _augment_with_health(_error_envelope(
+            code="chain_indexing_disabled",
+            title="Chain indexing is disabled",
+            detail="Chain indexing is disabled.",
+            category="configuration",
+            retryable=False,
+            trace_id=trace_id,
+            suggestions=["Enable chain_indexing_enabled in config."],
+        ))
 
     chain_indexer = await get_chain_indexer_instance()
     if not chain_indexer:
-        return {"error": "Chain indexer not initialized"}
+        return _augment_with_health(_error_envelope(
+            code="chain_indexer_unavailable",
+            title="Chain indexer not initialized",
+            detail="Chain indexer not initialized.",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
 
     if action == "list":
         chains = await chain_indexer.load_chains_from_db()
-        return {
+        return _augment_with_health({
             "chains": [
                 {
                     "name": c.name,
@@ -958,14 +1380,22 @@ async def compass_chains(
             ],
             "total": len(chains),
             "cached": len(chain_indexer._chain_cache),
-        }
+        })
 
     elif action == "create":
         if not chain_name or not tools:
-            return {
-                "error": "chain_name and tools are required for create",
-                "hint": "compass_chains(action='create', chain_name='my_workflow', tools=['tool1', 'tool2'])",
-            }
+            return _augment_with_health(_error_envelope(
+                code="invalid_argument",
+                title="Missing required arguments",
+                detail="chain_name and tools are required for create.",
+                category="validation",
+                retryable=False,
+                trace_id=trace_id,
+                suggestions=[
+                    "compass_chains(action='create', chain_name='my_workflow', "
+                    "tools=['tool1', 'tool2'])",
+                ],
+            ))
 
         chain = await chain_indexer.add_chain(
             name=chain_name,
@@ -974,31 +1404,43 @@ async def compass_chains(
             is_auto_detected=False,
         )
 
-        return {
+        return _augment_with_health({
             "created": {
                 "name": chain.name,
                 "tools": chain.tools,
                 "description": chain.description,
             },
             "hint": f"Chain '{chain_name}' created. It will now appear in compass() search results.",
-        }
+        })
 
     elif action == "detect":
         analytics = await get_analytics_instance()
         if analytics:
             detected = await analytics.detect_chains()
-            return {
+            return _augment_with_health({
                 "detected": detected,
                 "count": len(detected),
                 "hint": "Detected chains are now indexed and searchable",
-            }
-        return {"error": "Analytics required for chain detection"}
+            })
+        return _augment_with_health(_error_envelope(
+            code="analytics_unavailable",
+            title="Analytics required for chain detection",
+            detail="Analytics required for chain detection.",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
 
     else:
-        return {
-            "error": f"Unknown action: {action}",
-            "valid_actions": ["list", "create", "detect"],
-        }
+        return _augment_with_health(_error_envelope(
+            code="invalid_action",
+            title="Unknown action",
+            detail=f"Unknown action: {action}",
+            category="validation",
+            retryable=False,
+            trace_id=trace_id,
+            valid_actions=["list", "create", "detect"],
+        ))
 
 
 @mcp.tool()
@@ -1016,27 +1458,40 @@ async def compass_sync(force: bool = False) -> Dict[str, Any]:
         Sync status for each backend
     """
     config = get_config()
+    trace_id = uuid.uuid4().hex[:8]
 
     if not config.auto_sync:
-        return {
-            "error": "Auto-sync is disabled",
-            "hint": "Enable auto_sync in config for automatic synchronization",
-        }
+        return _augment_with_health(_error_envelope(
+            code="sync_disabled",
+            title="Auto-sync is disabled",
+            detail="Auto-sync is disabled.",
+            category="configuration",
+            retryable=False,
+            trace_id=trace_id,
+            suggestions=["Enable auto_sync in config for automatic synchronization."],
+        ))
 
     sync_manager = await get_sync_manager_instance()
     if not sync_manager:
-        return {"error": "Sync manager not initialized"}
+        return _augment_with_health(_error_envelope(
+            code="sync_manager_unavailable",
+            title="Sync manager not initialized",
+            detail="Sync manager not initialized.",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
 
     if force:
         result = await sync_manager.full_sync()
-        return {"action": "full_sync", "result": result}
+        return _augment_with_health({"action": "full_sync", "result": result})
     else:
         results = await sync_manager.sync_if_needed()
-        return {
+        return _augment_with_health({
             "action": "sync_if_needed",
             "backends": results,
             "hint": "Use force=True to rebuild the entire index",
-        }
+        })
 
 
 @mcp.tool()
@@ -1062,109 +1517,142 @@ async def compass_audit(
         Complete system audit with all subsystems
     """
     config = get_config()
-    index = await get_index()
-    manager = await get_backends()
+    trace_id = uuid.uuid4().hex[:8]
 
-    index_stats = index.get_stats()
-    backend_stats = manager.get_stats()
+    # BE-B-004: wrap each subsystem block independently so one failure
+    # degrades that section to {error, trace_id} rather than aborting the
+    # whole audit.
+    audit: Dict[str, Any] = {"trace_id": trace_id}
+    index: Optional[CompassIndex] = None
+    index_stats: Dict[str, Any] = {}
 
-    audit = {
-        "system": {
+    try:
+        index = await get_index()
+        index_stats = index.get_stats()
+        audit["system"] = {
             "version": __version__,
             "total_tools": index_stats.get("total_tools", 0),
             "index_path": str(index.index_path),
             "db_path": str(index.db_path),
-        },
-        "categories": index_stats.get("by_category", {}),
-        "servers": index_stats.get("by_server", {}),
-        "backends": backend_stats,
-        "config": {
-            "progressive_disclosure": config.progressive_disclosure,
-            "auto_sync": config.auto_sync,
-            "analytics_enabled": config.analytics_enabled,
-            "chain_indexing_enabled": config.chain_indexing_enabled,
-            "hot_cache_size": config.hot_cache_size,
-            "embedding_model": config.embedding_model,
-        },
+        }
+        audit["categories"] = index_stats.get("by_category", {})
+        audit["servers"] = index_stats.get("by_server", {})
+    except Exception as e:
+        logger.error(f"[compass_audit] [{trace_id}] index/system failed: {e}")
+        audit["system"] = {"error": f"{type(e).__name__}: {e}"}
+        audit["categories"] = {}
+        audit["servers"] = {}
+
+    try:
+        manager = await get_backends()
+        audit["backends"] = manager.get_stats()
+    except Exception as e:
+        logger.error(f"[compass_audit] [{trace_id}] backend stats failed: {e}")
+        audit["backends"] = {"error": f"{type(e).__name__}: {e}"}
+
+    audit["config"] = {
+        "progressive_disclosure": config.progressive_disclosure,
+        "auto_sync": config.auto_sync,
+        "analytics_enabled": config.analytics_enabled,
+        "chain_indexing_enabled": config.chain_indexing_enabled,
+        "hot_cache_size": config.hot_cache_size,
+        "embedding_model": config.embedding_model,
     }
 
     # Hot cache
     analytics = None
     if config.analytics_enabled:
-        analytics = await get_analytics_instance()
-        if analytics:
-            hot_tools = list(analytics._hot_cache.keys())
-            audit["hot_cache"] = {
-                "size": len(hot_tools),
-                "tools": hot_tools,
-                "status": "active" if hot_tools else "empty (populates with usage)",
-            }
+        try:
+            analytics = await get_analytics_instance()
+            if analytics:
+                hot_tools = list(analytics._hot_cache.keys())
+                audit["hot_cache"] = {
+                    "size": len(hot_tools),
+                    "tools": hot_tools,
+                    "status": "active" if hot_tools else "empty (populates with usage)",
+                }
 
-            # Analytics summary
-            summary = await analytics.get_analytics_summary(timeframe)
-            audit["analytics"] = {
-                "timeframe": timeframe,
-                "total_searches": summary["searches"]["total"],
-                "avg_search_latency_ms": summary["searches"]["avg_latency_ms"],
-                "total_tool_calls": summary["tool_calls"]["total"],
-                "success_rate": summary["tool_calls"]["success_rate"],
-                "top_tools": [
-                    t["tool"] for t in summary["tool_calls"]["top_tools"][:5]
-                ],
-                "top_queries": [
-                    q["query"] for q in summary["searches"]["top_queries"][:5]
-                ],
-            }
+                # Analytics summary
+                summary = await analytics.get_analytics_summary(timeframe)
+                audit["analytics"] = {
+                    "timeframe": timeframe,
+                    "total_searches": summary["searches"]["total"],
+                    "avg_search_latency_ms": summary["searches"]["avg_latency_ms"],
+                    "total_tool_calls": summary["tool_calls"]["total"],
+                    "success_rate": summary["tool_calls"]["success_rate"],
+                    "top_tools": [
+                        t["tool"] for t in summary["tool_calls"]["top_tools"][:5]
+                    ],
+                    "top_queries": [
+                        q["query"] for q in summary["searches"]["top_queries"][:5]
+                    ],
+                }
+        except Exception as e:
+            logger.error(f"[compass_audit] [{trace_id}] analytics failed: {e}")
+            audit["analytics"] = {"error": f"{type(e).__name__}: {e}"}
 
     # Chains
     if config.chain_indexing_enabled:
-        chain_indexer = await get_chain_indexer_instance()
-        if chain_indexer:
-            chains = await chain_indexer.load_chains_from_db()
-            audit["chains"] = {
-                "total": len(chains),
-                "cached": len(chain_indexer._chain_cache),
-                "workflows": [
-                    {
-                        "name": c.name,
-                        "tools": [t.split(":")[-1] for t in c.tools],
-                        "use_count": c.use_count,
-                        "auto_detected": c.is_auto_detected,
-                    }
-                    for c in chains
-                ],
-            }
+        try:
+            chain_indexer = await get_chain_indexer_instance()
+            if chain_indexer:
+                chains = await chain_indexer.load_chains_from_db()
+                audit["chains"] = {
+                    "total": len(chains),
+                    "cached": len(chain_indexer._chain_cache),
+                    "workflows": [
+                        {
+                            "name": c.name,
+                            "tools": [t.split(":")[-1] for t in c.tools],
+                            "use_count": c.use_count,
+                            "auto_detected": c.is_auto_detected,
+                        }
+                        for c in chains
+                    ],
+                }
+        except Exception as e:
+            logger.error(f"[compass_audit] [{trace_id}] chains failed: {e}")
+            audit["chains"] = {"error": f"{type(e).__name__}: {e}"}
 
     # Sync status
     if config.auto_sync:
-        sync_manager = await get_sync_manager_instance()
-        if sync_manager:
-            sync_status = await sync_manager.get_sync_status()
-            audit["sync"] = sync_status
+        try:
+            sync_manager = await get_sync_manager_instance()
+            if sync_manager:
+                sync_status = await sync_manager.get_sync_status()
+                audit["sync"] = sync_status
+        except Exception as e:
+            logger.error(f"[compass_audit] [{trace_id}] sync failed: {e}")
+            audit["sync"] = {"error": f"{type(e).__name__}: {e}"}
 
     # Optionally include all tools
     if include_tools:
-        if index.db:
-            cursor = index.db.execute(
-                "SELECT name, description, category, server FROM tools ORDER BY server, category, name"
-            )
-            audit["tools"] = [
-                {
-                    "name": row["name"],
-                    "description": row["description"][:80] + "..."
-                    if len(row["description"]) > 80
-                    else row["description"],
-                    "category": row["category"],
-                    "server": row["server"],
-                }
-                for row in cursor.fetchall()
-            ]
-        else:
+        try:
+            if index is not None and index.db:
+                cursor = index.db.execute(
+                    "SELECT name, description, category, server FROM tools ORDER BY server, category, name"
+                )
+                audit["tools"] = [
+                    {
+                        "name": row["name"],
+                        "description": row["description"][:80] + "..."
+                        if len(row["description"]) > 80
+                        else row["description"],
+                        "category": row["category"],
+                        "server": row["server"],
+                    }
+                    for row in cursor.fetchall()
+                ]
+            else:
+                audit["tools"] = []
+                audit["tools_note"] = "Index database not available; tool list empty."
+        except Exception as e:
+            logger.error(f"[compass_audit] [{trace_id}] tools list failed: {e}")
             audit["tools"] = []
-            audit["tools_note"] = "Index database not available; tool list empty."
+            audit["tools_note"] = f"{type(e).__name__}: {e}"
 
     # Health check
-    issues = []
+    issues: List[str] = []
     if index_stats.get("total_tools", 0) == 0:
         issues.append("No tools indexed - run compass_sync(force=True)")
     if config.analytics_enabled and analytics and not analytics._hot_cache:
@@ -1177,7 +1665,7 @@ async def compass_audit(
         "issues": issues if issues else ["All systems operational"],
     }
 
-    return audit
+    return _augment_with_health(audit)
 
 
 # =============================================================================
@@ -1440,10 +1928,23 @@ def _run_http(port: int) -> None:
     from starlette.routing import Route
     from starlette.responses import JSONResponse, PlainTextResponse
 
-    # GW-FT-003: cache /ready result for 30s so LB polling can't hammer
-    # Ollama or the backend pool. Keyed by time only — a single shared slot.
+    # GW-FT-003 + BE-B-011: cache /ready result so LB polling can't hammer
+    # Ollama or the backend pool, but with asymmetric TTLs — 'ready' caches
+    # generously, 'not_ready' caches briefly. Without asymmetry a transition
+    # ready -> not_ready can route up to 30s of traffic into a degraded
+    # instance after the failure.
     _ready_cache: Dict[str, Any] = {"at": 0.0, "status_code": 0, "body": None}
-    _READY_CACHE_TTL = 30.0
+    _READY_CACHE_TTL_OK = 30.0   # generous when everything is fine
+    _READY_CACHE_TTL_FAIL = 2.0  # tight when something is broken
+
+    def _invalidate_local_ready_cache() -> None:
+        _ready_cache["body"] = None
+        _ready_cache["at"] = 0.0
+        _ready_cache["status_code"] = 0
+
+    # BE-B-011: register a hook so _mark_ollama_down() can drop the cache
+    # immediately rather than waiting for the next 2s TTL window.
+    _ready_cache_invalidators.append(_invalidate_local_ready_cache)
 
     async def health(_request):
         return JSONResponse({
@@ -1453,10 +1954,23 @@ def _run_http(port: int) -> None:
         })
 
     async def ready(_request):
-        """Deep readiness probe — 200 iff all dependencies are usable."""
+        """Deep readiness probe — 200 iff all dependencies are usable.
+
+        BE-B-011: cache TTL is asymmetric. Failures cache for 2s only so a
+        k8s liveness probe sees a state change within seconds; successes
+        cache for 30s to keep dependency load low.
+        """
         now = time.time()
-        if _ready_cache["body"] is not None and (now - _ready_cache["at"]) < _READY_CACHE_TTL:
-            return JSONResponse(_ready_cache["body"], status_code=_ready_cache["status_code"])
+        if _ready_cache["body"] is not None:
+            ttl = (
+                _READY_CACHE_TTL_OK
+                if _ready_cache["status_code"] == 200
+                else _READY_CACHE_TTL_FAIL
+            )
+            if (now - _ready_cache["at"]) < ttl:
+                return JSONResponse(
+                    _ready_cache["body"], status_code=_ready_cache["status_code"]
+                )
 
         checks: Dict[str, Any] = {}
 
@@ -1478,7 +1992,7 @@ def _run_http(port: int) -> None:
         try:
             idx = _compass_index
             if idx is not None and getattr(idx, "embedder", None) is not None:
-                breaker_state = idx.embedder.circuit_breaker_state
+                breaker_state = idx.embedder.circuit_breaker_state()
                 if breaker_state == "closed":
                     ollama_ok = True
         except Exception:
@@ -1525,12 +2039,39 @@ def _run_http(port: int) -> None:
         _ready_cache["body"] = body
         return JSONResponse(body, status_code=status_code)
 
+    # BE-B-002 + BE-B-015: Prometheus / OpenMetrics text format.
+    #
+    # Metrics added in BE-B-002:
+    #   tool_compass_circuit_breaker_transitions_total{from,to,breaker}
+    #   tool_compass_fallback_invocations_total{type}
+    #   tool_compass_lexical_fallback_total
+    #   tool_compass_degraded_responses_total{reason}
+    #   tool_compass_hnsw_search_duration_seconds (gauge of p95)
+    #   tool_compass_embedder_inflight (gauge)
+    #   tool_compass_embedder_queue_wait_seconds (gauge of p95)
+    #
+    # Naming follows OpenMetrics rules (BE-B-015): _total suffix for
+    # counters, _seconds suffix for time gauges. Emission terminates with
+    # `# EOF\n` and the media type is application/openmetrics-text.
+
     async def metrics(_request):
-        """Prometheus text format — no prometheus_client dep."""
+        """Prometheus / OpenMetrics text format — no prometheus_client dep."""
 
         def _escape_label(v: str) -> str:
             # Prometheus label-value escaping: \, ", newline.
             return v.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+        def _int_fmt(v: Any) -> str:
+            try:
+                return str(int(v))
+            except (TypeError, ValueError):
+                return "0"
+
+        def _float_fmt(v: Any) -> str:
+            try:
+                return f"{float(v):.6g}"
+            except (TypeError, ValueError):
+                return "0"
 
         lines: List[str] = []
 
@@ -1554,19 +2095,19 @@ def _run_http(port: int) -> None:
 
         lines.append("# HELP tool_compass_search_total Total number of compass() searches (24h window).")
         lines.append("# TYPE tool_compass_search_total counter")
-        lines.append(f"tool_compass_search_total {search_total if search_total is not None else 0}")
+        lines.append(f"tool_compass_search_total {_int_fmt(search_total or 0)}")
 
         # Ollama availability gauge — 1 closed, 0 otherwise.
         ollama_val = 1 if _health_state.get("ollama_available") else 0
         try:
             idx = _compass_index
             if idx is not None and getattr(idx, "embedder", None) is not None:
-                ollama_val = 1 if idx.embedder.circuit_breaker_state == "closed" else 0
+                ollama_val = 1 if idx.embedder.circuit_breaker_state() == "closed" else 0
         except Exception:
             pass
         lines.append("# HELP tool_compass_ollama_available 1 if the Ollama circuit breaker is closed, else 0.")
         lines.append("# TYPE tool_compass_ollama_available gauge")
-        lines.append(f"tool_compass_ollama_available {ollama_val}")
+        lines.append(f"tool_compass_ollama_available {_int_fmt(ollama_val)}")
 
         # Per-backend gauges + call counters.
         lines.append("# HELP tool_compass_backend_up 1 if the named backend is connected, else 0.")
@@ -1583,41 +2124,160 @@ def _run_http(port: int) -> None:
                 for name in configured:
                     label = _escape_label(name)
                     up = 1 if name in connected else 0
-                    lines.append(f'tool_compass_backend_up{{name="{label}"}} {up}')
+                    lines.append(f'tool_compass_backend_up{{name="{label}"}} {_int_fmt(up)}')
                     entry = per_backend.get(name, {}) if isinstance(per_backend, dict) else {}
                     total = int(entry.get("total_calls", 0) or 0)
                     failed = int(entry.get("failed_calls", 0) or 0)
                     success = max(0, total - failed)
                     lines.append(
-                        f'tool_compass_backend_call_total{{name="{label}",status="success"}} {success}'
+                        f'tool_compass_backend_call_total{{name="{label}",status="success"}} {_int_fmt(success)}'
                     )
                     lines.append(
-                        f'tool_compass_backend_call_total{{name="{label}",status="error"}} {failed}'
+                        f'tool_compass_backend_call_total{{name="{label}",status="error"}} {_int_fmt(failed)}'
                     )
         except Exception as e:
             logger.debug(f"metrics: backend stats failed: {e}")
 
-        # Embedder p95 + failures.
-        embed_p95 = 0.0
-        embed_failures = 0
+        # Embedder p95 + failures + new saturation gauges (BE-B-005 + BE-B-013).
+        es: Dict[str, Any] = {}
         try:
             idx = _compass_index
             if idx is not None and getattr(idx, "embedder", None) is not None:
-                es = idx.embedder.get_stats()
-                embed_p95 = float(es.get("p95_latency_ms", 0.0) or 0.0)
-                embed_failures = int(es.get("total_failures", 0) or 0)
+                es = idx.embedder.get_stats() or {}
         except Exception as e:
             logger.debug(f"metrics: embedder stats failed: {e}")
 
+        embed_p95 = es.get("p95_latency_ms", 0.0)
+        embed_failures = es.get("total_failures", 0)
+        embed_inflight = es.get("inflight", 0)
+        embed_consec = es.get("consecutive_failures", 0)
+        embed_last_success_ms = es.get("time_since_last_success_ms")
+        embed_qw_p95_ms = es.get("queue_wait_ms_p95", 0.0)
+
         lines.append("# HELP tool_compass_embed_latency_p95_ms p95 embed latency in ms from the bounded sample window.")
         lines.append("# TYPE tool_compass_embed_latency_p95_ms gauge")
-        lines.append(f"tool_compass_embed_latency_p95_ms {embed_p95}")
+        lines.append(f"tool_compass_embed_latency_p95_ms {_float_fmt(embed_p95)}")
 
         lines.append("# HELP tool_compass_embed_failures_total Total embed failures across the process lifetime.")
         lines.append("# TYPE tool_compass_embed_failures_total counter")
-        lines.append(f"tool_compass_embed_failures_total {embed_failures}")
+        lines.append(f"tool_compass_embed_failures_total {_int_fmt(embed_failures)}")
 
-        # Index age + orphaned vectors.
+        # BE-B-005: embedder inflight gauge — saturation signal that surfaces
+        # contention BEFORE Ollama latency p95 spikes.
+        lines.append("# HELP tool_compass_embedder_inflight In-flight Ollama embed calls.")
+        lines.append("# TYPE tool_compass_embedder_inflight gauge")
+        lines.append(f"tool_compass_embedder_inflight {_int_fmt(embed_inflight)}")
+
+        # BE-B-005: queue-wait time. Use _seconds suffix per OpenMetrics
+        # (BE-B-015) but report a gauge of p95 (full histogram would inflate
+        # the /metrics body — operators paginate to the structured event log
+        # for higher resolution).
+        lines.append("# HELP tool_compass_embedder_queue_wait_seconds p95 wait time for embedder concurrency slot.")
+        lines.append("# TYPE tool_compass_embedder_queue_wait_seconds gauge")
+        lines.append(f"# UNIT tool_compass_embedder_queue_wait_seconds seconds")
+        lines.append(
+            f"tool_compass_embedder_queue_wait_seconds {_float_fmt((embed_qw_p95_ms or 0.0) / 1000.0)}"
+        )
+
+        # BE-B-013: consecutive failures + time since last success — surfaces
+        # "breaker about to trip" vs. "breaker just tripped" vs. "breaker
+        # down all day".
+        lines.append("# HELP tool_compass_embed_consecutive_failures Live consecutive Ollama failure count.")
+        lines.append("# TYPE tool_compass_embed_consecutive_failures gauge")
+        lines.append(f"tool_compass_embed_consecutive_failures {_int_fmt(embed_consec)}")
+
+        if embed_last_success_ms is not None:
+            lines.append(
+                "# HELP tool_compass_embed_time_since_last_success_seconds "
+                "Seconds since the last successful embed call."
+            )
+            lines.append(
+                "# TYPE tool_compass_embed_time_since_last_success_seconds gauge"
+            )
+            lines.append(
+                f"tool_compass_embed_time_since_last_success_seconds "
+                f"{_float_fmt(float(embed_last_success_ms) / 1000.0)}"
+            )
+
+        # BE-B-002: circuit-breaker transitions counter. Distinguishes a
+        # flapping breaker from a steadily-open breaker (Nygard 'Release It!').
+        lines.append(
+            "# HELP tool_compass_circuit_breaker_transitions_total "
+            "Count of circuit-breaker state transitions."
+        )
+        lines.append(
+            "# TYPE tool_compass_circuit_breaker_transitions_total counter"
+        )
+        transitions = _metric_counters["circuit_breaker_transitions_total"]
+        emitted_any_transition = False
+        for key, count in transitions.items():
+            try:
+                from_state, to_state = key.split("->", 1)
+            except ValueError:
+                continue
+            emitted_any_transition = True
+            lines.append(
+                f'tool_compass_circuit_breaker_transitions_total'
+                f'{{from="{_escape_label(from_state)}",to="{_escape_label(to_state)}",'
+                f'breaker="ollama"}} {_int_fmt(count)}'
+            )
+        if not emitted_any_transition:
+            # Always emit at least one zero-valued line so dashboards don't
+            # break with "no such metric" errors on a fresh process.
+            lines.append(
+                'tool_compass_circuit_breaker_transitions_total'
+                '{from="closed",to="closed",breaker="ollama"} 0'
+            )
+
+        # BE-B-002: lexical fallback counter — every time semantic search
+        # falls back to LIKE. Alert on "served N lexical responses in 60s".
+        lines.append(
+            "# HELP tool_compass_lexical_fallback_total Lexical fallback invocations on compass()."
+        )
+        lines.append("# TYPE tool_compass_lexical_fallback_total counter")
+        lines.append(
+            f"tool_compass_lexical_fallback_total "
+            f"{_int_fmt(_metric_counters['lexical_fallback_total'])}"
+        )
+
+        # BE-B-002: generic fallback-by-type counter (lexical | chain | ...)
+        lines.append(
+            "# HELP tool_compass_fallback_invocations_total "
+            "Generic fallback invocation counter by type."
+        )
+        lines.append("# TYPE tool_compass_fallback_invocations_total counter")
+        fb_invocations = _metric_counters["fallback_invocations_total"]
+        if fb_invocations:
+            for fb_type, count in fb_invocations.items():
+                lines.append(
+                    f'tool_compass_fallback_invocations_total{{type="{_escape_label(fb_type)}"}} '
+                    f"{_int_fmt(count)}"
+                )
+        else:
+            lines.append('tool_compass_fallback_invocations_total{type="lexical"} 0')
+
+        # BE-B-002: degraded responses counter by reason.
+        lines.append(
+            "# HELP tool_compass_degraded_responses_total "
+            "Responses served while a degraded reason was active."
+        )
+        lines.append("# TYPE tool_compass_degraded_responses_total counter")
+        deg_by_reason = _metric_counters["degraded_responses_total"]
+        if deg_by_reason:
+            for reason, count in deg_by_reason.items():
+                lines.append(
+                    f'tool_compass_degraded_responses_total{{reason="{_escape_label(reason)}"}} '
+                    f"{_int_fmt(count)}"
+                )
+        else:
+            lines.append(
+                'tool_compass_degraded_responses_total{reason="ollama_unavailable"} 0'
+            )
+
+        # BE-B-002: HNSW search latency p95 gauge with ef_search label so a
+        # config change is visible in the time series.
+        hnsw_p95_ms = 0.0
+        hnsw_ef = 0
         index_age = 0.0
         orphaned = 0
         try:
@@ -1628,19 +2288,39 @@ def _run_http(port: int) -> None:
                 if isinstance(age, (int, float)):
                     index_age = float(age)
                 orphaned = int(istats.get("orphaned_vector_count", 0) or 0)
+                hnsw_p95_ms = float(istats.get("hnsw_search_latency_ms_p95", 0.0) or 0.0)
+                hnsw = istats.get("hnsw") or {}
+                hnsw_ef = int(hnsw.get("ef_search", 0) or 0)
         except Exception as e:
             logger.debug(f"metrics: index stats failed: {e}")
 
+        lines.append(
+            "# HELP tool_compass_hnsw_search_duration_seconds "
+            "p95 HNSW knn_query latency (seconds), labelled by ef_search."
+        )
+        lines.append("# TYPE tool_compass_hnsw_search_duration_seconds gauge")
+        lines.append("# UNIT tool_compass_hnsw_search_duration_seconds seconds")
+        lines.append(
+            f'tool_compass_hnsw_search_duration_seconds{{ef_search="{hnsw_ef}"}} '
+            f"{_float_fmt(hnsw_p95_ms / 1000.0)}"
+        )
+
         lines.append("# HELP tool_compass_index_age_seconds Seconds since the index was last built (0 if unknown).")
         lines.append("# TYPE tool_compass_index_age_seconds gauge")
-        lines.append(f"tool_compass_index_age_seconds {index_age}")
+        lines.append("# UNIT tool_compass_index_age_seconds seconds")
+        lines.append(f"tool_compass_index_age_seconds {_float_fmt(index_age)}")
 
         lines.append("# HELP tool_compass_orphaned_vectors HNSW entries with no DB mapping.")
         lines.append("# TYPE tool_compass_orphaned_vectors gauge")
-        lines.append(f"tool_compass_orphaned_vectors {orphaned}")
+        lines.append(f"tool_compass_orphaned_vectors {_int_fmt(orphaned)}")
 
+        # OpenMetrics 1.0.0 terminator (BE-B-015).
+        lines.append("# EOF")
         body = "\n".join(lines) + "\n"
-        return PlainTextResponse(body, media_type="text/plain; version=0.0.4")
+        return PlainTextResponse(
+            body,
+            media_type="application/openmetrics-text; version=1.0.0; charset=utf-8",
+        )
 
     # Add health / ready / metrics routes to FastMCP's custom routes
     # (included in streamable_http_app).
@@ -1723,7 +2403,10 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         # Use stderr for diagnostics if needed
         import sys
 
-        print("Starting Tool Compass Gateway v2.0...", file=sys.stderr)
+        # FE-W11-008: read __version__ from _version.py rather than embedding
+        # a hardcoded literal that drifts on every release. The Wave-10 audit
+        # called this out as a stale banner.
+        print(f"Starting Tool Compass Gateway v{__version__}...", file=sys.stderr)
         print(
             "Tools: compass, describe, execute, compass_categories, compass_status",
             file=sys.stderr,

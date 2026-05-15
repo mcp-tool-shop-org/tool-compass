@@ -1,0 +1,55 @@
+# Pre-commit hooks for tool-compass (CT-B-018).
+#
+# CONTRIBUTING.md previously told contributors to run `black . && isort . &&
+# ruff check .` from memory. This config codifies the same discipline so
+# formatting / lint regressions don't reach reviewer queues.
+#
+# Quick start (one-time setup per clone):
+#   pip install pre-commit
+#   pre-commit install
+#
+# Manual run on the whole tree:
+#   pre-commit run --all-files
+#
+# CI runs the same hooks in lint job via pre-commit/action.
+
+repos:
+  # ---------------------------------------------------------------------------
+  # ruff: format + lint (replaces black + isort + flake8 per Astral guidance).
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.7.4
+    hooks:
+      - id: ruff-format
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+
+  # ---------------------------------------------------------------------------
+  # Standard hygiene checks.
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: end-of-file-fixer
+        exclude: '^(README\.(ja|zh|es|fr|hi|it|pt-BR)\.md|.*\.(svg|png|jpg|jpeg|gif|webp|ico))$'
+      - id: trailing-whitespace
+        exclude: '^(README\.(ja|zh|es|fr|hi|it|pt-BR)\.md|.*\.md)$'
+        args: [--markdown-linebreak-ext=md]
+      - id: check-yaml
+      - id: check-json
+      - id: check-toml
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: detect-private-key
+
+  # ---------------------------------------------------------------------------
+  # Secrets scan (CT-B-018 / OWASP ASVS V14.5).
+  # gitleaks runs at pre-commit and at push-time on CI. False positives are
+  # silenced via .gitleaks.toml at the repo root (add when needed).
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

@@ -21,7 +21,8 @@ Tool Compass uses three components working together:
 │                              │                           │
 │                              ▼                           │
 │                    ┌──────────────────┐                  │
-│                    │  Gateway (9 tools)│                 │
+│                    │  Gateway          │                  │
+│                    │  (9 MCP tools)    │                  │
 │                    └──────────────────┘                  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -134,7 +135,9 @@ Only `stdio` backends are implemented at runtime. `http` and `import` types are 
 
 | Metric | Value |
 |--------|-------|
-| Index build time | ~5s for 44 tools |
+| Index build time | linear in tool count — sub-second per tool on local Ollama |
 | Query latency | ~15ms (including embedding) |
-| Token savings | ~95% (38K → 2K) |
+| Token savings | ~95% versus loading every tool schema upfront |
 | Accuracy@3 | ~95% (correct tool in top 3) |
+
+Tool count is auto-discovered from connected backends at sync time. The exact number depends on which backends are wired up — there is no canonical "Tool Compass has N tools" claim.

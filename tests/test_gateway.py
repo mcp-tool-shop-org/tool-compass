@@ -234,9 +234,14 @@ class TestExecuteTool:
 
         await execute(tool_name="test:tool", arguments={})
 
-        # Analytics should have recorded the call
+        # TS-A-009: tighten the lower-bound `>= 1` to equality now that
+        # the autouse gateway-globals reset (conftest.py) + the
+        # function-scoped test_analytics fixture together guarantee a
+        # fresh analytics DB per test. A regression where execute()
+        # silently double-records (or where leftover state from a prior
+        # test pads the count) would slip past `>= 1` but not `== 1`.
         summary = await test_analytics.get_analytics_summary("1h")
-        assert summary["tool_calls"]["total"] >= 1
+        assert summary["tool_calls"]["total"] == 1
 
 
 class TestCategoriesAndStatus:
@@ -1355,6 +1360,7 @@ class TestStartupSyncEdgeCases:
 
         gateway._config = test_config_with_backends
         gateway._config.sync_check_on_startup = True
+        gateway._config.auto_sync = True  # get_sync_manager_instance() short-circuits on False
         gateway._startup_sync_done = False
         gateway._sync_manager = Mock()
         gateway._sync_manager.sync_if_needed = AsyncMock()
@@ -1368,8 +1374,18 @@ class TestStartupSyncEdgeCases:
             maybe_startup_sync(),
         )
 
-        # Should only have been called at most once
-        # (may be 0 if _sync_manager is None)
+        # TS-A-007: the single-call guarantee that this test's name
+        # advertises must be verified. `_sync_manager` is wired above
+        # (not None), so sync_if_needed must have been called exactly
+        # once across the three concurrent invocations — the
+        # _startup_sync_lock + _startup_sync_done double-check is the
+        # whole point of this code path. Earlier "may be 0" wording
+        # acknowledged the assertion was deliberately dropped.
+        assert gateway._sync_manager.sync_if_needed.call_count == 1, (
+            gateway._sync_manager.sync_if_needed.call_count
+        )
+        # And the latched flag must be set for subsequent calls.
+        assert gateway._startup_sync_done is True
 
     @pytest.mark.asyncio
     async def test_startup_sync_handles_exception(self, test_config_with_backends):
@@ -1483,10 +1499,21 @@ class TestDescribeEdgeCases:
         assert "tool" in result
 
     @pytest.mark.asyncio
-    async def test_describe_analytics_recorded(
+    async def test_describe_returns_schema_with_analytics_mounted(
         self, test_index, test_config_with_backends, test_analytics
     ):
-        """Should record describe call in analytics."""
+        """describe() should return a schema when analytics is mounted.
+
+        TS-A-008: describe() does not write to analytics today (gateway.py
+        only records via record_search/record_tool_call in compass/execute);
+        the earlier "Should record describe call in analytics" docstring
+        + `_analytics is not None` assertion was a fixture sanity check
+        dressed up as a behavioural claim. Pin the real contract: with
+        analytics wired and the tool present in the index, describe()
+        must produce a schema-shaped envelope and must not mutate
+        analytics call counts (a regression that started double-recording
+        would be visible here).
+        """
         import gateway
 
         gateway._compass_index = test_index
@@ -1495,13 +1522,22 @@ class TestDescribeEdgeCases:
         gateway._backend_manager = Mock()
         gateway._backend_manager.get_tool_schema = Mock(return_value=None)
 
+        # Snapshot analytics tool_calls total before the describe() call.
+        pre_summary = await test_analytics.get_analytics_summary("1h")
+        pre_total = pre_summary["tool_calls"]["total"]
+
         from gateway import describe
 
-        await describe(tool_name="test:read_file")
+        result = await describe(tool_name="test:read_file")
 
-        # Analytics should record (this might not directly record describes,
-        # but we can verify analytics is accessible)
-        assert gateway._analytics is not None
+        # describe() returned a schema envelope from the index path.
+        assert isinstance(result, dict)
+        assert result.get("tool") == "test:read_file"
+
+        # describe() does NOT count as a tool call — assert the analytics
+        # tool_calls total is unchanged.
+        post_summary = await test_analytics.get_analytics_summary("1h")
+        assert post_summary["tool_calls"]["total"] == pre_total
 
 
 # =============================================================================

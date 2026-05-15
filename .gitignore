@@ -107,3 +107,17 @@ site/node_modules/
 rk.config.json
 data/knowledge.db*
 data/artifacts/
+
+# npm wrapper: translated READMEs are copied from repo root at publish time
+# by .github/workflows/release-binaries.yml. The canonical translations live
+# at the repo root (README.{lang}.md); npm/ stays a thin shim.
+npm/README.ja.md
+npm/README.zh.md
+npm/README.es.md
+npm/README.fr.md
+npm/README.hi.md
+npm/README.it.md
+npm/README.pt-BR.md
+npm/node_modules/
+npm/package-lock.json
+npm/*.tgz
