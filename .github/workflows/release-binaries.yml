@@ -78,7 +78,12 @@ jobs:
           pyinstaller --onefile \
             --name "${{ env.TOOL_NAME }}" \
             --console \
-            --collect-submodules mcp \
+            --collect-submodules mcp.client \
+            --collect-submodules mcp.server \
+            --collect-submodules mcp.types \
+            --collect-submodules mcp.shared \
+            --exclude-module mcp.cli \
+            --exclude-module typer \
             --collect-submodules hnswlib \
             --collect-submodules numpy \
             --collect-submodules httpx \
