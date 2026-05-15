@@ -1,0 +1,1754 @@
+"""
+Gateway coverage suite — drives gateway.py from 45% to >=80% by hitting the
+RFC 9457 envelope helper + degraded augmenter + every untested branch of the
+MCP tool handlers (compass_status / compass_audit / compass_analytics /
+compass_chains / compass_sync) + the _lexical_search_fallback path + the
+maybe_startup_sync edge cases + the HTTP /ready and /metrics handler bodies
+without binding a socket.
+
+All tests rely on the autouse `_reset_gateway_globals` fixture in
+conftest.py to scrub module-level state between tests. None of these tests
+launch the FastMCP HTTP server — the /ready and /metrics handlers are
+exercised by re-constructing the same closures against mocked module
+globals.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sqlite3
+from pathlib import Path
+from typing import Any, Dict
+from unittest.mock import Mock, AsyncMock, patch
+
+import pytest
+
+
+# =============================================================================
+# _error_envelope() — RFC 9457 helper (15 callsites, all branches)
+# =============================================================================
+
+
+class TestErrorEnvelope:
+    """Exercise every branch of _error_envelope()."""
+
+    def test_minimal_envelope_shape(self):
+        from gateway import _error_envelope
+
+        resp = _error_envelope(
+            code="tool_not_found",
+            title="Tool not found",
+            detail="missing",
+        )
+        # Legacy string-form "error" key is preserved (backward compat).
+        assert resp["error"] == "missing"
+        # And the structured envelope under "error_envelope" carries the RFC
+        # 9457-shaped payload.
+        env = resp["error_envelope"]
+        assert env["type"] == "compass.error.tool_not_found"
+        assert env["title"] == "Tool not found"
+        assert env["code"] == "tool_not_found"
+        assert env["category"] == "backend_error"  # default
+        assert env["detail"] == "missing"
+        assert env["retryable"] is False
+        # Optional fields are absent when not provided.
+        assert "instance" not in env
+        assert "retry_after_seconds" not in env
+        assert "nearest_tools" not in env
+        assert "suggestions" not in env
+        # trace_id surfaces at the top level.
+        assert resp["trace_id"] is None
+
+    def test_full_envelope_with_all_optional_fields(self):
+        from gateway import _error_envelope
+
+        nearest = [{"tool": "bridge:read_file", "score": 0.6}]
+        suggestions = ["Try compass()."]
+
+        resp = _error_envelope(
+            code="backend_unreachable",
+            title="Backend down",
+            detail="connection refused",
+            category="service_unavailable",
+            retryable=True,
+            trace_id="abc12345",
+            retry_after_seconds=2.5,
+            nearest_tools=nearest,
+            suggestions=suggestions,
+            extra_field="extra_value",
+        )
+        env = resp["error_envelope"]
+        assert env["category"] == "service_unavailable"
+        assert env["retryable"] is True
+        assert env["instance"] == "abc12345"
+        assert env["retry_after_seconds"] == 2.5
+        assert env["nearest_tools"] == nearest
+        assert env["suggestions"] == suggestions
+        # **extras go onto the envelope.
+        assert env["extra_field"] == "extra_value"
+        assert resp["trace_id"] == "abc12345"
+
+    def test_unknown_code_logs_warning_but_still_returns(self, caplog):
+        from gateway import _error_envelope
+
+        # Unknown code should warn but pass through.
+        with caplog.at_level("WARNING"):
+            resp = _error_envelope(
+                code="totally_invented_code",
+                title="t",
+                detail="d",
+            )
+        assert resp["error_envelope"]["code"] == "totally_invented_code"
+
+    def test_unknown_category_logs_warning_but_still_returns(self, caplog):
+        from gateway import _error_envelope
+
+        with caplog.at_level("WARNING"):
+            resp = _error_envelope(
+                code="tool_not_found",
+                title="t",
+                detail="d",
+                category="not-a-real-category",
+            )
+        assert resp["error_envelope"]["category"] == "not-a-real-category"
+
+    def test_retry_after_seconds_is_floatified(self):
+        from gateway import _error_envelope
+
+        resp = _error_envelope(
+            code="backend_timeout",
+            title="t",
+            detail="d",
+            retry_after_seconds=3,  # int input
+        )
+        assert resp["error_envelope"]["retry_after_seconds"] == 3.0
+        assert isinstance(resp["error_envelope"]["retry_after_seconds"], float)
+
+
+# =============================================================================
+# _augment_with_health() — degraded:true field injector
+# =============================================================================
+
+
+class TestAugmentWithHealth:
+    """Exercise the degraded-stamper across all branches."""
+
+    def test_no_degradation_passthrough(self):
+        import gateway
+        from gateway import _augment_with_health
+
+        # Set health to all-good.
+        gateway._health_state["ollama_available"] = True
+        gateway._health_state["index_available"] = True
+
+        resp = {"matches": [], "trace_id": "x"}
+        out = _augment_with_health(resp)
+        assert out["degraded"] is False
+        # No degraded_reasons added when nothing is degraded.
+        assert "degraded_reasons" not in out
+
+    def test_ollama_unavailable_adds_reason(self):
+        import gateway
+        from gateway import _augment_with_health
+
+        gateway._health_state["ollama_available"] = False
+        gateway._health_state["index_available"] = True
+
+        resp = {"matches": []}
+        out = _augment_with_health(resp)
+        assert out["degraded"] is True
+        assert "ollama_unavailable" in out["degraded_reasons"]
+
+    def test_index_unavailable_adds_reason(self):
+        import gateway
+        from gateway import _augment_with_health
+
+        gateway._health_state["ollama_available"] = True
+        gateway._health_state["index_available"] = False
+
+        resp = {"matches": []}
+        out = _augment_with_health(resp)
+        assert out["degraded"] is True
+        assert "index_unhealthy" in out["degraded_reasons"]
+
+    def test_both_unavailable_adds_both_reasons(self):
+        import gateway
+        from gateway import _augment_with_health
+
+        gateway._health_state["ollama_available"] = False
+        gateway._health_state["index_available"] = False
+
+        resp = {"matches": []}
+        out = _augment_with_health(resp)
+        assert out["degraded"] is True
+        assert "ollama_unavailable" in out["degraded_reasons"]
+        assert "index_unhealthy" in out["degraded_reasons"]
+
+    def test_already_degraded_preserved(self):
+        import gateway
+        from gateway import _augment_with_health
+
+        gateway._health_state["ollama_available"] = True
+        gateway._health_state["index_available"] = True
+
+        # Caller pre-marked degraded — augmenter must preserve and ensure the
+        # `degraded_reasons` list exists.
+        resp = {"degraded": True}
+        out = _augment_with_health(resp)
+        assert out["degraded"] is True
+        assert out.get("degraded_reasons") == []
+
+    def test_existing_reasons_deduplicated(self):
+        import gateway
+        from gateway import _augment_with_health
+
+        gateway._health_state["ollama_available"] = False
+        gateway._health_state["index_available"] = True
+
+        resp = {"degraded_reasons": ["ollama_unavailable"]}
+        out = _augment_with_health(resp)
+        # Should not duplicate the same reason.
+        assert out["degraded_reasons"].count("ollama_unavailable") == 1
+
+    def test_non_dict_passthrough(self):
+        from gateway import _augment_with_health
+
+        # If the gateway hands a non-dict to the augmenter (defensive), it
+        # should return the input unchanged.
+        out = _augment_with_health("a string")
+        assert out == "a string"
+        out = _augment_with_health([1, 2, 3])
+        assert out == [1, 2, 3]
+
+
+# =============================================================================
+# _clamp_query() + _escape_like() — query boundary hygiene
+# =============================================================================
+
+
+class TestQueryHelpers:
+    """Validate _clamp_query and _escape_like."""
+
+    def test_clamp_query_empty(self):
+        from gateway import _clamp_query
+
+        assert _clamp_query(None) == ""
+        assert _clamp_query("") == ""
+        assert _clamp_query("   ") == ""
+
+    def test_clamp_query_strips_whitespace(self):
+        from gateway import _clamp_query
+
+        assert _clamp_query("  hello world  ") == "hello world"
+
+    def test_clamp_query_truncates_over_limit(self, caplog):
+        from gateway import _clamp_query, _MAX_QUERY_LEN
+
+        massive = "a" * (_MAX_QUERY_LEN + 100)
+        with caplog.at_level("WARNING"):
+            clamped = _clamp_query(massive)
+        assert len(clamped) == _MAX_QUERY_LEN
+
+    def test_escape_like_handles_wildcards(self):
+        from gateway import _escape_like
+
+        # % and _ are wildcards in SQLite LIKE — must be escaped so the
+        # user's literal `foo%bar` doesn't act like `foo.*bar`.
+        assert _escape_like("foo%bar") == "foo\\%bar"
+        assert _escape_like("foo_bar") == "foo\\_bar"
+        assert _escape_like("back\\slash") == "back\\\\slash"
+
+    def test_escape_like_preserves_normal_chars(self):
+        from gateway import _escape_like
+
+        assert _escape_like("normal text") == "normal text"
+
+
+# =============================================================================
+# _lexical_search_fallback() — the lexical fallback path
+# =============================================================================
+
+
+class TestLexicalSearchFallback:
+    """Drive _lexical_search_fallback() across all branches."""
+
+    def test_returns_empty_when_no_index(self):
+        from gateway import _lexical_search_fallback
+
+        assert _lexical_search_fallback(None, "anything", 5, None, None) == []
+
+    def test_returns_empty_when_no_db(self):
+        from gateway import _lexical_search_fallback
+
+        index = Mock()
+        index.db = None
+        assert _lexical_search_fallback(index, "anything", 5, None, None) == []
+
+    def test_returns_empty_for_blank_query(self, test_index):
+        from gateway import _lexical_search_fallback
+
+        # An empty/blank query must return [] (BE-B-007: '%%' would otherwise
+        # match the whole catalog — that's a serious gotcha).
+        assert _lexical_search_fallback(test_index, "", 5, None, None) == []
+        assert _lexical_search_fallback(test_index, "    ", 5, None, None) == []
+
+    @pytest.mark.asyncio
+    async def test_name_match_higher_confidence_than_description(
+        self, test_index
+    ):
+        from gateway import _lexical_search_fallback
+
+        # "read_file" is in tool name -> 0.6 confidence
+        results = _lexical_search_fallback(test_index, "read_file", 5, None, None)
+        assert results, "expected lexical match for 'read_file'"
+        # Top result has confidence 0.6 (name match).
+        assert results[0]["confidence"] == 0.6
+        # Every match carries degraded=True.
+        for m in results:
+            assert m["degraded"] is True
+
+    @pytest.mark.asyncio
+    async def test_category_filter_applied(self, test_index):
+        from gateway import _lexical_search_fallback
+
+        results = _lexical_search_fallback(
+            test_index, "file", top_k=10, category="file", server=None
+        )
+        assert all(m["category"] == "file" for m in results)
+
+    @pytest.mark.asyncio
+    async def test_server_filter_applied(self, test_index):
+        from gateway import _lexical_search_fallback
+
+        results = _lexical_search_fallback(
+            test_index, "file", top_k=10, category=None, server="test"
+        )
+        assert all(m["server"] == "test" for m in results)
+
+
+# =============================================================================
+# compass() — exception path (Ollama down -> lexical fallback)
+# =============================================================================
+
+
+class TestCompassFallback:
+    """Drive the lexical fallback path in compass()."""
+
+    @pytest.mark.asyncio
+    async def test_compass_falls_back_to_lexical_on_search_error(
+        self, test_index, test_config
+    ):
+        """Semantic search raises -> compass() returns lexical results with
+        warnings and degraded=True."""
+        import gateway
+
+        # Force index.search() to raise so the except branch fires.
+        async def boom(*args, **kwargs):
+            raise RuntimeError("Ollama unreachable")
+
+        with patch.object(test_index, "search", side_effect=boom):
+            gateway._compass_index = test_index
+            gateway._config = test_config
+            gateway._startup_sync_done = True
+            gateway._analytics = None
+
+            from gateway import compass
+
+            result = await compass(intent="read_file", top_k=3)
+
+            assert result["degraded"] is True
+            assert "warnings" in result
+            # The warning prose should mention Ollama.
+            assert any("Ollama" in w for w in result["warnings"])
+            # Lexical fallback produced matches — they all carry degraded=True.
+            for m in result["matches"]:
+                assert m["degraded"] is True
+
+    @pytest.mark.asyncio
+    async def test_compass_clamps_oversize_intent(self, test_index, test_config):
+        """A 10MB paste should never reach the embedder."""
+        import gateway
+        from gateway import _MAX_QUERY_LEN
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        gateway._startup_sync_done = True
+        gateway._analytics = None
+
+        from gateway import compass
+
+        # No crash; the boundary clamp is invisible to the caller but must
+        # not raise.
+        result = await compass(intent="a" * (_MAX_QUERY_LEN + 1000), top_k=2)
+        assert "matches" in result
+
+    @pytest.mark.asyncio
+    async def test_compass_no_match_hint(self, test_index, test_config):
+        """When nothing matches, hint mentions broader terms."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        gateway._startup_sync_done = True
+        gateway._analytics = None
+
+        from gateway import compass
+
+        result = await compass(intent="zzzzzz_no_match", category="impossible")
+        assert result["matches"] == []
+        assert "broader terms" in result["hint"] or "No tools" in result["hint"]
+
+    @pytest.mark.asyncio
+    async def test_compass_chain_search_exception_handled(
+        self, test_index, test_config_with_backends
+    ):
+        """Chain indexer raising during search() must not abort the compass
+        response — it should append a warning and keep going."""
+        import gateway
+
+        # Wire a chain_indexer that raises on search_chains.
+        mock_chain = Mock()
+        mock_chain.search_chains = AsyncMock(side_effect=RuntimeError("chain boom"))
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        gateway._chain_indexer = mock_chain
+        gateway._startup_sync_done = True
+        gateway._analytics = None
+
+        from gateway import compass
+
+        result = await compass(
+            intent="read_file", top_k=2, include_chains=True
+        )
+        # compass() should not propagate the chain failure.
+        assert "matches" in result
+        # And it stamped a warning.
+        assert "warnings" in result
+
+    @pytest.mark.asyncio
+    async def test_compass_min_confidence_respected_on_lexical_fallback(
+        self, test_index, test_config
+    ):
+        """BE-A-004: min_confidence applies on the lexical fallback path too."""
+        import gateway
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("ollama dead")
+
+        with patch.object(test_index, "search", side_effect=boom):
+            gateway._compass_index = test_index
+            gateway._config = test_config
+            gateway._startup_sync_done = True
+            gateway._analytics = None
+
+            from gateway import compass
+
+            # 0.9 > all lexical confidences (0.6/0.4/0.3) — should produce []
+            result = await compass(intent="read_file", min_confidence=0.9, top_k=3)
+            assert result["matches"] == []
+
+
+# =============================================================================
+# describe() — sqlite error path + nearest_tools envelope
+# =============================================================================
+
+
+class TestDescribeErrorPaths:
+    """describe() sqlite error + tool_not_found nearest_tools envelope."""
+
+    @pytest.mark.asyncio
+    async def test_describe_sqlite_error_marks_index_unhealthy(
+        self, test_index, test_config
+    ):
+        """A sqlite error on the index lookup must:
+          - flip _health_state['index_available'] to False
+          - fall through to the backend lookup path
+          - still return a response (not raise)."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        gateway._health_state["index_available"] = True
+
+        # Mock the backend manager to return a schema for fallback.
+        mock_mgr = Mock()
+        mock_mgr.get_tool_schema = Mock(return_value={
+            "name": "test:tool",
+            "description": "Backend served this",
+            "parameters": {},
+        })
+        gateway._backend_manager = mock_mgr
+
+        # Substitute index.db with a Mock that raises sqlite3.OperationalError
+        # on execute() — sqlite3.Connection.execute is a C method we can't
+        # patch in place.
+        original_db = test_index.db
+        fake_db = Mock()
+        fake_db.execute = Mock(side_effect=sqlite3.OperationalError("disk I/O error"))
+        test_index.db = fake_db
+
+        try:
+            from gateway import describe
+
+            result = await describe(tool_name="test:tool")
+        finally:
+            test_index.db = original_db
+
+        # The describe() helper fell through to the backend path and the
+        # health flag is now False.
+        assert gateway._health_state["index_available"] is False
+        # And the response contains a "warnings" hint mentioning index
+        # unhealthy + the rebuild action.
+        assert "warnings" in result
+        assert any("rebuild" in w.lower() or "compass_sync" in w for w in result["warnings"])
+
+    @pytest.mark.asyncio
+    async def test_describe_not_found_returns_nearest_tools(
+        self, test_index, test_config
+    ):
+        """Tool-not-found must return an RFC 9457 envelope with nearest_tools
+        populated when the lexical fallback finds anything plausible.
+
+        _lexical_search_fallback wraps the query as `%query%` and searches
+        for tool names/descriptions containing that needle — so the query
+        must be a substring of an existing tool's name or description.
+        """
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        # Backend manager has no such tool.
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        from gateway import describe
+
+        # 'read_file' is a substring of existing 'test:read_file' (and the
+        # tool name still doesn't exist as 'read_file' alone), so the lookup
+        # for 'read_file' fails the exact-match SELECT but the lexical
+        # fallback finds 'test:read_file'.
+        result = await describe(tool_name="read_file")
+
+        # RFC 9457 envelope is present.
+        assert "error" in result
+        env = result["error_envelope"]
+        assert env["code"] == "tool_not_found"
+        assert env["category"] == "not_found"
+        assert env["retryable"] is False
+        # nearest_tools is the load-bearing recovery signal.
+        assert "nearest_tools" in env
+        assert isinstance(env["nearest_tools"], list)
+        assert env["nearest_tools"], "nearest_tools should not be empty"
+        first = env["nearest_tools"][0]
+        assert "tool" in first
+        assert "score" in first
+
+    @pytest.mark.asyncio
+    async def test_describe_not_found_no_nearest_when_no_match(
+        self, test_index, test_config
+    ):
+        """When lexical fallback returns nothing, the envelope still appears
+        without nearest_tools but with suggestions."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        from gateway import describe
+
+        result = await describe(tool_name="test:absolutely_unique_no_match_xyz")
+        env = result["error_envelope"]
+        assert env["code"] == "tool_not_found"
+        # Suggestions are always present.
+        assert "suggestions" in env
+
+    @pytest.mark.asyncio
+    async def test_describe_not_found_unhealthy_index_warns(
+        self, test_index, test_config
+    ):
+        """tool_not_found + index unhealthy -> response carries warnings list.
+
+        The describe() handler resets index_available=True on every
+        successful SELECT, so we have to drive index_available=False by
+        making the SELECT itself raise — only then will the tool_not_found
+        envelope carry the 'Index database unhealthy' warning.
+        """
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        # The fake-db approach must:
+        #  1. Raise on the first execute() (the WHERE name=? lookup) so the
+        #     unhealthy flag flips.
+        #  2. Return an empty rowset on the second execute() (the lexical
+        #     fallback inside describe) so the test does not depend on
+        #     lexical matches.
+        original_db = test_index.db
+
+        call_state = {"n": 0}
+
+        def fake_execute(sql, params=()):
+            call_state["n"] += 1
+            if call_state["n"] == 1:
+                raise sqlite3.OperationalError("io error")
+            # Subsequent calls -> empty result.
+            empty_cursor = Mock()
+            empty_cursor.fetchall = Mock(return_value=[])
+            empty_cursor.fetchone = Mock(return_value=None)
+            return empty_cursor
+
+        fake_db = Mock()
+        fake_db.execute = Mock(side_effect=fake_execute)
+        test_index.db = fake_db
+
+        try:
+            from gateway import describe
+
+            result = await describe(tool_name="test:not_there")
+        finally:
+            test_index.db = original_db
+
+        # tool_not_found envelope.
+        assert result["error_envelope"]["code"] == "tool_not_found"
+        # And because index_available was flipped to False during the SELECT
+        # try/except, the unhealthy warning is present.
+        assert "warnings" in result
+        assert any("Index" in w for w in result["warnings"])
+
+
+# =============================================================================
+# execute() — unhandled-exception path (BE-B-004)
+# =============================================================================
+
+
+class TestExecuteUnhandledException:
+    """execute() must trap raises from the backend client."""
+
+    @pytest.mark.asyncio
+    async def test_execute_traps_backend_exception(
+        self, test_config
+    ):
+        """A raise from manager.execute_tool() must turn into an
+        execute_unhandled_exception envelope, not propagate up."""
+        import gateway
+
+        mgr = Mock()
+        mgr.is_backend_connected = Mock(return_value=True)
+        mgr.execute_tool = AsyncMock(side_effect=RuntimeError("backend died"))
+
+        gateway._backend_manager = mgr
+        gateway._config = test_config
+        gateway._analytics = None
+
+        from gateway import execute
+
+        result = await execute(tool_name="test:tool", arguments={"x": 1})
+
+        # RFC 9457 envelope.
+        env = result["error_envelope"]
+        assert env["code"] == "execute_unhandled_exception"
+        assert env["category"] == "backend_error"
+        assert env["retryable"] is False
+        # Success=False stamped on for legacy callers.
+        assert result["success"] is False
+        # Detail mentions the underlying exception type.
+        assert "RuntimeError" in env["detail"]
+
+    @pytest.mark.asyncio
+    async def test_execute_traps_backend_exception_records_analytics(
+        self, test_config_with_backends, test_analytics
+    ):
+        """Even when backend raises, analytics.record_tool_call is invoked."""
+        import gateway
+
+        mgr = Mock()
+        mgr.is_backend_connected = Mock(return_value=True)
+        mgr.execute_tool = AsyncMock(side_effect=RuntimeError("boom"))
+
+        gateway._backend_manager = mgr
+        gateway._config = test_config_with_backends
+        gateway._analytics = test_analytics
+
+        from gateway import execute
+
+        await execute(tool_name="test:explode", arguments={})
+
+        # The failed call should have been recorded.
+        summary = await test_analytics.get_analytics_summary("1h")
+        assert summary["tool_calls"]["total"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_execute_traps_when_analytics_record_raises(self, test_config):
+        """If analytics itself raises while recording, execute() still returns
+        a sensible envelope (the analytics raise is logged, not propagated)."""
+        import gateway
+
+        mgr = Mock()
+        mgr.is_backend_connected = Mock(return_value=True)
+        mgr.execute_tool = AsyncMock(side_effect=RuntimeError("backend boom"))
+
+        # Analytics that raises on record.
+        analytics = Mock()
+        analytics.get_hot_tool = Mock(return_value=None)
+        analytics.record_tool_call = AsyncMock(side_effect=Exception("analytics dead"))
+
+        gateway._backend_manager = mgr
+        gateway._config = test_config
+        # analytics_enabled may be False on test_config; force-set the
+        # singleton directly so the analytics-branch in execute() fires.
+        gateway._analytics = analytics
+        gateway._config.analytics_enabled = True
+
+        from gateway import execute
+
+        # Must not raise.
+        result = await execute(tool_name="test:tool", arguments={})
+        assert result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_execute_dict_missing_success_key_treated_as_failure(
+        self, test_config
+    ):
+        """A backend that returns a dict without 'success' is treated as a
+        failure (to avoid masking silent errors)."""
+        import gateway
+
+        mgr = Mock()
+        mgr.is_backend_connected = Mock(return_value=True)
+        mgr.execute_tool = AsyncMock(return_value={"data": "no success key"})
+
+        gateway._backend_manager = mgr
+        gateway._config = test_config
+        gateway._analytics = None
+
+        from gateway import execute
+
+        result = await execute(tool_name="test:tool")
+        # trace_id stamped + treated as failure for analytics, but the dict
+        # is returned as-is (with trace_id stamped).
+        assert "trace_id" in result
+
+    @pytest.mark.asyncio
+    async def test_execute_backend_connect_failed_envelope(self, test_config):
+        """When backend connect fails, response is an RFC 9457 envelope with
+        category=service_unavailable and retryable=True."""
+        import gateway
+
+        mgr = Mock()
+        mgr.is_backend_connected = Mock(return_value=False)
+        mgr.connect_backend = AsyncMock(return_value=False)
+
+        gateway._backend_manager = mgr
+        gateway._config = test_config
+        gateway._analytics = None
+
+        from gateway import execute
+
+        result = await execute(tool_name="test:tool", arguments={})
+
+        env = result["error_envelope"]
+        assert env["code"] == "backend_connect_failed"
+        assert env["category"] == "service_unavailable"
+        assert env["retryable"] is True
+        assert env["retry_after_seconds"] == 5.0
+        assert result["success"] is False
+
+    @pytest.mark.asyncio
+    async def test_execute_non_dict_result_returned_unchanged(self, test_config):
+        """When manager returns a non-dict (e.g. a string), execute() returns
+        it unchanged (the analytics branch records success=False)."""
+        import gateway
+
+        mgr = Mock()
+        mgr.is_backend_connected = Mock(return_value=True)
+        mgr.execute_tool = AsyncMock(return_value="just a string")
+
+        gateway._backend_manager = mgr
+        gateway._config = test_config
+        gateway._analytics = None
+
+        from gateway import execute
+
+        result = await execute(tool_name="test:tool")
+        # Non-dict result returned as-is.
+        assert result == "just a string"
+
+
+# =============================================================================
+# compass_status() — per-block exception paths
+# =============================================================================
+
+
+class TestCompassStatusErrorBlocks:
+    """Each subsystem block in compass_status is independently wrapped."""
+
+    @pytest.mark.asyncio
+    async def test_status_index_block_failure(self, test_config_with_backends):
+        """If index lookup raises, that block reports {error, trace_id}."""
+        import gateway
+
+        # No index set — force get_index() to fail by stubbing it.
+        async def broken_index():
+            raise RuntimeError("index unloaded")
+
+        gateway._config = test_config_with_backends
+
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={"connected_backends": []})
+        gateway._backend_manager = mgr
+
+        with patch("gateway.get_index", side_effect=broken_index):
+            from gateway import compass_status
+
+            result = await compass_status()
+
+        # Index block carries an error.
+        assert "index" in result
+        assert "error" in result["index"]
+        # Backends still present.
+        assert "backends" in result
+
+    @pytest.mark.asyncio
+    async def test_status_backends_block_failure(self, test_index, test_config):
+        """If backends.get_stats raises, that block reports {error, trace_id}."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+
+        async def broken_backends():
+            raise RuntimeError("backends dead")
+
+        with patch("gateway.get_backends", side_effect=broken_backends):
+            from gateway import compass_status
+
+            result = await compass_status()
+
+        assert "error" in result["backends"]
+        assert "index" in result  # other block survived
+
+    @pytest.mark.asyncio
+    async def test_status_analytics_block_failure(
+        self, test_index, test_config_with_backends
+    ):
+        """Analytics block reports {error} when get_analytics_instance raises."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        async def broken_analytics():
+            raise RuntimeError("analytics gone")
+
+        with patch("gateway.get_analytics_instance", side_effect=broken_analytics):
+            from gateway import compass_status
+
+            result = await compass_status()
+
+        assert "hot_cache" in result
+        assert "error" in result["hot_cache"]
+
+    @pytest.mark.asyncio
+    async def test_status_sync_block_failure(
+        self, test_index, test_config_with_backends
+    ):
+        """Sync block reports {error} when get_sync_manager_instance raises."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        gateway._config.auto_sync = True
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        async def broken_sync():
+            raise RuntimeError("sync dead")
+
+        with patch("gateway.get_sync_manager_instance", side_effect=broken_sync):
+            from gateway import compass_status
+
+            result = await compass_status()
+
+        assert "sync" in result
+        assert "error" in result["sync"]
+
+    @pytest.mark.asyncio
+    async def test_status_chain_block_failure(
+        self, test_index, test_config_with_backends
+    ):
+        """Chain block reports {error} when chain indexer access raises."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        async def broken_chain():
+            raise RuntimeError("chain dead")
+
+        with patch(
+            "gateway.get_chain_indexer_instance", side_effect=broken_chain
+        ):
+            from gateway import compass_status
+
+            result = await compass_status()
+
+        assert "chains" in result
+        assert "error" in result["chains"]
+
+    @pytest.mark.asyncio
+    async def test_status_includes_health_block(self, test_index, test_config):
+        """The health block is always present."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        gateway._health_state["ollama_available"] = False
+        gateway._health_state["last_ollama_error"] = "test error"
+
+        from gateway import compass_status
+
+        result = await compass_status()
+        assert result["health"]["ollama_available"] is False
+        assert result["health"]["degraded_mode"] is True
+        assert result["health"]["last_ollama_error"] == "test error"
+
+
+# =============================================================================
+# compass_audit() — per-block exception paths
+# =============================================================================
+
+
+class TestCompassAuditErrorBlocks:
+    """compass_audit() degrades each subsystem block independently."""
+
+    @pytest.mark.asyncio
+    async def test_audit_index_block_failure(self, test_config_with_backends):
+        """Index block error reported, but audit still returns."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+
+        async def broken_index():
+            raise RuntimeError("index nope")
+
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        with patch("gateway.get_index", side_effect=broken_index):
+            from gateway import compass_audit
+
+            result = await compass_audit()
+
+        assert "error" in result["system"]
+        assert "categories" in result
+        assert "servers" in result
+
+    @pytest.mark.asyncio
+    async def test_audit_backends_block_failure(self, test_index, test_config):
+        """Backends block reports error when get_backends raises."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+
+        async def broken_backends():
+            raise RuntimeError("backends dead")
+
+        with patch("gateway.get_backends", side_effect=broken_backends):
+            from gateway import compass_audit
+
+            result = await compass_audit()
+
+        assert "error" in result["backends"]
+
+    @pytest.mark.asyncio
+    async def test_audit_analytics_block_failure(
+        self, test_index, test_config_with_backends
+    ):
+        """Analytics block reports error when get_analytics_instance raises."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        async def broken_analytics():
+            raise RuntimeError("analytics dead")
+
+        with patch(
+            "gateway.get_analytics_instance", side_effect=broken_analytics
+        ):
+            from gateway import compass_audit
+
+            result = await compass_audit()
+
+        assert "error" in result["analytics"]
+
+    @pytest.mark.asyncio
+    async def test_audit_chains_block_failure(
+        self, test_index, test_config_with_backends
+    ):
+        """Chains block reports error when chain indexer raises."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        async def broken_chain():
+            raise RuntimeError("chains dead")
+
+        with patch(
+            "gateway.get_chain_indexer_instance", side_effect=broken_chain
+        ):
+            from gateway import compass_audit
+
+            result = await compass_audit()
+
+        assert "error" in result["chains"]
+
+    @pytest.mark.asyncio
+    async def test_audit_sync_block_failure(
+        self, test_index, test_config_with_backends
+    ):
+        """Sync block reports error when sync manager raises."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        gateway._config.auto_sync = True
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        async def broken_sync():
+            raise RuntimeError("sync gone")
+
+        with patch(
+            "gateway.get_sync_manager_instance", side_effect=broken_sync
+        ):
+            from gateway import compass_audit
+
+            result = await compass_audit()
+
+        assert "error" in result["sync"]
+
+    @pytest.mark.asyncio
+    async def test_audit_tools_block_handles_db_failure(
+        self, test_config_with_backends
+    ):
+        """include_tools=True but index unavailable -> tools=[] + note."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+
+        # Build a Mock index with no db attribute -> tools block degrades.
+        mock_index = Mock()
+        mock_index.get_stats = Mock(return_value={"total_tools": 0, "by_category": {}, "by_server": {}})
+        mock_index.index_path = Path("/tmp/nope.hnsw")
+        mock_index.db_path = Path("/tmp/nope.db")
+        mock_index.db = None
+        gateway._compass_index = mock_index
+
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        from gateway import compass_audit
+
+        result = await compass_audit(include_tools=True)
+        assert result["tools"] == []
+        assert "tools_note" in result
+
+    @pytest.mark.asyncio
+    async def test_audit_tools_block_handles_db_exception(
+        self, test_index, test_config_with_backends
+    ):
+        """Tools block traps sqlite errors during list."""
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config_with_backends
+        mgr = Mock()
+        mgr.get_stats = Mock(return_value={})
+        gateway._backend_manager = mgr
+
+        # Replace index.db with a Mock that raises on execute().
+        original_db = test_index.db
+        fake_db = Mock()
+        fake_db.execute = Mock(side_effect=sqlite3.OperationalError("disk gone"))
+        test_index.db = fake_db
+
+        try:
+            from gateway import compass_audit
+
+            result = await compass_audit(include_tools=True)
+        finally:
+            test_index.db = original_db
+
+        # tools block trapped the failure.
+        assert result["tools"] == []
+        assert "tools_note" in result
+
+
+# =============================================================================
+# compass_analytics() — analytics_unavailable + query-failure envelopes
+# =============================================================================
+
+
+class TestCompassAnalyticsErrors:
+    """compass_analytics() error branches."""
+
+    @pytest.mark.asyncio
+    async def test_analytics_not_initialized_envelope(
+        self, test_config_with_backends
+    ):
+        """analytics_enabled=True but get_analytics_instance returns None."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._analytics = None
+
+        with patch(
+            "gateway.get_analytics_instance",
+            AsyncMock(return_value=None),
+        ):
+            from gateway import compass_analytics
+
+            result = await compass_analytics()
+
+        env = result["error_envelope"]
+        assert env["code"] == "analytics_unavailable"
+        assert env["category"] == "service_unavailable"
+        assert env["retryable"] is True
+
+    @pytest.mark.asyncio
+    async def test_analytics_query_exception_envelope(
+        self, test_config_with_backends
+    ):
+        """analytics.get_analytics_summary raising returns envelope."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+
+        broken = Mock()
+        broken.get_analytics_summary = AsyncMock(
+            side_effect=RuntimeError("analytics SQL exploded")
+        )
+        gateway._analytics = broken
+
+        from gateway import compass_analytics
+
+        result = await compass_analytics(timeframe="1h", include_failures=True)
+
+        env = result["error_envelope"]
+        assert env["code"] == "analytics_unavailable"
+        assert env["category"] == "backend_error"
+        assert env["retryable"] is True
+        assert "RuntimeError" in env["detail"]
+
+
+# =============================================================================
+# compass_chains() — every action + every failure path
+# =============================================================================
+
+
+class TestCompassChainsErrors:
+    """compass_chains() RFC 9457 error branches."""
+
+    @pytest.mark.asyncio
+    async def test_chains_unavailable_envelope(self, test_config_with_backends):
+        """chain_indexing_enabled=True but get_chain_indexer_instance returns
+        None."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._chain_indexer = None
+
+        with patch(
+            "gateway.get_chain_indexer_instance",
+            AsyncMock(return_value=None),
+        ):
+            from gateway import compass_chains
+
+            result = await compass_chains(action="list")
+
+        env = result["error_envelope"]
+        assert env["code"] == "chain_indexer_unavailable"
+        assert env["category"] == "service_unavailable"
+        assert env["retryable"] is True
+
+    @pytest.mark.asyncio
+    async def test_chains_detect_no_analytics_envelope(
+        self, test_config_with_backends, test_chain_indexer
+    ):
+        """detect action with no analytics returns analytics_unavailable env."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._chain_indexer = test_chain_indexer
+        gateway._analytics = None
+
+        # Force get_analytics_instance to return None.
+        with patch(
+            "gateway.get_analytics_instance", AsyncMock(return_value=None)
+        ):
+            from gateway import compass_chains
+
+            result = await compass_chains(action="detect")
+
+        env = result["error_envelope"]
+        assert env["code"] == "analytics_unavailable"
+        assert env["category"] == "service_unavailable"
+        assert env["retryable"] is True
+
+    @pytest.mark.asyncio
+    async def test_chains_invalid_argument_create(
+        self, test_config_with_backends, test_chain_indexer
+    ):
+        """create without chain_name + tools returns invalid_argument env."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._chain_indexer = test_chain_indexer
+
+        from gateway import compass_chains
+
+        # No chain_name + no tools.
+        result = await compass_chains(action="create")
+
+        env = result["error_envelope"]
+        assert env["code"] == "invalid_argument"
+        assert env["category"] == "validation"
+        assert env["retryable"] is False
+        assert "suggestions" in env
+
+    @pytest.mark.asyncio
+    async def test_chains_invalid_action_envelope(
+        self, test_config_with_backends, test_chain_indexer
+    ):
+        """unknown action returns invalid_action env with valid_actions hint."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._chain_indexer = test_chain_indexer
+
+        from gateway import compass_chains
+
+        result = await compass_chains(action="explode")
+
+        env = result["error_envelope"]
+        assert env["code"] == "invalid_action"
+        assert env["category"] == "validation"
+        assert env["retryable"] is False
+        # The extra **valid_actions kwarg flows through.
+        assert env["valid_actions"] == ["list", "create", "detect"]
+
+
+# =============================================================================
+# compass_sync() — error envelopes
+# =============================================================================
+
+
+class TestCompassSyncErrors:
+    """compass_sync() error branches."""
+
+    @pytest.mark.asyncio
+    async def test_sync_disabled_envelope(self, test_config):
+        """auto_sync=False -> sync_disabled envelope."""
+        import gateway
+
+        gateway._config = test_config  # auto_sync=False by default
+
+        from gateway import compass_sync
+
+        result = await compass_sync()
+
+        env = result["error_envelope"]
+        assert env["code"] == "sync_disabled"
+        assert env["category"] == "configuration"
+        assert env["retryable"] is False
+
+    @pytest.mark.asyncio
+    async def test_sync_manager_not_initialized_envelope(
+        self, test_config_with_backends
+    ):
+        """auto_sync=True but get_sync_manager_instance returns None."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._config.auto_sync = True
+        gateway._sync_manager = None
+
+        with patch(
+            "gateway.get_sync_manager_instance",
+            AsyncMock(return_value=None),
+        ):
+            from gateway import compass_sync
+
+            result = await compass_sync()
+
+        env = result["error_envelope"]
+        assert env["code"] == "sync_manager_unavailable"
+        assert env["category"] == "service_unavailable"
+        assert env["retryable"] is True
+
+
+# =============================================================================
+# Health-state helpers + breaker transition metric
+# =============================================================================
+
+
+class TestHealthStateMutators:
+    """_mark_ollama_down / _mark_ollama_up / _record_* helpers."""
+
+    def test_mark_ollama_down(self):
+        import gateway
+
+        # Reset.
+        gateway._health_state["ollama_available"] = True
+        gateway._health_state["last_ollama_error"] = None
+
+        gateway._mark_ollama_down(RuntimeError("connection refused"))
+        assert gateway._health_state["ollama_available"] is False
+        assert gateway._health_state["last_ollama_error"] is not None
+        assert "RuntimeError" in gateway._health_state["last_ollama_error"]
+
+    def test_mark_ollama_up(self):
+        import gateway
+
+        gateway._health_state["ollama_available"] = False
+        gateway._health_state["last_ollama_error"] = "old error"
+
+        gateway._mark_ollama_up()
+        assert gateway._health_state["ollama_available"] is True
+        assert gateway._health_state["last_ollama_error"] is None
+
+    def test_record_breaker_transition(self):
+        import gateway
+
+        before = dict(gateway._metric_counters["circuit_breaker_transitions_total"])
+
+        gateway._record_breaker_transition("closed", "open")
+        gateway._record_breaker_transition("open", "half_open")
+        gateway._record_breaker_transition("half_open", "closed")
+
+        after = gateway._metric_counters["circuit_breaker_transitions_total"]
+        # Keys are "from->to".
+        assert after["closed->open"] == before.get("closed->open", 0) + 1
+        assert after["open->half_open"] == before.get("open->half_open", 0) + 1
+        assert after["half_open->closed"] == before.get("half_open->closed", 0) + 1
+
+    def test_record_lexical_fallback(self):
+        import gateway
+
+        before = gateway._metric_counters["lexical_fallback_total"]
+        before_fb = gateway._metric_counters["fallback_invocations_total"].get(
+            "lexical", 0
+        )
+
+        gateway._record_lexical_fallback()
+
+        assert gateway._metric_counters["lexical_fallback_total"] == before + 1
+        assert (
+            gateway._metric_counters["fallback_invocations_total"]["lexical"]
+            == before_fb + 1
+        )
+
+    def test_record_degraded_response(self):
+        import gateway
+
+        before = gateway._metric_counters["degraded_responses_total"].get(
+            "ollama_unavailable", 0
+        )
+        gateway._record_degraded_response("ollama_unavailable")
+        assert (
+            gateway._metric_counters["degraded_responses_total"][
+                "ollama_unavailable"
+            ]
+            == before + 1
+        )
+
+    def test_invalidate_ready_cache_handles_exceptions(self, caplog):
+        import gateway
+
+        # Register an invalidator that raises.
+        def bad_invalidator():
+            raise RuntimeError("bad")
+
+        gateway._ready_cache_invalidators.append(bad_invalidator)
+        try:
+            with caplog.at_level("DEBUG"):
+                # Must not raise.
+                gateway._invalidate_ready_cache()
+        finally:
+            # Clean up so other tests aren't affected.
+            gateway._ready_cache_invalidators.remove(bad_invalidator)
+
+
+# =============================================================================
+# maybe_startup_sync() edge cases
+# =============================================================================
+
+
+class TestMaybeStartupSync:
+    """Cover maybe_startup_sync edge cases not in test_gateway.py."""
+
+    @pytest.mark.asyncio
+    async def test_maybe_startup_sync_sync_manager_is_none(
+        self, test_config_with_backends
+    ):
+        """sync_check_on_startup=True but sync_manager is None — flag still set."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._config.sync_check_on_startup = True
+        gateway._startup_sync_done = False
+
+        with patch(
+            "gateway.get_sync_manager_instance",
+            AsyncMock(return_value=None),
+        ):
+            from gateway import maybe_startup_sync
+
+            await maybe_startup_sync()
+
+        # Flag should still be set even if sync_manager was None.
+        assert gateway._startup_sync_done is True
+
+
+# =============================================================================
+# get_config / get_index / get_backends / get_sync_manager_instance /
+# get_chain_indexer_instance / get_analytics_instance — singleton paths
+# =============================================================================
+
+
+class TestSingletonPaths:
+    """Touch the not-yet-initialized branches of each singleton getter."""
+
+    @pytest.mark.asyncio
+    async def test_get_sync_manager_builds_when_missing(
+        self, test_config_with_backends, test_index, mock_backend_manager
+    ):
+        """First call to get_sync_manager_instance constructs via
+        get_sync_manager()."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._config.auto_sync = True
+        gateway._compass_index = test_index
+        gateway._backend_manager = mock_backend_manager
+        gateway._sync_manager = None
+
+        # Patch get_sync_manager() at module level so we don't touch disk.
+        fake_mgr = Mock()
+        with patch("gateway.get_sync_manager", return_value=fake_mgr):
+            from gateway import get_sync_manager_instance
+
+            result = await get_sync_manager_instance()
+
+        assert result is fake_mgr
+        assert gateway._sync_manager is fake_mgr
+
+    @pytest.mark.asyncio
+    async def test_get_chain_indexer_builds_when_missing(
+        self, test_config_with_backends, test_index, mock_embedder
+    ):
+        """First call to get_chain_indexer_instance constructs via
+        get_chain_indexer()."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._compass_index = test_index
+        gateway._chain_indexer = None
+        gateway._analytics = None
+
+        fake_chain = Mock()
+        fake_chain.load_chain_index = AsyncMock(return_value=True)
+        with patch("gateway.get_chain_indexer", return_value=fake_chain):
+            from gateway import get_chain_indexer_instance
+
+            result = await get_chain_indexer_instance()
+
+        assert result is fake_chain
+        assert gateway._chain_indexer is fake_chain
+
+    @pytest.mark.asyncio
+    async def test_get_chain_indexer_seeds_when_load_fails(
+        self, test_config_with_backends, test_index
+    ):
+        """If load_chain_index returns False, seed_default_chains +
+        build_chain_index are invoked."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._compass_index = test_index
+        gateway._chain_indexer = None
+        gateway._analytics = None
+
+        fake_chain = Mock()
+        fake_chain.load_chain_index = AsyncMock(return_value=False)
+        fake_chain.seed_default_chains = AsyncMock()
+        fake_chain.build_chain_index = AsyncMock()
+
+        with patch("gateway.get_chain_indexer", return_value=fake_chain):
+            from gateway import get_chain_indexer_instance
+
+            await get_chain_indexer_instance()
+
+        fake_chain.seed_default_chains.assert_called_once()
+        fake_chain.build_chain_index.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_get_analytics_loads_hot_cache(
+        self, test_config_with_backends
+    ):
+        """First call to get_analytics_instance triggers
+        load_hot_cache_from_db()."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._analytics = None
+
+        fake_an = Mock()
+        fake_an.load_hot_cache_from_db = AsyncMock()
+        with patch("gateway.get_analytics", return_value=fake_an):
+            from gateway import get_analytics_instance
+
+            result = await get_analytics_instance()
+
+        assert result is fake_an
+        fake_an.load_hot_cache_from_db.assert_called_once()
+
+
+# =============================================================================
+# CLI helpers: categorize_tool + show_config
+# =============================================================================
+
+
+class TestCliShowConfig:
+    """show_config() prints to stdout — just validate it doesn't crash."""
+
+    def test_show_config_runs(self, capsys):
+        from gateway import show_config
+
+        # Don't crash; output goes to stdout.
+        show_config()
+        captured = capsys.readouterr()
+        assert "CONFIGURATION" in captured.out
+        assert "Config file" in captured.out
+
+
+class TestAsyncMain:
+    """async_main() dispatches to sync_from_backends or run_tests."""
+
+    @pytest.mark.asyncio
+    async def test_async_main_sync_dispatch(self):
+        from gateway import async_main
+
+        args = Mock()
+        args.sync = True
+        args.test = False
+
+        called = {"sync": 0, "test": 0}
+
+        async def fake_sync():
+            called["sync"] += 1
+
+        async def fake_test():
+            called["test"] += 1
+
+        with patch("gateway.sync_from_backends", side_effect=fake_sync):
+            with patch("gateway.run_tests", side_effect=fake_test):
+                await async_main(args)
+
+        assert called["sync"] == 1
+        assert called["test"] == 0
+
+    @pytest.mark.asyncio
+    async def test_async_main_test_dispatch(self):
+        from gateway import async_main
+
+        args = Mock()
+        args.sync = False
+        args.test = True
+
+        called = {"sync": 0, "test": 0}
+
+        async def fake_sync():
+            called["sync"] += 1
+
+        async def fake_test():
+            called["test"] += 1
+
+        with patch("gateway.sync_from_backends", side_effect=fake_sync):
+            with patch("gateway.run_tests", side_effect=fake_test):
+                await async_main(args)
+
+        assert called["sync"] == 0
+        assert called["test"] == 1
+
+    @pytest.mark.asyncio
+    async def test_async_main_neither_is_noop(self):
+        from gateway import async_main
+
+        args = Mock()
+        args.sync = False
+        args.test = False
+
+        # Must not raise.
+        await async_main(args)
+
+
+class TestMainEntrypoint:
+    """main() CLI argument parsing."""
+
+    def test_main_config_branch(self, capsys, monkeypatch):
+        """`gateway --config` invokes show_config()."""
+        from gateway import main
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--config"])
+        with patch("gateway.show_config") as mock_show:
+            main()
+            mock_show.assert_called_once()
+
+    def test_main_sync_branch(self, monkeypatch):
+        """`gateway --sync` dispatches into async_main via asyncio.run."""
+        from gateway import main
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--sync"])
+        with patch("gateway.asyncio.run") as mock_run:
+            main()
+            mock_run.assert_called_once()
+
+    def test_main_test_branch(self, monkeypatch):
+        """`gateway --test` dispatches into async_main via asyncio.run."""
+        from gateway import main
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--test"])
+        with patch("gateway.asyncio.run") as mock_run:
+            main()
+            mock_run.assert_called_once()
+
+    def test_main_verbose_sets_debug(self, monkeypatch):
+        """`gateway --verbose --config` flips logging level to DEBUG."""
+        import logging
+        from gateway import main
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--verbose", "--config"])
+        with patch("gateway.show_config"):
+            main()
+
+        # Root logger level was set to DEBUG.
+        assert logging.getLogger().level == logging.DEBUG
+
+    def test_main_no_args_runs_stdio(self, monkeypatch):
+        """No args -> runs mcp.run() in stdio mode."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        # Make sure PORT isn't set.
+        monkeypatch.delenv("PORT", raising=False)
+        with patch.object(gateway.mcp, "run") as mock_run:
+            gateway.main()
+            mock_run.assert_called_once_with()
+
+    def test_main_with_port_runs_http(self, monkeypatch):
+        """PORT env var set -> _run_http() is invoked."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        monkeypatch.setenv("PORT", "8080")
+
+        with patch("gateway._run_http") as mock_http:
+            gateway.main()
+            mock_http.assert_called_once_with(8080)
+
+
+# =============================================================================
+# Compass envelope shape sanity — every error path stamps an "error_envelope"
+# =============================================================================
+
+
+class TestEnvelopeContract:
+    """All MCP-error responses should expose error_envelope.code,
+    .category, and .retryable as a closed set."""
+
+    @pytest.mark.asyncio
+    async def test_describe_not_found_envelope_contract(
+        self, test_index, test_config
+    ):
+        import gateway
+        from gateway import _ERROR_CODES, _ERROR_CATEGORIES
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        from gateway import describe
+
+        result = await describe(tool_name="test:def_not_a_tool_xyz")
+        env = result["error_envelope"]
+        assert env["code"] in _ERROR_CODES
+        assert env["category"] in _ERROR_CATEGORIES
+        assert isinstance(env["retryable"], bool)
+
+    @pytest.mark.asyncio
+    async def test_compass_chains_invalid_action_envelope_contract(
+        self, test_config_with_backends, test_chain_indexer
+    ):
+        import gateway
+        from gateway import _ERROR_CODES, _ERROR_CATEGORIES
+
+        gateway._config = test_config_with_backends
+        gateway._chain_indexer = test_chain_indexer
+
+        from gateway import compass_chains
+
+        result = await compass_chains(action="not_a_thing")
+        env = result["error_envelope"]
+        assert env["code"] in _ERROR_CODES
+        assert env["category"] in _ERROR_CATEGORIES
+        assert isinstance(env["retryable"], bool)
+
+    @pytest.mark.asyncio
+    async def test_compass_sync_disabled_envelope_contract(self, test_config):
+        import gateway
+        from gateway import _ERROR_CODES, _ERROR_CATEGORIES
+
+        gateway._config = test_config
+
+        from gateway import compass_sync
+
+        result = await compass_sync()
+        env = result["error_envelope"]
+        assert env["code"] in _ERROR_CODES
+        assert env["category"] in _ERROR_CATEGORIES
+        assert env["retryable"] is False

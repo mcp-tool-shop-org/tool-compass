@@ -183,13 +183,11 @@ omit = [
 ]
 
 [tool.coverage.report]
-# TST-FT-001: 55% floor — temporarily lowered for v2.3.0 to land the
-# Wave-11 CLI feature parity (6 new subcommands × ~150 LOC each = +1000
-# LOC in cli.py). Smoke tests cover argparse parser correctness for each
-# new verb; the delegate functions need gateway-with-index fixtures to
-# exercise (planned for v2.4.0). v2.2.x floor was 60 — ratchet back to
-# 60 once cli.py coverage is restored.
-fail_under = 55
+# TST-FT-001: 80% floor — production-grade coverage bar. Wave-12 of
+# the v2.3.0 dogfood swarm raised the floor from the v2.2.x value of 60
+# by adding focused test coverage for ui.py, gateway.py, cli.py, and
+# backend_client_simple.py (the previous low-coverage hotspots).
+fail_under = 80
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

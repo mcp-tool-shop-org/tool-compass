@@ -4,7 +4,7 @@ verify: lint test build
 	@echo "✓ All checks passed"
 
 test:
-	pytest --cov=. --cov-report=term-missing --cov-fail-under=60 -m "not integration"
+	pytest --cov=. --cov-report=term-missing --cov-fail-under=80 -m "not integration"
 
 lint:
 	ruff check .
