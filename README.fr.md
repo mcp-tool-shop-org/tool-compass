@@ -20,7 +20,7 @@
 
 [Installation](#quick-start) • [Utilisation](#usage) • [Docker](#option-2-docker) • [Manuel](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [Performances](#performance) • [Contribution](#contributing)
 
-</div
+</div>
 
 ---
 
@@ -51,7 +51,25 @@ Tool Compass utilise la **recherche sémantique** pour trouver les outils pertin
 
 📖 **Documentation complète :** Consultez le [Manuel de Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) pour l'installation, la configuration et une analyse approfondie de l'architecture.
 
-### Option 1 : Installation locale
+### Option 1 : npm (sans prérequis, pas d'installation de Python)
+
+```bash
+npx @mcptoolshop/tool-compass --help
+npx @mcptoolshop/tool-compass serve     # MCP gateway
+npx @mcptoolshop/tool-compass ui        # Gradio UI
+npx @mcptoolshop/tool-compass doctor    # Diagnose setup
+```
+
+Télécharge un fichier binaire de la plateforme vérifié lors de la première exécution (vérifié par SHA256 par rapport à la version GitHub). Mis en cache localement - les exécutions suivantes démarrent instantanément. Voir [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) sur npm.
+
+### Option 2 : PyPI
+
+```bash
+pip install tool-compass
+tool-compass --help
+```
+
+### Option 3 : Clonage local
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -69,16 +87,16 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Build the search index
-python gateway.py --sync
+tool-compass sync
 
 # Run the MCP server
-python gateway.py
+tool-compass serve
 
 # Or launch the Gradio UI
-python ui.py
+tool-compass ui
 ```
 
-### Option 2 : Docker
+### Option 4 : Docker
 
 ```bash
 # Clone the repo
@@ -100,13 +118,13 @@ docker-compose --profile with-ollama up
 
 ## Fonctionnalités
 
-- **Recherche sémantique** : Trouvez les outils en décrivant ce que vous voulez faire.
-- **Divulgation progressive** : `compass()` → `describe()` → `execute()`
-- **Cache dynamique** : Les outils fréquemment utilisés sont préchargés.
-- **Détection des chaînes** : Découvre automatiquement les flux de travail d'outils courants.
-- **Analytique** : Suivez les modèles d'utilisation et les performances des outils.
-- **Multiplateforme** : Windows, macOS, Linux
-- **Prêt pour Docker** : Déploiement en une seule commande.
+- **Recherche sémantique :** Trouvez les outils en décrivant ce que vous voulez faire.
+- **Divulgation progressive :** `compass()` → `describe()` → `execute()`
+- **Cache rapide :** Les outils fréquemment utilisés sont préchargés.
+- **Détection des chaînes :** Découvre automatiquement les flux de travail d'outils courants.
+- **Analytique :** Suivez les modèles d'utilisation et les performances des outils.
+- **Multiplateforme :** Windows, macOS, Linux
+- **Prêt pour Docker :** Déploiement en une seule commande.
 
 ## Architecture
 
@@ -167,7 +185,7 @@ Retourne :
 | `describe(tool_name)` | Obtient le schéma complet d'un outil |
 | `execute(tool_name, args)` | Exécute un outil sur son backend |
 | `compass_categories()` | Liste les catégories et les serveurs |
-| `compass_status()` | État du système et configuration |
+| `compass_status()` | État et configuration du système |
 | `compass_analytics(timeframe)` | Statistiques d'utilisation |
 | `compass_chains(action)` | Gère les flux de travail des outils |
 | `compass_sync(force)` | Reconstruit l'index à partir des backends |
@@ -224,14 +242,14 @@ Le champ `hint` dans les résultats de `compass` guide ce flux, en suggérant qu
 
 Consultez le fichier [`.env.example`](.env.example) pour toutes les options.
 
-## Performances
+## Performance
 
 | Métrique | Valeur |
 |--------|-------|
 | Temps de construction de l'index | ~5 secondes pour 44 outils |
-| Latence de la requête | ~15 ms (incluant l'intégration) |
-| Économies de tokens | ~95 % (38K → 2K) |
-| Précision à 3 | ~95 % (outil correct parmi les 3 premiers) |
+| Latence des requêtes | ~15 ms (y compris l'intégration) |
+| Économies de jetons | ~95 % (38K → 2K) |
+| Précision@3 | ~95 % (outil correct parmi les 3 premiers) |
 
 ## Tests
 
@@ -273,7 +291,7 @@ curl http://localhost:11434/api/tags
 ollama pull nomic-embed-text
 ```
 
-### Index non trouvé
+### Index introuvable
 
 ```bash
 python gateway.py --sync
@@ -285,36 +303,44 @@ Fait partie de la **suite Compass** pour le développement assisté par l'IA :
 
 - [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Recherche sémantique de fichiers
 - [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Composants Gradio intégrés vectoriellement
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajustement fin de LLM sans interface graphique
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajustement fin de LLM sans serveur
 - [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sans la complexité
 
 ## Contributions
 
-Nous accueillons les contributions ! Consultez [CONTRIBUTING.md](CONTRIBUTING.md) pour connaître les directives.
+Nous encourageons les contributions ! Consultez [CONTRIBUTING.md](CONTRIBUTING.md) pour connaître les directives.
 
 ## Sécurité et portée des données
 
-Tool Compass est un outil de développement **fonctionnant localement**. Consultez [SECURITY.md](SECURITY.md) pour connaître la politique complète.
+Tool Compass est un outil de développement **centré sur les données locales**. Consultez [SECURITY.md](SECURITY.md) pour connaître la politique complète.
 
-- **Données traitées :** descriptions des outils indexées dans une base de vecteurs HNSW locale, requêtes de recherche enregistrées dans une base de données SQLite locale (`compass_analytics.db`), intégrations générées via Ollama local.
-- **Données NON traitées :** aucun code utilisateur, aucun contenu de fichier, aucune identité. Les arguments d'appel des outils sont hachés et ne sont pas stockés en texte brut.
+- **Données traitées :** descriptions d'outils indexées dans une base de données vectorielle HNSW locale, requêtes de recherche enregistrées dans une base de données SQLite locale (`compass_analytics.db`), intégrations générées via Ollama local.
+- **Données NON traitées :** aucun code utilisateur, aucun contenu de fichier, aucune information d'identification. Les arguments d'appel des outils sont hachés et ne sont pas stockés en texte clair.
 - **Réseau :** se connecte à Ollama local pour les intégrations. L'interface utilisateur Gradio facultative est liée à localhost. Aucune télémétrie externe.
 - **Aucune télémétrie :** ne collecte rien à l'extérieur. Les analyses sont locales uniquement.
 
 ## Tableau de bord
 
+Les scores par catégorie sont régénérés après l'analyse via
+`bash scripts/regenerate-scorecard.sh` (qui encapsule `npx
+@mcptoolshop/shipcheck audit`). Consultez [SCORECARD.md](SCORECARD.md) pour
+l'aperçu actuel et officiel — le tableau ci-dessous le reflète et n'est
+pas rédigé manuellement. Les sections soigneusement sélectionnées (Lacunes connues,
+Historique de correction) se trouvent en dehors des marqueurs `<!-- SHIPCHECK-AUTO-START/END -->`
+dans SCORECARD.md et survivent aux régénérations.
+
 | Catégorie | Score | Notes |
 |----------|-------|-------|
-| A. Sécurité | 10/10 | SECURITY.md, uniquement local, aucune télémétrie, SQL paramétré |
-| B. Gestion des erreurs | 10/10 | Résultats structurés, repli élégant vers Ollama |
-| C. Documentation pour les utilisateurs | 10/10 | README, CHANGELOG, CONTRIBUTING, documentation de l'API |
-| D. Qualité du code | 10/10 | CI (lint + tests + couverture + pip-audit + Docker), script de vérification |
-| E. Identité | 10/10 | Logo, traductions, page d'accueil |
-| **Total** | **50/50** | |
+| A. Sécurité | À déterminer | Actions épinglées avec un hachage ; image de base épinglée avec un hachage ; provenance SLSA + SBOM sur PyPI + GHCR ; analyse des secrets avant la validation. |
+| B. Gestion des erreurs | À déterminer | Résultats structurés, dégradation en douceur, codes de sortie |
+| C. Documentation pour les opérateurs | À déterminer | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Hygiène de déploiement | À déterminer | CI consolidé ; délai d'attente maximal + durée de conservation pour chaque tâche ; configuration pytest dans pyproject.toml |
+| E. Identité (douce) | À déterminer | Logo, page d'accueil, métadonnées GitHub ; mainteneurs explicites dans pyproject.toml |
+| **Total** | **TBD** | Régénérer via `make scorecard` |
 
 ## Licence
 
-[MIT](LICENSE) - voir le fichier LICENSE pour plus de détails.
+[MIT](LICENSE) - consultez le fichier LICENSE pour plus de détails.
 
 ---
 

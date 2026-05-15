@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-05-15
+
+Dogfood swarm v2 release — comprehensive Stage A bug/security pass +
+Stage B proactive hardening + Stage C humanization + Stage D visual/CLI
+polish + Wave-10 feature pass. ~250 findings addressed across waves 1-11
+of swarm-1778813065-e2dc. New: `@mcptoolshop/tool-compass` npm wrapper
+(zero-prerequisite `npx` install), `release-binaries.yml` workflow
+(PyInstaller binaries for linux-x64/darwin-arm64/win-x64 with SHA256
+checksums), 6 new CLI subcommands for full MCP-surface parity, RFC 9457
+error envelope with `retryable` discriminator and `nearest_tools[]`
+suggestions, full OTel `gen_ai.*` metrics surface, Hystrix-style circuit
+breaker observability, Rich-powered CLI with `--json` flag and color
+discipline, golden-set Recall@k regression benchmark. Tests 455 → 498
+(+43). No breaking changes; v2.2.x API callers continue to work
+(legacy `error: <str>` shape preserved alongside new envelope).
+
+### Migrating from v2.2.x
+- Error envelope: tool responses now include a structured `error_envelope`
+  object (RFC 9457 + Stripe-style 3-level taxonomy) ALONGSIDE the legacy
+  `error: <str>` field. New callers should branch on `error_envelope.code`
+  rather than parsing the prose string; legacy callers continue to work.
+- `degraded: true` field: compass-family responses now include this flag
+  when serving lexical-fallback results (Ollama unavailable). Callers can
+  surface this to end users or downgrade confidence.
+- `/metrics` additions: 5 new Prometheus series (circuit_breaker_transitions,
+  fallback_invocations, hnsw_search_duration histogram, embedder_inflight,
+  queue_wait_seconds). Existing series unchanged.
+- CLI: 6 new subcommands added (`ui`, `status`, `categories`, `audit`,
+  `analytics`, `chains`). `tool-compass serve --http <port>` now actually
+  sets the port (was previously parsed but ignored).
+
 Wave-11 CLI feature parity + test hardening on top of the Stage B+C
 release-hygiene work. Resolves audit findings flagged in Wave-10. No
 breaking changes — the new subcommands are additive, and the existing

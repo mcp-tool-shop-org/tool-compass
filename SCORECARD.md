@@ -8,23 +8,15 @@
 **Type tags:** [pypi] [mcp] [cli]
 
 <!-- SHIPCHECK-AUTO-START -->
-## Current Assessment
 
-The auto-generated block below is rewritten by
-`bash scripts/regenerate-scorecard.sh` from `npx @mcptoolshop/shipcheck audit
---format markdown`. Per-category scores are **regenerated post-swarm** —
-the placeholders here reflect the most recent merge of the wave-7 hardening
-pass (CT-B-001..CT-B-020); a follow-up `make scorecard` will replace them
-with shipcheck's numeric output once the markdown emitter stabilizes.
+[1mshipcheck audit[0m
 
-| Category | Score | Notes |
-|----------|-------|-------|
-| A. Security | TBD — regenerate post-swarm via `make scorecard` | SHA-pinned actions (CT-B-001/002); digest-pinned base image (CT-B-003); Dependabot pip+github-actions+docker w/ daily security overlay (CT-B-005/006); SLSA provenance + SBOM on PyPI + GHCR (CT-B-009); secrets scan via pre-commit gitleaks (CT-B-018). pip-audit warn-only pending CVE baseline. |
-| B. Error Handling | TBD — regenerate post-swarm via `make scorecard` | Structured results, graceful degradation, exit codes; circuit breaker on Ollama; loud-fail on PyPI propagation timeout (CT-B-014). |
-| C. Operator Docs | TBD — regenerate post-swarm via `make scorecard` | README, CHANGELOG (Keep a Changelog), LICENSE, SECURITY, CODE_OF_CONDUCT, CONTRIBUTING (with `pre-commit install` quick-start, CT-B-018), Makefile `verify`, `make verify-metrics`, `make scorecard`. |
-| D. Shipping Hygiene | TBD — regenerate post-swarm via `make scorecard` | CI consolidated to 2 workflows; timeout-minutes on every job (CT-B-011); retention-days on every upload-artifact (CT-B-012); actions/configure-pages wired (CT-B-016); pytest config consolidated into pyproject.toml. |
-| E. Identity (soft) | TBD — regenerate post-swarm via `make scorecard` | Logo, landing page, GitHub metadata, OpenContainers labels via docker/metadata-action (no hand-sync, CT-B-015), maintainers field in pyproject.toml (CT-B-019); translations re-run on TranslateGemma 12B before publish (CT-B-013). |
-| **Overall** | TBD | Regenerate after swarm merges via `bash scripts/regenerate-scorecard.sh`. |
+[32mChecked:[0m   30
+[33mUnchecked:[0m 0
+[2mSkipped:[0m   7
+[1mPass rate:[0m 100%
+
+[32m[1mAll hard gates pass. Ship it.[0m
 
 <!-- SHIPCHECK-AUTO-END -->
 

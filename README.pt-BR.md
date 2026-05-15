@@ -20,7 +20,7 @@
 
 [Instalação](#quick-start) • [Uso](#usage) • [Docker](#option-2-docker) • [Manual](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [Desempenho](#performance) • [Contribuições](#contributing)
 
-</div
+</div>
 
 ---
 
@@ -49,9 +49,27 @@ O Tool Compass usa **busca semântica** para encontrar ferramentas relevantes a 
 
 ## Início Rápido
 
-📖 **Documentação completa:** Consulte o [Manual do Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) para obter informações sobre instalação, configuração e detalhes da arquitetura.
+📖 **Documentação completa:** Consulte o [Manual do Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) para instalação, configuração e informações detalhadas sobre a arquitetura.
 
-### Opção 1: Instalação Local
+### Opção 1: npm (sem pré-requisitos, sem instalação do Python)
+
+```bash
+npx @mcptoolshop/tool-compass --help
+npx @mcptoolshop/tool-compass serve     # MCP gateway
+npx @mcptoolshop/tool-compass ui        # Gradio UI
+npx @mcptoolshop/tool-compass doctor    # Diagnose setup
+```
+
+Baixa um binário da plataforma verificado na primeira execução (verificado com o hash SHA256 em relação à versão do GitHub). Armazenado localmente — as execuções subsequentes são instantâneas. Veja o [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) no npm.
+
+### Opção 2: PyPI
+
+```bash
+pip install tool-compass
+tool-compass --help
+```
+
+### Opção 3: Clonagem local
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -69,16 +87,16 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Build the search index
-python gateway.py --sync
+tool-compass sync
 
 # Run the MCP server
-python gateway.py
+tool-compass serve
 
 # Or launch the Gradio UI
-python ui.py
+tool-compass ui
 ```
 
-### Opção 2: Docker
+### Opção 4: Docker
 
 ```bash
 # Clone the repo
@@ -95,15 +113,15 @@ docker-compose --profile with-ollama up
 ```
 
 > A imagem do GHCR (`ghcr.io/mcp-tool-shop-org/tool-compass`) suporta
-> `linux/amd64` e `linux/arm64`, portanto, a mesma versão funciona em servidores x86_64
+> `linux/amd64` e `linux/arm64`, então a mesma tag funciona em servidores x86_64
 > e em estações de trabalho Apple Silicon / ARM.
 
-## Características
+## Recursos
 
 - **Busca Semântica** - Encontre ferramentas descrevendo o que você quer fazer
 - **Divulgação Progressiva** - `compass()` → `describe()` → `execute()`
-- **Cache Inteligente** - Ferramentas frequentemente usadas são pré-carregadas
-- **Detecção de Cadeias** - Descobre automaticamente fluxos de trabalho comuns de ferramentas
+- **Cache Rápido** - Ferramentas frequentemente usadas são pré-carregadas
+- **Detecção de Cadeia** - Descobre automaticamente fluxos de trabalho comuns de ferramentas
 - **Análise** - Acompanhe padrões de uso e desempenho das ferramentas
 - **Compatível com Diversas Plataformas** - Windows, macOS, Linux
 - **Pronto para Docker** - Implantação com um único comando
@@ -210,7 +228,7 @@ O campo `hint` nos resultados do `compass` guia esse fluxo, sugerindo quando usa
 | Variável | Descrição | Padrão |
 |----------|-------------|---------|
 | `TOOL_COMPASS_BASE_PATH` | Diretório do projeto | Detectado automaticamente |
-| `TOOL_COMPASS_PYTHON` | Executável Python | Detectado automaticamente |
+| `TOOL_COMPASS_PYTHON` | Executável do Python | Detectado automaticamente |
 | `TOOL_COMPASS_CONFIG` | Caminho do arquivo de configuração | `~/.config/tool-compass/compass_config.json` |
 | `TOOL_COMPASS_DATA_DIR` | Diretório de dados | Específico da plataforma (veja abaixo) |
 | `OLLAMA_URL` | URL do servidor Ollama | `http://localhost:11434` |
@@ -229,9 +247,9 @@ Consulte o arquivo [`.env.example`](.env.example) para todas as opções.
 | Métrica | Valor |
 |--------|-------|
 | Tempo de construção do índice | ~5s para 44 ferramentas |
-| Latência da consulta | ~15ms (incluindo o processo de incorporação) |
+| Latência da consulta | ~15ms (incluindo incorporação) |
 | Economia de tokens | ~95% (38K → 2K) |
-| Precisão@3 | ~95% (ferramenta correta entre as 3 melhores) |
+| Precisão@3 | ~95% (ferramenta correta no top 3) |
 
 ## Testes
 
@@ -255,9 +273,9 @@ Se os logs do Claude Desktop mostrarem erros de análise JSON:
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**Causa**: As instruções `print()` corrompem o protocolo JSON-RPC.
+**Causa:** As instruções `print()` corrompem o protocolo JSON-RPC.
 
-**Solução**: Use logging ou `file=sys.stderr`:
+**Solução:** Use logging ou `file=sys.stderr`:
 ```python
 import sys
 print("Debug message", file=sys.stderr)
@@ -281,11 +299,11 @@ python gateway.py --sync
 
 ## Projetos relacionados
 
-Parte do **Pacote Compass** para desenvolvimento com inteligência artificial:
+Parte da **Suite Compass** para desenvolvimento com inteligência artificial:
 
 - [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Busca semântica de arquivos
 - [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Componentes Gradio com incorporação vetorial
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de LLM sem interface gráfica
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de LLM sem servidor
 - [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sem a complexidade
 
 ## Contribuições
@@ -294,23 +312,29 @@ Aceitamos contribuições! Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para obte
 
 ## Segurança e Escopo de Dados
 
-Tool Compass é uma ferramenta de desenvolvimento que opera principalmente **localmente**. Consulte [SECURITY.md](SECURITY.md) para obter a política completa.
+Tool Compass é uma ferramenta de desenvolvimento **local-first**. Consulte [SECURITY.md](SECURITY.md) para obter a política completa.
 
-- **Dados acessados:** Descrições das ferramentas indexadas em um banco de dados vetorial HNSW local, consultas de pesquisa registradas em um banco de dados SQLite local (`compass_analytics.db`), incorporações geradas via Ollama local.
-- **Dados NÃO acessados:** Nenhum código do usuário, nenhum conteúdo de arquivo, nenhuma credencial. Os argumentos das chamadas de ferramentas são criptografados, não armazenados em texto simples.
-- **Rede:** Conecta-se ao Ollama local para gerar incorporações. A interface Gradio opcional é vinculada ao localhost. Não há telemetria externa.
+- **Dados acessados:** Descrições de ferramentas indexadas em um banco de dados vetorial HNSW local, consultas de pesquisa registradas em um arquivo SQLite local (`compass_analytics.db`), incorporações geradas via Ollama local.
+- **Dados NÃO acessados:** nenhum código do usuário, nenhum conteúdo de arquivo, nenhuma credencial. Os argumentos de chamada da ferramenta são armazenados em hash, não em texto simples.
+- **Rede:** Conecta-se ao Ollama local para incorporações. A interface do usuário Gradio opcional é vinculada ao localhost. Sem telemetria externa.
 - **Sem telemetria:** Não coleta nada externamente. A análise é apenas local.
 
-## Avaliação
+## Scorecard
+
+As pontuações por categoria são regeneradas após a análise via
+`bash scripts/regenerate-scorecard.sh` (que envolve `npx
+@mcptoolshop/shipcheck audit`). Consulte [SCORECARD.md](SCORECARD.md) para obter a
+análise detalhada atual — a tabela abaixo a replica e não é escrita manualmente. As seções cuidadosamente selecionadas (Lacunas Conhecidas,
+Histórico de Correção) estão localizadas fora dos marcadores `<!-- SHIPCHECK-AUTO-START/END -->` em SCORECARD.md e sobrevivem às regenerações.
 
 | Categoria | Pontuação | Observações |
 |----------|-------|-------|
-| A. Segurança | 10/10 | SECURITY.md, apenas local, sem telemetria, SQL parametrizado |
-| B. Tratamento de Erros | 10/10 | Resultados estruturados, fallback gracioso para Ollama |
-| C. Documentação para Usuários | 10/10 | README, CHANGELOG, CONTRIBUTING, documentação da API |
-| D. Qualidade do Código | 10/10 | CI (lint + testes + cobertura + pip-audit + Docker), script de verificação |
-| E. Identidade | 10/10 | Logo, traduções, página inicial |
-| **Total** | **50/50** | |
+| A. Segurança | A ser definido | Ações com hash fixo; imagem base com hash fixo; rastreabilidade SLSA + SBOM no PyPI + GHCR; verificação de segredos no pre-commit |
+| B. Tratamento de Erros | A ser definido | Resultados estruturados, degradação graciosa, códigos de saída |
+| C. Documentação para Operadores | A ser definido | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Higiene de Distribuição | A ser definido | CI consolidado; tempo limite em minutos + retenção em dias para cada tarefa; configuração pytest em pyproject.toml |
+| E. Identidade (suave) | A ser definido | Logo, página inicial, metadados do GitHub; mantenedores explícitos em pyproject.toml |
+| **Total** | **TBD** | Regenerar via `make scorecard` |
 
 ## Licença
 
