@@ -12,16 +12,6 @@ ci-tooling domain, wave-7 of swarm-1778813065-e2dc). No public API or
 runtime behavior changes.
 
 ### Added
-- **`@mcptoolshop/tool-compass` npm wrapper** for zero-prerequisite
-  `npx` install. Downloads SHA256-verified platform binaries from the
-  GitHub Release via `@mcptoolshop/npm-launcher`. Wrapper lives under
-  `npm/` in the repo; tracks the source release version 1:1 via the
-  `publish-npm` job in `release-binaries.yml`. Ships with the source
-  README + 7 translations bundled at publish time.
-- **`release-binaries.yml` workflow** — on release, PyInstaller builds
-  `tool-compass-<version>-{linux-x64,darwin-arm64,win-x64}` single-file
-  binaries with SHA256 checksums (`checksums-<version>.txt`), attaches
-  to the GitHub Release, then publishes the npm wrapper with `--provenance`.
 - SLSA build provenance attestations on PyPI publish via
   `attestations: true` on `pypa/gh-action-pypi-publish` (CT-B-009).
 - SLSA `provenance: mode=max` plus SBOM attestation on the multi-arch

@@ -51,7 +51,25 @@ Tool Compass uses **semantic search** to find relevant tools from a natural lang
 
 📖 **Full documentation:** See the [Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) for installation, configuration, and architecture deep-dives.
 
-### Option 1: Local Installation
+### Option 1: npm (zero-prerequisite, no Python install)
+
+```bash
+npx @mcptoolshop/tool-compass --help
+npx @mcptoolshop/tool-compass serve     # MCP gateway
+npx @mcptoolshop/tool-compass ui        # Gradio UI
+npx @mcptoolshop/tool-compass doctor    # Diagnose setup
+```
+
+Downloads a verified platform binary on first run (SHA256-checked against the GitHub Release). Cached locally — subsequent invocations launch instantly. See [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) on npm.
+
+### Option 2: PyPI
+
+```bash
+pip install tool-compass
+tool-compass --help
+```
+
+### Option 3: Local clone
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -69,16 +87,16 @@ source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
 # Build the search index
-python gateway.py --sync
+tool-compass sync
 
 # Run the MCP server
-python gateway.py
+tool-compass serve
 
 # Or launch the Gradio UI
-python ui.py
+tool-compass ui
 ```
 
-### Option 2: Docker
+### Option 4: Docker
 
 ```bash
 # Clone the repo

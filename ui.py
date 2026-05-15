@@ -316,16 +316,20 @@ def format_error(error: Exception, context: str = "") -> str:
     # MCC-B-008: error banners get role="alert" so screen readers announce
     # them immediately; warning emoji is aria-hidden (text twin "Warning:"
     # carries the semantic — Léonie Watson 2023). FE-B-012: contrast-fixed
-    # body greys (#d4d4d4 / #b0b0b0) replace #ccc / #888 which fail 4.5:1.
+    # body greys (#e8e8f0 / #a0a0b0) replace #ccc / #888 which fail 4.5:1.
+    # SD-V-001: body text bumped to #e8e8f0 (APCA Lc target 75-90 on dark);
+    # mono font stack used for the inline `ollama serve` / `tool-compass
+    # sync` commands so the eye picks them up as runnable code.
     warn_icon = '<span aria-hidden="true">⚠️</span>'
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
     if "Connection" in error_type or "refused" in str(error).lower():
         return f"""
         <div role="alert" style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
             <div style="color: #ef5350; font-weight: bold;">{warn_icon} Service unavailable</div>
-            <p style="color: #d4d4d4; margin: 8px 0;">
+            <p style="color: #e8e8f0; margin: 8px 0; line-height: 1.5; max-width: 75ch;">
                 Cannot connect to Ollama embeddings service. Start it with the command below, then retry.
             </p>
-            <code style="color: #b0b0b0; font-size: 0.9em;">ollama serve</code>
+            <code style="color: #d4d4dc; font-size: 0.9em; font-family: {mono};">ollama serve</code>
         </div>
         """
     elif "index" in str(error).lower() or "not loaded" in str(error).lower():
@@ -334,20 +338,20 @@ def format_error(error: Exception, context: str = "") -> str:
         return f"""
         <div role="alert" style="border: 1px solid #ffb74d; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a2a1a;">
             <div style="color: #ffb74d; font-weight: bold;">{warn_icon} Index not ready</div>
-            <p style="color: #d4d4d4; margin: 8px 0;">
+            <p style="color: #e8e8f0; margin: 8px 0; line-height: 1.5; max-width: 75ch;">
                 The tool index has not been built yet. Run the sync command below to build it.
             </p>
-            <code style="color: #b0b0b0; font-size: 0.9em;">tool-compass sync</code>
+            <code style="color: #d4d4dc; font-size: 0.9em; font-family: {mono};">tool-compass sync</code>
         </div>
         """
     else:
         return f"""
         <div role="alert" style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
             <div style="color: #ef5350; font-weight: bold;">{warn_icon} Something went wrong</div>
-            <p style="color: #d4d4d4; margin: 8px 0;">{safe_context or "An error occurred while running this action."}</p>
-            <details style="color: #b0b0b0; font-size: 0.9em;">
+            <p style="color: #e8e8f0; margin: 8px 0; line-height: 1.5; max-width: 75ch;">{safe_context or "An error occurred while running this action."}</p>
+            <details style="color: #a0a0b0; font-size: 0.9em;">
                 <summary>Technical details</summary>
-                <code>{safe_error_type}: {safe_error_str}</code>
+                <code style="font-family: {mono};">{safe_error_type}: {safe_error_str}</code>
             </details>
         </div>
         """
@@ -387,10 +391,10 @@ def search_tools(
     if not query.strip():
         return (
             """
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔍</div>
-            <p>Enter a search query above to find tools.</p>
-            <p style="font-size: 0.9em;">Try: "generate an image", "read a file", "search documents"</p>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔍</div>
+            <p style="color: #e8e8f0; line-height: 1.5;">Enter a search query above to find tools.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Try: "generate an image", "read a file", "search documents"</p>
         </div>
         """,
             "{}",
@@ -478,7 +482,8 @@ def search_tools(
         # banner adjacent to the results region, NOT in chrome.
         html_parts.append(_inline_fallback_banner())
     # FE-B-004: result-count heading is a focusable h2 with aria-live so SR
-    # users hear the count change after async load. FE-B-012 contrast fix.
+    # users hear the count change after async load. SD-V-001 contrast: body
+    # grey lifted to #a0a0b0 (APCA Lc ~70 on #1a1a2e).
     safe_q = html.escape(truncate_text(query, 60), quote=True)
     count_text = (
         f"Found {len(results)} tool" + ("s" if len(results) != 1 else "")
@@ -487,7 +492,7 @@ def search_tools(
     html_parts.append(
         f'<h2 id="search-results-count" tabindex="-1" '
         f'aria-live="polite" aria-atomic="true" '
-        f'style="color: #b0b0b0; font-size: 1em; font-weight: normal; '
+        f'style="color: #a0a0b0; font-size: 1em; font-weight: normal; '
         f'margin: 0 0 12px 0;">{count_text}</h2>'
     )
     # FE-B-006: announce the results container as a listbox so SR users know
@@ -539,16 +544,21 @@ def search_tools(
         # FE-B-005 + FE-B-006: each result is a listbox option with a stable
         # id so future combobox wiring can set aria-activedescendant. The
         # emoji + text-twin pattern (server name spoken, 📦 hidden from SR)
-        # — Léonie Watson 2023 recommendation. FE-B-012: contrast-corrected
-        # body greys (#b0b0b0 not #888 / #ccc).
+        # — Léonie Watson 2023 recommendation.
+        # SD-V-002: tonal surface ladder — card base #22223e (raised one
+        # step from #1a1a2e page background) so cards lift in dark mode
+        # without box-shadow. SD-V-004: tool name uses the JetBrains-Mono
+        # fallback stack so identifiers like `comfy:comfy_generate` read as
+        # runnable code. Hierarchy (name → description → metadata) works
+        # in grayscale alone via weight + size + colour-step.
         html_parts.append(f"""
-        <li role="option" id="search-result-{idx_i}" aria-label="{safe_name_short}, {conf_label} match {confidence_pct} percent" style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a1a2e; list-style: none;">
+        <li role="option" id="search-result-{idx_i}" aria-label="{safe_name_short}, {conf_label} match {confidence_pct} percent" style="border: 1px solid #3a3a52; border-radius: 8px; padding: 16px; margin: 12px 0; background: #22223e; list-style: none;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.1em; font-weight: bold; color: #4fc3f7;" title="{safe_name}">{safe_name_short}</span>
-                <span style="color: {confidence_color};" aria-label="{conf_label} match {confidence_pct} percent" title="{conf_label} match ({confidence_pct}%)">{stars} {conf_label} ({confidence_pct}%)</span>
+                <span style="font-size: 1.05em; font-weight: 600; color: #4fc3f7; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;" title="{safe_name}">{safe_name_short}</span>
+                <span style="color: {confidence_color}; font-size: 0.95em;" aria-label="{conf_label} match {confidence_pct} percent" title="{conf_label} match ({confidence_pct}%)">{stars} {conf_label} ({confidence_pct}%)</span>
             </div>
-            <p style="margin: 8px 0; color: #d4d4d4;" title="{safe_desc}">{safe_desc_short}</p>
-            <div style="display: flex; gap: 12px; font-size: 0.9em; color: #b0b0b0; flex-wrap: wrap; align-items: center;">
+            <p style="margin: 12px 0 8px 0; color: #e8e8f0; line-height: 1.5; max-width: 75ch;" title="{safe_desc}">{safe_desc_short}</p>
+            <div style="display: flex; gap: 16px; font-size: 0.875em; color: #a0a0b0; flex-wrap: wrap; align-items: center;">
                 <span><span aria-hidden="true">📦</span> Server: {safe_server}</span>
                 <span><span aria-hidden="true">🏷️</span> Category: {safe_category}</span>
                 {deprecated_badge}
@@ -624,15 +634,18 @@ def _render_no_results(query: str, suggestions: List[Dict]) -> str:
     an error-adjacent state from the user's perspective — show closest
     matches as actionable links instead of just suggesting they try harder.
     """
+    # SD-V-001/004: bumped body grey to #e8e8f0; mono font for suggested
+    # tool names so they read as runnable identifiers.
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
     safe_q = html.escape(truncate_text(query, 50), quote=True)
     parts = [
-        '<div style="text-align: center; padding: 40px; color: #b0b0b0;">',
+        '<div style="text-align: center; padding: 48px 24px; color: #a0a0b0; max-width: 75ch; margin: 0 auto;">',
         '<div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>',
         f'<p style="color: #ffb74d;">No tools found matching "{safe_q}"</p>',
     ]
     if suggestions:
         parts.append(
-            '<p style="font-size: 0.95em; color: #d4d4d4; margin-top: 16px;">'
+            '<p style="font-size: 0.95em; color: #e8e8f0; margin-top: 16px;">'
             'Did you mean one of these?</p>'
         )
         parts.append(
@@ -645,16 +658,16 @@ def _render_no_results(query: str, suggestions: List[Dict]) -> str:
                 truncate_text(s.get("description") or "", 80), quote=True
             )
             parts.append(
-                f'<li style="margin: 6px 0; color: #d4d4d4;">'
-                f'<code style="color: #4fc3f7;">{safe_name}</code>'
-                f' — <span style="color: #b0b0b0;">{safe_desc}</span>'
+                f'<li style="margin: 8px 0; color: #e8e8f0; line-height: 1.5;">'
+                f'<code style="color: #4fc3f7; font-family: {mono};">{safe_name}</code>'
+                f' — <span style="color: #a0a0b0;">{safe_desc}</span>'
                 f'</li>'
             )
         parts.append('</ul>')
     parts.extend([
-        '<p style="font-size: 0.9em; color: #b0b0b0; margin-top: 16px;">'
+        '<p style="font-size: 0.9em; color: #a0a0b0; margin-top: 16px;">'
         'Or try:</p>',
-        '<ul style="text-align: left; display: inline-block; color: #b0b0b0;">',
+        '<ul style="text-align: left; display: inline-block; color: #a0a0b0; line-height: 1.5;">',
         '<li>Broader or simpler terms</li>',
         '<li>Lowering the confidence threshold</li>',
         '<li>Removing the server or category filter</li>',
@@ -669,10 +682,10 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
     # Empty query
     if not query.strip():
         return """
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔗</div>
-            <p>Enter a query to search for workflows.</p>
-            <p style="font-size: 0.9em;">Try: "modify a file", "commit changes", "generate and save image"</p>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔗</div>
+            <p style="color: #e8e8f0; line-height: 1.5;">Enter a query to search for workflows.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Try: "modify a file", "commit changes", "generate and save image"</p>
         </div>
         """
 
@@ -684,10 +697,10 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
     chain_indexer = get_chain_indexer_instance()
     if not chain_indexer:
         return """
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;">⚙️</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">⚙️</div>
             <p style="color: #ffb74d;">Chain indexing is disabled in configuration.</p>
-            <p style="font-size: 0.9em;">Enable it in compass_config.json to use workflow search.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Enable it in compass_config.json to use workflow search.</p>
         </div>
         """
 
@@ -708,16 +721,16 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
     # No results
     if not results:
         return f"""
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>
             <p style="color: #ffb74d;">No workflows found matching "{html.escape(truncate_text(query, 50), quote=True)}"</p>
-            <p style="font-size: 0.9em;">Workflows are auto-detected from usage patterns.</p>
-            <p style="font-size: 0.9em; color: #b0b0b0;">Use tools together to create workflows.</p>
+            <p style="font-size: 0.9em; color: #e8e8f0;">Workflows are auto-detected from usage patterns.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Use tools together to create workflows.</p>
         </div>
         """
 
     html_parts = [
-        f'<p style="color: #b0b0b0; margin-bottom: 12px;">Found {len(results)} workflow{"s" if len(results) != 1 else ""}</p>'
+        f'<p style="color: #a0a0b0; margin-bottom: 12px;">Found {len(results)} workflow{"s" if len(results) != 1 else ""}</p>'
     ]
 
     for cr in results:
@@ -734,20 +747,24 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
         safe_flow_short = html.escape(truncate_text(tool_flow, 80), quote=True)
         safe_desc = html.escape(truncate_text(cr.chain.description or "", 100), quote=True)
 
-        # FE-B-005 + FE-B-012: text-twin emoji + contrast-fixed greys.
+        # FE-B-005: text-twin emoji.
+        # SD-V-002: workflow card on the raised tonal step. SD-V-004:
+        # the chain flow (tool → tool → tool) uses the JetBrains-Mono
+        # fallback stack — it's the chain stage diagram so it should read
+        # as code identifiers, not body prose.
         if cr.chain.is_auto_detected:
             badge_html = '<span aria-hidden="true">🤖</span> Auto-detected'
         else:
             badge_html = '<span aria-hidden="true">👤</span> Manual'
         html_parts.append(f"""
-        <div role="article" aria-label="{safe_chain_name_short} workflow result" style="border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; background: #1a2e1a;">
+        <div role="article" aria-label="{safe_chain_name_short} workflow result" style="border: 1px solid #3a3a52; border-radius: 8px; padding: 16px; margin: 12px 0; background: #22223e;">
             <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                <span style="font-size: 1.1em; font-weight: bold; color: #81c784;" title="{safe_chain_name}">{safe_chain_name_short}</span>
-                <span style="color: {confidence_color};" aria-label="{conf_label} match {confidence_pct} percent" title="{conf_label} match ({confidence_pct}%)">{conf_label} ({confidence_pct}%)</span>
+                <span style="font-size: 1.05em; font-weight: 600; color: #81c784; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;" title="{safe_chain_name}">{safe_chain_name_short}</span>
+                <span style="color: {confidence_color}; font-size: 0.95em;" aria-label="{conf_label} match {confidence_pct} percent" title="{conf_label} match ({confidence_pct}%)">{conf_label} ({confidence_pct}%)</span>
             </div>
-            <p style="margin: 8px 0; color: #d4d4d4; font-family: monospace;" title="{safe_flow}">{safe_flow_short}</p>
-            <p style="margin: 4px 0; color: #b0b0b0; font-size: 0.9em;">{safe_desc}</p>
-            <div style="font-size: 0.9em; color: #b0b0b0;">
+            <p style="margin: 12px 0 8px 0; color: #e8e8f0; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace; line-height: 1.5;" title="{safe_flow}">{safe_flow_short}</p>
+            <p style="margin: 4px 0; color: #a0a0b0; font-size: 0.9em; line-height: 1.5; max-width: 75ch;">{safe_desc}</p>
+            <div style="font-size: 0.875em; color: #a0a0b0; margin-top: 8px;">
                 Used {cr.chain.use_count} times &middot; {badge_html}
             </div>
         </div>
@@ -801,14 +818,15 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
     except Exception as e:
         return format_error(e, "Could not load tools from index")
 
-    # Empty index — FE-A-008 + FE-B-012: v2.2 canonical CLI + contrast-safe greys.
+    # Empty index — FE-A-008 + SD-V-001: v2.2 canonical CLI + contrast-safe
+    # greys + mono command snippet.
     if not tools:
         return """
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
             <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">📦</div>
             <p style="color: #ffb74d;">No tools indexed yet.</p>
-            <p style="font-size: 0.9em;">Build the index first:</p>
-            <code style="color: #b0b0b0;">tool-compass sync</code>
+            <p style="font-size: 0.9em; color: #e8e8f0;">Build the index first:</p>
+            <code style="color: #d4d4dc; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;">tool-compass sync</code>
         </div>
         """
 
@@ -833,10 +851,10 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
     # No matches after filtering
     if not tools:
         return """
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>
             <p style="color: #ffb74d;">No tools match the current filters.</p>
-            <p style="font-size: 0.9em; color: #b0b0b0;">Try removing filters or using different search terms.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Try removing filters or using different search terms.</p>
         </div>
         """
 
@@ -846,14 +864,18 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
         by_server.setdefault(t["server"], []).append(t)
 
     html_parts = [
-        f'<p style="color: #b0b0b0; margin-bottom: 12px;">Showing {len(tools)} tool{"s" if len(tools) != 1 else ""}</p>'
+        f'<p style="color: #a0a0b0; margin-bottom: 12px;">Showing {len(tools)} tool{"s" if len(tools) != 1 else ""}</p>'
     ]
 
+    # SD-V-002 + SD-V-004: browser rows use the raised tonal step
+    # (#22223e) and the JetBrains-Mono fallback stack on tool names so the
+    # eye locks onto the identifier first.
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
     for server_name, server_tools in sorted(by_server.items()):
         html_parts.append(f"""
         <details open style="margin: 12px 0;">
-            <summary style="cursor: pointer; font-size: 1.1em; font-weight: bold; color: #64b5f6; padding: 8px 0;">
-                📦 {html.escape(server_name, quote=True)} ({len(server_tools)} tool{"s" if len(server_tools) != 1 else ""})
+            <summary style="cursor: pointer; font-size: 1.05em; font-weight: 600; color: #64b5f6; padding: 8px 0;">
+                <span aria-hidden="true">📦</span> {html.escape(server_name, quote=True)} ({len(server_tools)} tool{"s" if len(server_tools) != 1 else ""})
             </summary>
             <div style="padding-left: 16px;">
         """)
@@ -867,11 +889,11 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
             safe_desc_short = html.escape(desc_truncated, quote=True)
             safe_category = html.escape(t["category"], quote=True)
             html_parts.append(f"""
-            <div style="border-left: 3px solid #444; padding: 8px 12px; margin: 8px 0; background: #1a1a2e;">
-                <div style="font-weight: bold; color: #4fc3f7;" title="{safe_name}">{safe_name_short}</div>
-                <div style="color: #b0b0b0; font-size: 0.9em; margin: 4px 0;" title="{safe_desc}">{safe_desc_short}</div>
-                <div style="color: #a0a0a0; font-size: 0.85em;">
-                    🏷️ {safe_category} | 📝 {param_count} param{"s" if param_count != 1 else ""}
+            <div style="border-left: 3px solid #3a3a52; padding: 12px 16px; margin: 8px 0; background: #22223e; border-radius: 4px;">
+                <div style="font-weight: 600; color: #4fc3f7; font-family: {mono};" title="{safe_name}">{safe_name_short}</div>
+                <div style="color: #e8e8f0; font-size: 0.9em; margin: 8px 0; line-height: 1.5; max-width: 75ch;" title="{safe_desc}">{safe_desc_short}</div>
+                <div style="color: #a0a0b0; font-size: 0.85em;">
+                    <span aria-hidden="true">🏷️</span> {safe_category} | <span aria-hidden="true">📝</span> {param_count} param{"s" if param_count != 1 else ""}
                 </div>
             </div>
             """)
@@ -886,10 +908,10 @@ def get_tool_details(tool_name: str) -> str:
     # Empty input
     if not tool_name.strip():
         return """
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;">🔎</div>
-            <p>Enter a tool name to view details.</p>
-            <p style="font-size: 0.9em;">Or click on a tool from the browser above.</p>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">🔎</div>
+            <p style="color: #e8e8f0; line-height: 1.5;">Enter a tool name to view details.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Or click on a tool from the browser above.</p>
         </div>
         """
 
@@ -936,10 +958,10 @@ def get_tool_details(tool_name: str) -> str:
     # Tool not found
     if not row:
         return f"""
-        <div style="text-align: center; padding: 40px; color: #b0b0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;">❓</div>
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">❓</div>
             <p style="color: #ffb74d;">Tool not found: "{html.escape(truncate_text(tool_name, 40), quote=True)}"</p>
-            <p style="font-size: 0.9em; color: #b0b0b0;">Check the tool name and try again.</p>
+            <p style="font-size: 0.9em; color: #a0a0b0;">Check the tool name and try again.</p>
         </div>
         """
 
@@ -947,45 +969,48 @@ def get_tool_details(tool_name: str) -> str:
     examples = json.loads(row["examples"]) if row["examples"] else []
 
     # Build parameters table — all untrusted strings run through html.escape to
-    # block HTML/script injection from malicious tool metadata.
+    # block HTML/script injection from malicious tool metadata. SD-V-004:
+    # parameter names use the JetBrains-Mono fallback stack — they are
+    # identifiers, not prose. SD-V-001: body grey lifted to #e8e8f0.
+    mono = "'JetBrains Mono', 'SF Mono', ui-monospace, monospace"
     params_html = ""
     if params:
         params_html = f"""
-        <h4 style="color: #81c784; margin-top: 16px;">Parameters ({len(params)})</h4>
+        <h4 style="color: #81c784; margin-top: 24px;">Parameters ({len(params)})</h4>
         <table style="width: 100%; border-collapse: collapse;">
-            <tr style="background: #2a2a4a;">
-                <th style="padding: 8px; text-align: left; border: 1px solid #444;">Name</th>
-                <th style="padding: 8px; text-align: left; border: 1px solid #444;">Type</th>
+            <tr style="background: #2a2a48;">
+                <th style="padding: 12px; text-align: left; border: 1px solid #3a3a52;">Name</th>
+                <th style="padding: 12px; text-align: left; border: 1px solid #3a3a52;">Type</th>
             </tr>
         """
         for name, ptype in params.items():
             params_html += f"""
             <tr>
-                <td style="padding: 8px; border: 1px solid #444; font-family: monospace; color: #4fc3f7;">{html.escape(truncate_text(name, 30), quote=True)}</td>
-                <td style="padding: 8px; border: 1px solid #444; color: #b0b0b0;">{html.escape(truncate_text(str(ptype), 50), quote=True)}</td>
+                <td style="padding: 12px; border: 1px solid #3a3a52; font-family: {mono}; color: #4fc3f7;">{html.escape(truncate_text(name, 30), quote=True)}</td>
+                <td style="padding: 12px; border: 1px solid #3a3a52; color: #e8e8f0; font-family: {mono};">{html.escape(truncate_text(str(ptype), 50), quote=True)}</td>
             </tr>
             """
         params_html += "</table>"
     else:
         params_html = """
-        <h4 style="color: #81c784; margin-top: 16px;">Parameters</h4>
-        <p style="color: #b0b0b0; font-style: italic;">No parameters required</p>
+        <h4 style="color: #81c784; margin-top: 24px;">Parameters</h4>
+        <p style="color: #a0a0b0; font-style: italic;">No parameters required</p>
         """
 
     # Build examples
     examples_html = ""
     if examples:
-        examples_html = f"<h4 style='color: #81c784; margin-top: 16px;'>Examples ({len(examples)})</h4>"
+        examples_html = f"<h4 style='color: #81c784; margin-top: 24px;'>Examples ({len(examples)})</h4>"
         for ex in examples:
-            examples_html += f"<pre style='background: #1a1a2e; padding: 8px; border-radius: 4px; overflow-x: auto;'>{html.escape(truncate_text(ex, 200), quote=True)}</pre>"
+            examples_html += f"<pre style='background: #22223e; color: #e8e8f0; padding: 16px; border-radius: 4px; overflow-x: auto; font-family: {mono}; line-height: 1.5;'>{html.escape(truncate_text(ex, 200), quote=True)}</pre>"
 
     return f"""
     <div style="padding: 16px;">
-        <h2 style="color: #4fc3f7; margin: 0; word-break: break-all;">{html.escape(row["name"], quote=True)}</h2>
-        <div style="color: #b0b0b0; margin: 8px 0;">
-            📦 {html.escape(row["server"], quote=True)} | 🏷️ {html.escape(row["category"], quote=True)}
+        <h2 style="color: #4fc3f7; margin: 0; word-break: break-all; font-family: {mono};">{html.escape(row["name"], quote=True)}</h2>
+        <div style="color: #a0a0b0; margin: 8px 0; font-size: 0.9em;">
+            <span aria-hidden="true">📦</span> {html.escape(row["server"], quote=True)} | <span aria-hidden="true">🏷️</span> {html.escape(row["category"], quote=True)}
         </div>
-        <p style="color: #d4d4d4; font-size: 1.1em; margin: 16px 0;">{html.escape(row["description"] or "", quote=True)}</p>
+        <p style="color: #e8e8f0; font-size: 1.05em; margin: 16px 0; line-height: 1.5; max-width: 75ch;">{html.escape(row["description"] or "", quote=True)}</p>
         {params_html}
         {examples_html}
     </div>
@@ -1186,8 +1211,10 @@ def get_system_status() -> str:
         except Exception as e:
             return format_error(e, "Could not load configuration")
 
-    # Check index status
-    index_status = '<span aria-hidden="true">✅</span> Loaded'
+    # SD-V-005: status indicators wrap emoji + label so SR users hear the
+    # text-twin (Léonie Watson 2023) AND sighted users get the colour cue.
+    # Label is the carrier; emoji is aria-hidden chrome.
+    index_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Loaded'
     stats = {}
     index_path = "Unknown"
     try:
@@ -1196,34 +1223,34 @@ def get_system_status() -> str:
         index_path = str(index.index_path)
     except Exception as e:
         safe_err = html.escape(truncate_text(str(e), 50), quote=True)
-        index_status = f'<span aria-hidden="true">⚠️</span> Not loaded: {safe_err}'
+        index_status = f'<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; Not loaded: {safe_err}'
 
     # Check analytics — FE-A-013 carry-forward: private attr access remains
     # (analytics._hot_cache); flagged in skipped[] for backend domain.
-    analytics_status = '<span aria-hidden="true">✅</span> Available'
+    analytics_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Available'
     hot_cache_size = 0
     try:
         analytics = get_analytics_instance()
         hot_cache_size = len(analytics._hot_cache)
     except Exception as e:
         safe_err = html.escape(truncate_text(str(e), 50), quote=True)
-        analytics_status = f'<span aria-hidden="true">⚠️</span> Error: {safe_err}'
+        analytics_status = f'<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; {safe_err}'
 
     # Check Ollama
-    ollama_status = '<span aria-hidden="true">❓</span> Not checked'
+    ollama_status = '<span aria-hidden="true">❓</span> <span>Unknown</span> &mdash; Not checked'
     try:
         from embedder import Embedder
 
         embedder = Embedder()
         is_healthy = run_async(embedder.health_check())
         if is_healthy:
-            ollama_status = '<span aria-hidden="true">✅</span> Connected'
+            ollama_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Connected'
         else:
-            ollama_status = '<span aria-hidden="true">⚠️</span> Model not loaded'
+            ollama_status = '<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; Model not loaded'
         run_async(embedder.close())
     except Exception as e:
         safe_err = html.escape(truncate_text(str(e), 40), quote=True)
-        ollama_status = f'<span aria-hidden="true">❌</span> Unavailable: {safe_err}'
+        ollama_status = f'<span aria-hidden="true">❌</span> <span>Failed</span> &mdash; Unavailable: {safe_err}'
 
     safe_embedding_model = html.escape(str(_config.embedding_model), quote=True)
 

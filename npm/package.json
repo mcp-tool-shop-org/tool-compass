@@ -1,0 +1,45 @@
+{
+  "name": "@mcptoolshop/tool-compass",
+  "version": "2.2.2",
+  "description": "Semantic MCP tool discovery gateway — find tools by intent, not memory. Zero-prerequisite npx install (verified binary launcher).",
+  "type": "commonjs",
+  "license": "MIT",
+  "author": "mcp-tool-shop",
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "tool-compass": "bin/tool-compass.js"
+  },
+  "files": [
+    "bin/",
+    "README*.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "@mcptoolshop/npm-launcher": "^1.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mcp-tool-shop-org/tool-compass.git"
+  },
+  "homepage": "https://mcp-tool-shop-org.github.io/tool-compass/",
+  "bugs": {
+    "url": "https://github.com/mcp-tool-shop-org/tool-compass/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "semantic-search",
+    "tool-discovery",
+    "llm",
+    "ai",
+    "claude",
+    "anthropic",
+    "cli"
+  ]
+}

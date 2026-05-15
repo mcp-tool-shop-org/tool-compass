@@ -53,6 +53,12 @@ dependencies = [
     "numpy>=1.26.0,<2.2.0",  # <2.2.0: numpy 2.2+ wheels SIGILL on Py 3.13 runners
     "httpx>=0.27.0,<1.0.0",
     "mcp>=1.0.0,<2.0.0",
+    # Rich powers the Stage D CLI polish: colored output (4-color discipline),
+    # progress spinners on `doctor`/`sync`, and structured help. Always
+    # available so the CLI surface is consistent regardless of install extras.
+    # Disabled at runtime when stdout is non-TTY, NO_COLOR is set, TERM=dumb,
+    # or --no-color is passed — see cli._should_color().
+    "rich>=13.0.0,<15.0.0",
 ]
 
 [project.optional-dependencies]
