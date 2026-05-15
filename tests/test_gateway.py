@@ -1360,6 +1360,7 @@ class TestStartupSyncEdgeCases:
 
         gateway._config = test_config_with_backends
         gateway._config.sync_check_on_startup = True
+        gateway._config.auto_sync = True  # get_sync_manager_instance() short-circuits on False
         gateway._startup_sync_done = False
         gateway._sync_manager = Mock()
         gateway._sync_manager.sync_if_needed = AsyncMock()
