@@ -31,8 +31,10 @@ MCP client configuration (e.g., Claude Desktop `~/.config/claude/claude_desktop_
 If you prefer the Gradio web UI (`pip install tool-compass[ui]`):
 
 ```bash
-tool-compass-ui --port 7860
+tool-compass ui --port 7860
 ```
+
+(`tool-compass-ui` remains as a backward-compatible alias.)
 
 ## Core Tools
 

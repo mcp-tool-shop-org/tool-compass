@@ -42,6 +42,12 @@ async def test_per_backend_reader_multiplexes_concurrent_calls():
     while call 1 waits on its readline(). With the queue, the shared
     reader task routes each response to its waiting future and both
     calls complete.
+
+    FE-W11-009: un-skipped on Wave-11 — the per-backend reader has been
+    implemented (see backend_client_simple.py:432, _read_loop). The fixture
+    now starts the read-loop task explicitly the same way ``connect()`` would,
+    so the test exercises the real multiplexing path instead of timing out
+    and treating that as "feature not landed."
     """
     from backend_client_simple import SimpleBackendConnection
     from config import StdioBackend
@@ -53,7 +59,10 @@ async def test_per_backend_reader_multiplexes_concurrent_calls():
     conn._connected = True
     conn._tools = []
 
-    # Fake subprocess where stdout emits responses in reverse order: id=2 first.
+    # Fake subprocess. We use an asyncio.Queue as the response source so the
+    # test controls exactly when each reply becomes readable — this lets us
+    # register both pending futures BEFORE the id=2 reply lands, which is
+    # the head-of-line condition we want to prove the reader handles.
     fake_proc = Mock()
     fake_proc.returncode = None
     fake_proc.stdin = Mock()
@@ -61,31 +70,51 @@ async def test_per_backend_reader_multiplexes_concurrent_calls():
     fake_proc.stdin.drain = AsyncMock()
     fake_proc.stdin.close = Mock()
 
-    responses = [
-        json.dumps({"jsonrpc": "2.0", "id": 2, "result": {"content": [{"text": "B"}]}}).encode() + b"\n",
-        json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"content": [{"text": "A"}]}}).encode() + b"\n",
-        b"",  # EOF
-    ]
+    response_queue: "asyncio.Queue[bytes]" = asyncio.Queue()
 
     async def fake_readline():
-        if responses:
-            return responses.pop(0)
-        await asyncio.sleep(60)  # would hang if called again
-        return b""
+        return await response_queue.get()
 
     fake_proc.stdout = Mock()
     fake_proc.stdout.readline = fake_readline
     conn._process = fake_proc
 
+    # FE-W11-009: bind async primitives (write lock + inflight semaphore) and
+    # start the per-backend stdout reader the same way ``connect()`` would.
+    # Without this, no task is draining stdout, so both calls timeout and
+    # the head-of-line guarantee is never exercised.
+    conn._ensure_async_primitives()
+    conn._read_task = asyncio.create_task(conn._read_loop())
+
     # The feature's contract: concurrent call_tool() invocations must both
-    # resolve with the correct content. If the implementation has not yet
-    # added a response queue (GW-FT-001), the single-reader + lock pattern
-    # usually WILL fail this test — which is the intent (lock in the fix).
-    # If the running implementation is the old one, we tolerate it as
-    # "feature not landed yet" and skip rather than fail the swarm.
+    # resolve with the correct content. We start both calls first so both
+    # ids are registered in _pending, then feed id=2 (the "out of order"
+    # reply) followed by id=1.
     async def do_two_calls():
         t1 = asyncio.create_task(conn.call_tool("toolA", {}))
         t2 = asyncio.create_task(conn.call_tool("toolB", {}))
+
+        # Yield enough times for both call tasks to acquire the write lock,
+        # register their pending future, and write their request. After this
+        # both ids should appear in conn._pending.
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if 1 in conn._pending and 2 in conn._pending:
+                break
+
+        # Now feed responses in REVERSE order — id=2 first. A correctly-routed
+        # reader resolves call 2's future without waiting for id=1.
+        await response_queue.put(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"text": "B"}]}}
+            ).encode() + b"\n"
+        )
+        await response_queue.put(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"text": "A"}]}}
+            ).encode() + b"\n"
+        )
+
         try:
             return await asyncio.wait_for(
                 asyncio.gather(t1, t2, return_exceptions=True), timeout=3.0
@@ -95,10 +124,21 @@ async def test_per_backend_reader_multiplexes_concurrent_calls():
             t2.cancel()
             return None
 
-    results = await do_two_calls()
+    try:
+        results = await do_two_calls()
+    finally:
+        # Clean up the read-loop task so it doesn't leak between tests.
+        if conn._read_task is not None:
+            conn._read_task.cancel()
+            try:
+                await conn._read_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
-    if results is None:
-        pytest.skip("GW-FT-001 per-backend reader not yet implemented (head-of-line block)")
+    assert results is not None, (
+        "GW-FT-001: concurrent calls timed out — per-backend reader is not "
+        "routing responses correctly."
+    )
 
     # Both must complete, neither raised.
     assert all(not isinstance(r, BaseException) for r in results), (
@@ -621,30 +661,33 @@ def test_cli_no_args_falls_through_to_gateway(monkeypatch):
 
 
 def test_deprecated_aliases_resolves_to_canonical():
-    """get_canonical_name('old_alias') must return the current canonical name."""
+    """get_canonical_name('old_alias') must return the current canonical name.
+
+    FE-W11-010: hard-assert path. Both ``get_canonical_name`` (tool_manifest.py:817)
+    and ``ToolDefinition.deprecated_aliases`` ship in v2.2.0 — the previous
+    conditional skip masked regressions where the alias map rebuild silently
+    broke. If either disappears, this test now fails loudly instead.
+    """
     from tool_manifest import ToolDefinition
     import tool_manifest as tm
 
-    if not hasattr(tm, "get_canonical_name"):
-        pytest.skip("MCC-FT-002 get_canonical_name not yet implemented")
+    assert hasattr(tm, "get_canonical_name"), (
+        "MCC-FT-002 regression: get_canonical_name shipped in v2.2.0 and "
+        "must remain present (see tool_manifest.py:817)."
+    )
 
-    # Build a tool with the new deprecation fields. If the dataclass does not
-    # have them yet, skip.
-    try:
-        # deprecated_since on a canonical tool marks the tool itself as
-        # deprecated — leave it unset here so the canonical is "current",
-        # and the deprecated_aliases merely point historic names at it.
-        canonical = ToolDefinition(
-            name="svc:new_shiny",
-            description="new thing",
-            category="cat",
-            server="svc",
-            parameters={},
-            examples=[],
-            deprecated_aliases=["svc:old_name", "svc:older_name"],
-        )
-    except TypeError:
-        pytest.skip("ToolDefinition does not expose deprecated_aliases yet")
+    # deprecated_since on a canonical tool marks the tool itself as
+    # deprecated — leave it unset here so the canonical is "current",
+    # and the deprecated_aliases merely point historic names at it.
+    canonical = ToolDefinition(
+        name="svc:new_shiny",
+        description="new thing",
+        category="cat",
+        server="svc",
+        parameters={},
+        examples=[],
+        deprecated_aliases=["svc:old_name", "svc:older_name"],
+    )
 
     # Register/insert the tool via whatever mechanism the feature uses.
     # Most likely: append to tm.TOOLS list temporarily.
@@ -672,28 +715,33 @@ def test_deprecated_aliases_resolves_to_canonical():
 
 @pytest.mark.asyncio
 async def test_analytics_canonicalizes_deprecated_name(test_analytics):
-    """record_tool_call called with a deprecated alias must store the canonical name."""
+    """record_tool_call called with a deprecated alias must store the canonical name.
+
+    FE-W11-010: hard-assert path. ``get_canonical_name`` ships in v2.2.0 and
+    ``analytics.record_tool_call`` canonicalizes pre-insert (analytics.py:395-397).
+    The previous conditional skip masked the case where the rewrite branch
+    regressed silently. Hard assert keeps the regression visible.
+    """
     import tool_manifest as tm
 
-    if not hasattr(tm, "get_canonical_name"):
-        pytest.skip("MCC-FT-002 get_canonical_name not yet implemented")
+    assert hasattr(tm, "get_canonical_name"), (
+        "MCC-FT-002 regression: get_canonical_name shipped in v2.2.0 and "
+        "must remain present (see tool_manifest.py:817)."
+    )
 
     # Install a tool with an alias so canonicalization has something to do.
-    try:
-        from tool_manifest import ToolDefinition
+    from tool_manifest import ToolDefinition
 
-        canonical = ToolDefinition(
-            name="svc:canonical_op",
-            description="the real one",
-            category="cat",
-            server="svc",
-            parameters={},
-            examples=[],
-            deprecated_aliases=["svc:legacy_op"],
-            deprecated_since="2.1.0",
-        )
-    except TypeError:
-        pytest.skip("ToolDefinition does not expose deprecated_aliases yet")
+    canonical = ToolDefinition(
+        name="svc:canonical_op",
+        description="the real one",
+        category="cat",
+        server="svc",
+        parameters={},
+        examples=[],
+        deprecated_aliases=["svc:legacy_op"],
+        deprecated_since="2.1.0",
+    )
 
     original_tools = list(tm.TOOLS)
     tm.TOOLS.append(canonical)
@@ -792,3 +840,302 @@ def test_makefile_has_scorecard_target():
             "(owned by ci-tooling; see ROADMAP/CHANGELOG for status)"
         )
     assert re.search(r"(?m)^scorecard\s*:", text)
+
+
+# =============================================================================
+# FE-W11 — Wave-11 feature parity smoke tests (six new CLI subcommands +
+# serve --http + version banner)
+# =============================================================================
+
+
+def _patch_gateway_handler(monkeypatch, handler_name: str, payload):
+    """Replace a gateway @mcp.tool function with an AsyncMock returning ``payload``.
+
+    Used by the Wave-11 CLI smoke tests so we don't have to spin up a real
+    index / backend just to verify the dispatch + rendering wiring. The
+    handler functions remain directly callable after the @mcp.tool decorator
+    (verified at Wave-11 implementation time).
+    """
+    import gateway as gw  # local import — keeps unrelated tests fast
+
+    async def fake_handler(*args, **kwargs):
+        return payload
+
+    monkeypatch.setattr(gw, handler_name, fake_handler)
+    return fake_handler
+
+
+def test_cli_status_json_passes_through_gateway_payload(capsys, monkeypatch):
+    """`tool-compass status --json` emits the raw compass_status payload."""
+    cli = _require_cli()
+    payload = {
+        "index": {"total_tools": 42, "by_category": {}, "by_server": {"x": 42}},
+        "backends": {"connected_backends": ["x"], "configured_backends": ["x"]},
+        "health": {
+            "ollama_available": True,
+            "index_available": True,
+            "degraded_mode": False,
+        },
+        "config": {},
+    }
+    _patch_gateway_handler(monkeypatch, "compass_status", payload)
+    try:
+        rc = cli.main(["status", "--json"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    out = capsys.readouterr().out.strip()
+    start = out.find("{")
+    assert start >= 0, f"status --json produced no JSON: {out!r}"
+    parsed = json.loads(out[start:])
+    assert parsed["index"]["total_tools"] == 42
+    assert rc == 0
+
+
+def test_cli_categories_text_lists_counts(capsys, monkeypatch):
+    """`tool-compass categories` renders categories sorted by count desc."""
+    cli = _require_cli()
+    payload = {
+        "categories": {"file": 10, "ai": 3, "git": 7},
+        "servers": {},
+        "total_tools": 20,
+    }
+    _patch_gateway_handler(monkeypatch, "compass_categories", payload)
+    # capsys is not a TTY so color is auto-disabled. --no-color belongs on
+    # the root parser, before the subcommand, but we don't need it here.
+    try:
+        rc = cli.main(["categories"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    out = capsys.readouterr().out
+    # All three names must appear in the rendered output.
+    assert "file" in out and "git" in out and "ai" in out
+    # The total tool count appears in the header.
+    assert "20" in out
+    assert rc == 0
+
+
+def test_cli_audit_json_invokes_gateway(capsys, monkeypatch):
+    """`tool-compass audit --json` calls compass_audit and prints its payload."""
+    cli = _require_cli()
+    payload = {
+        "system": {"version": "9.9.9", "total_tools": 5},
+        "categories": {"x": 5},
+        "servers": {"x": 5},
+        "backends": {
+            "connected_backends": ["x"],
+            "configured_backends": ["x"],
+        },
+        "hot_cache": {"size": 0, "tools": []},
+        "chains": {"total": 0, "cached": 0},
+    }
+    _patch_gateway_handler(monkeypatch, "compass_audit", payload)
+    try:
+        rc = cli.main(["audit", "--json"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    out = capsys.readouterr().out.strip()
+    start = out.find("{")
+    parsed = json.loads(out[start:])
+    assert parsed["system"]["version"] == "9.9.9"
+    assert rc == 0
+
+
+def test_cli_analytics_handles_disabled_error_envelope(capsys, monkeypatch):
+    """When analytics is disabled the CLI prints the envelope title, exits 1."""
+    cli = _require_cli()
+    payload = {
+        "error": {
+            "code": "analytics_disabled",
+            "title": "Analytics is disabled",
+            "detail": "Analytics is disabled.",
+            "suggestions": ["Enable analytics_enabled in config to track usage."],
+        }
+    }
+    _patch_gateway_handler(monkeypatch, "compass_analytics", payload)
+    try:
+        rc = cli.main(["analytics"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    err = capsys.readouterr().err
+    assert "Analytics is disabled" in err, f"missing envelope title in stderr: {err!r}"
+    assert rc == 1
+
+
+def test_cli_chains_list_renders_names(capsys, monkeypatch):
+    """`tool-compass chains` lists chain names from gateway.compass_chains."""
+    cli = _require_cli()
+    payload = {
+        "chains": [
+            {
+                "name": "read-then-write",
+                "tools": ["fs:read_file", "fs:write_file"],
+                "use_count": 3,
+                "is_auto_detected": False,
+                "description": "round-trip",
+            }
+        ],
+        "total": 1,
+        "cached": 1,
+    }
+    _patch_gateway_handler(monkeypatch, "compass_chains", payload)
+    try:
+        rc = cli.main(["chains"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    out = capsys.readouterr().out
+    assert "read-then-write" in out, f"chain name missing: {out!r}"
+    assert "fs:read_file" in out, f"chain tools not rendered: {out!r}"
+    assert rc == 0
+
+
+def test_cli_chains_action_choices_enforced(monkeypatch):
+    """`tool-compass chains --action invalid` must exit 2 (argparse usage)."""
+    cli = _require_cli()
+    rc = None
+    try:
+        rc = cli.main(["chains", "--action", "invalid"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    assert rc == 2, f"argparse should reject invalid choice with rc=2, got {rc}"
+
+
+def test_cli_ui_subcommand_dispatches(monkeypatch, capsys):
+    """`tool-compass ui` must dispatch to ui.main and forward port/host/share."""
+    cli = _require_cli()
+    # Stand-in for ui:main so we don't actually launch Gradio. We also assert
+    # the forwarded argv shape via a captured list.
+    captured_argv: list[str] = []
+
+    def fake_ui_main():
+        # ui.main reads sys.argv, so record it for assertion.
+        captured_argv.extend(sys.argv)
+        return 0
+
+    # Inject a fake `ui` module so the import inside _cmd_ui succeeds even on
+    # bare installs that lack the gradio extras.
+    fake_ui = type(sys)("ui")  # types.ModuleType-equivalent
+    fake_ui.main = fake_ui_main
+    monkeypatch.setitem(sys.modules, "ui", fake_ui)
+
+    try:
+        rc = cli.main(["ui", "--port", "7777", "--host", "0.0.0.0"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    assert rc == 0, f"ui subcommand should exit 0, got {rc}"
+    assert any("--port" in a for a in captured_argv), (
+        f"ui main did not see --port in argv: {captured_argv}"
+    )
+    assert any(a == "7777" for a in captured_argv), (
+        f"ui main missing --port value 7777: {captured_argv}"
+    )
+    assert "0.0.0.0" in captured_argv, (
+        f"ui main missing --host value 0.0.0.0: {captured_argv}"
+    )
+
+
+def test_cli_ui_auth_propagates_to_gradio_auth_env(monkeypatch):
+    """`tool-compass ui --auth user:pass --share` sets GRADIO_AUTH env."""
+    cli = _require_cli()
+
+    def fake_ui_main():
+        return 0
+
+    fake_ui = type(sys)("ui")
+    fake_ui.main = fake_ui_main
+    monkeypatch.setitem(sys.modules, "ui", fake_ui)
+    monkeypatch.delenv("GRADIO_AUTH", raising=False)
+
+    try:
+        rc = cli.main(["ui", "--auth", "alice:secret", "--share"])
+    except SystemExit as e:
+        rc = e.code if isinstance(e.code, int) else 1
+    assert rc == 0
+    import os as _os
+    assert _os.environ.get("GRADIO_AUTH") == "alice:secret", (
+        f"--auth flag did not propagate to GRADIO_AUTH env: "
+        f"{_os.environ.get('GRADIO_AUTH')!r}"
+    )
+
+
+def test_cli_serve_http_with_value_exports_port(monkeypatch):
+    """`tool-compass serve --http 9090` must set PORT=9090 before gateway start."""
+    cli = _require_cli()
+    import gateway
+
+    seen_port = {}
+
+    def fake_gateway_main():
+        # Capture the resolved env at the moment the gateway would have started.
+        import os as _os
+        seen_port["value"] = _os.environ.get("PORT")
+        return 0
+
+    monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
+    if hasattr(cli, "gateway"):
+        monkeypatch.setattr(cli.gateway, "main", fake_gateway_main, raising=False)
+    monkeypatch.delenv("PORT", raising=False)
+
+    try:
+        cli.main(["serve", "--http", "9090"])
+    except SystemExit:
+        pass
+
+    assert seen_port.get("value") == "9090", (
+        f"serve --http 9090 did not export PORT=9090; saw {seen_port.get('value')!r}"
+    )
+
+
+def test_cli_serve_http_no_value_falls_back_to_port_env(monkeypatch):
+    """`tool-compass serve --http` with PORT=8765 in env keeps PORT=8765."""
+    cli = _require_cli()
+    import gateway
+
+    seen_port = {}
+
+    def fake_gateway_main():
+        import os as _os
+        seen_port["value"] = _os.environ.get("PORT")
+        return 0
+
+    monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
+    if hasattr(cli, "gateway"):
+        monkeypatch.setattr(cli.gateway, "main", fake_gateway_main, raising=False)
+    monkeypatch.setenv("PORT", "8765")
+
+    try:
+        cli.main(["serve", "--http"])
+    except SystemExit:
+        pass
+
+    assert seen_port.get("value") == "8765", (
+        f"--http with PORT env preset should preserve it; saw {seen_port.get('value')!r}"
+    )
+
+
+def test_gateway_banner_reads_version_from__version_module(monkeypatch, capsys):
+    """The startup banner must interpolate __version__, not a hardcoded literal.
+
+    FE-W11-008: the Wave-10 audit flagged
+    ``"Starting Tool Compass Gateway v2.0..."`` at gateway.py:2406 as stale
+    against the live ``_version.__version__``. The Wave-11 fix uses an
+    f-string. We probe the gateway source so the test is robust against
+    refactors of the banner placement.
+    """
+    gateway_path = REPO_ROOT / "gateway.py"
+    if not gateway_path.exists():
+        pytest.skip("gateway.py not present")
+    text = gateway_path.read_text(encoding="utf-8")
+    # The hardcoded literal must be gone.
+    assert "v2.0..." not in text, (
+        "Hardcoded 'v2.0...' banner literal still present in gateway.py — "
+        "Wave-11 fix should use f-string with __version__"
+    )
+    # Either an f-string interpolation OR a format-call must reference
+    # __version__ on the banner line.
+    import re
+    banner_pattern = re.compile(
+        r"Starting Tool Compass Gateway v\{?(__version__|[^}]*version[^}]*)\}?"
+    )
+    assert banner_pattern.search(text), (
+        "Gateway banner does not interpolate __version__ — Wave-11 fix missing"
+    )

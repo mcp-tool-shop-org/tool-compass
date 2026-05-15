@@ -68,8 +68,11 @@ To explore tools interactively in a browser, install the UI extra and launch the
 
 ```bash
 pip install "tool-compass[ui]"
-tool-compass-ui
+tool-compass ui
 ```
+
+(`tool-compass-ui` remains available as a backward-compatible alias for
+existing scripts.)
 
 This opens a web interface at `http://localhost:7860` where you can search, browse categories, and view analytics.
 

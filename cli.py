@@ -216,8 +216,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "Tool Compass — semantic MCP tool discovery gateway.\n"
             "\n"
             "With no subcommand, runs the gateway server (default).\n"
-            "Subcommands: serve, search, describe, sync, doctor.\n"
-            "Web UI: install `tool-compass[ui]` and run `tool-compass-ui`."
+            "Subcommands: serve, search, describe, sync, doctor, ui, status,\n"
+            "             categories, audit, analytics, chains.\n"
+            "Web UI: install `tool-compass[ui]` and run `tool-compass ui`."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -227,6 +228,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "  tool-compass describe bridge:read_file\n"
             "  tool-compass sync                  # rebuild the index\n"
             "  tool-compass doctor                # diagnostics JSON\n"
+            "  tool-compass ui                    # launch Gradio web UI\n"
+            "  tool-compass status                # backend + index health\n"
+            "  tool-compass categories            # list categories + counts\n"
+            "  tool-compass audit                 # system-wide audit JSON\n"
+            "  tool-compass analytics             # usage stats / hot tools\n"
+            "  tool-compass chains                # workflow chains\n"
             "\n"
             "Color is on by default in interactive terminals. Disable via\n"
             "`--no-color`, NO_COLOR=1, or TERM=dumb. Output piped to a file\n"
@@ -379,10 +386,162 @@ def _build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser(
         "serve",
         help="Run MCP gateway server (default when no subcommand given)",
-        epilog="Example:\n  tool-compass serve --http",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass serve              # stdio transport (Claude Desktop)\n"
+            "  tool-compass serve --http       # HTTP transport on PORT env\n"
+            "  PORT=8080 tool-compass serve    # explicit port via env\n"
+            "\n"
+            "FE-W11-007: --http now exports PORT (default 8080 if unset) so the\n"
+            "gateway selects streamable-http transport on startup."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_serve.add_argument("--http", action="store_true", help="HTTP transport")
+    p_serve.add_argument(
+        "--http",
+        nargs="?",
+        const="",
+        default=None,
+        help=(
+            "Run with HTTP transport. Without a value: uses $PORT (or 8080). "
+            "With a value (e.g. --http 9090): sets PORT to that value."
+        ),
+    )
+
+    # ui — launch the Gradio web UI. Thin wrapper around `tool-compass-ui`.
+    p_ui = sub.add_parser(
+        "ui",
+        help="Launch the Gradio web UI (requires tool-compass[ui])",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass ui                       # default port 7860\n"
+            "  tool-compass ui --port 7861           # custom port\n"
+            "  tool-compass ui --share               # public Gradio tunnel\n"
+            "  tool-compass ui --auth user:pass      # basic auth (sets GRADIO_AUTH)\n"
+            "\n"
+            "Equivalent to `tool-compass-ui`. Install the extras with:\n"
+            "  pip install tool-compass[ui]"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_ui.add_argument("--port", type=int, default=7860, help="Port to run on (default 7860)")
+    p_ui.add_argument("--host", default="127.0.0.1", help="Host to bind to (default 127.0.0.1)")
+    p_ui.add_argument(
+        "--share", action="store_true",
+        help="Create public Gradio tunnel (requires GRADIO_AUTH or --auth)",
+    )
+    p_ui.add_argument(
+        "--auth", default=None,
+        help="Basic auth for --share, format `user:pass`. Sets GRADIO_AUTH env.",
+    )
+
+    # status — backend health, breaker state, embedder status, index size,
+    # sync state. Delegates to gateway.compass_status().
+    p_status = sub.add_parser(
+        "status",
+        help="Backend + index health, breaker state, sync status",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass status               # human-readable summary\n"
+            "  tool-compass status --json | jq .\n"
+            "\n"
+            "Fields include: index (total_tools, by_category, by_server),\n"
+            "backends, health (ollama_available, index_available, degraded_mode),\n"
+            "config, hot_cache, sync, chains."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_status.add_argument(
+        "--json", action="store_true",
+        help="JSON output suitable for jq/script pipelines.",
+    )
+
+    # categories — list available tool categories + counts. Cheap call.
+    p_categories = sub.add_parser(
+        "categories",
+        help="List available tool categories with counts",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass categories\n"
+            "  tool-compass categories --json | jq '.categories'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_categories.add_argument(
+        "--json", action="store_true",
+        help="JSON output suitable for jq/script pipelines.",
+    )
+
+    # audit — comprehensive system audit. Delegates to gateway.compass_audit().
+    p_audit = sub.add_parser(
+        "audit",
+        help="Comprehensive system audit (index + backends + chains + analytics)",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass audit                              # 24h timeframe\n"
+            "  tool-compass audit --timeframe 7d --json | jq .\n"
+            "  tool-compass audit --include-tools              # full tool list"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_audit.add_argument(
+        "--timeframe", default="24h",
+        help="Time window for analytics (1h, 24h, 7d, 30d). Default 24h.",
+    )
+    p_audit.add_argument(
+        "--include-tools", action="store_true",
+        help="Include the full list of indexed tools in the audit (large).",
+    )
+    p_audit.add_argument(
+        "--json", action="store_true",
+        help="JSON output suitable for jq/script pipelines.",
+    )
+
+    # analytics — usage stats. Delegates to gateway.compass_analytics().
+    p_analytics = sub.add_parser(
+        "analytics",
+        help="Usage statistics, hot tools, top chains",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass analytics                          # 24h, with failures\n"
+            "  tool-compass analytics --timeframe 7d --json\n"
+            "  tool-compass analytics --no-failures            # success-only view"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_analytics.add_argument(
+        "--timeframe", default="24h",
+        help="Time window for stats (1h, 24h, 7d, 30d). Default 24h.",
+    )
+    p_analytics.add_argument(
+        "--no-failures", action="store_true",
+        help="Omit failure details from the report (defaults to including them).",
+    )
+    p_analytics.add_argument(
+        "--json", action="store_true",
+        help="JSON output suitable for jq/script pipelines.",
+    )
+
+    # chains — detected workflow chains. Delegates to gateway.compass_chains().
+    p_chains = sub.add_parser(
+        "chains",
+        help="List or detect tool chains (workflow patterns)",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass chains                  # list all known chains\n"
+            "  tool-compass chains --action detect  # detect from analytics\n"
+            "  tool-compass chains --json | jq '.chains[].name'"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_chains.add_argument(
+        "--action", default="list", choices=["list", "detect"],
+        help="`list` (default) shows all known chains; `detect` runs detection.",
+    )
+    p_chains.add_argument(
+        "--json", action="store_true",
+        help="JSON output suitable for jq/script pipelines.",
+    )
 
     return parser
 
@@ -884,6 +1043,463 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 
 # =============================================================================
+# FE-W11 — gateway-handler-backed subcommands (status, categories, audit,
+# analytics, chains, ui). Each is a thin wrapper around the matching @mcp.tool
+# function in gateway.py so the CLI surface stays in lockstep with the MCP
+# surface (no parallel implementation to drift).
+# =============================================================================
+
+
+def _check_index_initialized() -> bool:
+    """Return True if the on-disk index DB exists.
+
+    Used by gateway-backed CLI commands to print a "run sync first" hint when
+    callers run a status/categories/audit on a cold install. The gateway
+    handlers themselves can build the index lazily, but emitting the hint
+    keeps the CLI conversational rather than mysterious.
+    """
+    try:
+        from indexer import SQLITE_DB_PATH
+
+        return Path(SQLITE_DB_PATH).exists()
+    except Exception:  # pragma: no cover — defensive
+        return False
+
+
+def _maybe_suggest_sync(err_console) -> None:
+    """Emit a one-line "run sync first" hint if the index DB is missing."""
+    if not _check_index_initialized():
+        _print_dim(
+            err_console,
+            "› No tool index found yet. Run `tool-compass sync` first.",
+        )
+
+
+def _dump_json(payload: Any) -> int:
+    """Print JSON to stdout with the same shape `doctor --json` uses."""
+    print(json.dumps(payload, indent=2, default=str))
+    return 0
+
+
+def _is_error_envelope(payload: Any) -> bool:
+    """True when ``payload`` looks like a compass error envelope.
+
+    The gateway returns ``{"error": {"code": "...", "title": "...", ...}}``
+    when a feature is disabled or a subsystem is down. We unwrap that into
+    a `_print_error` line so the CLI surface looks consistent across calls.
+    """
+    return (
+        isinstance(payload, dict)
+        and isinstance(payload.get("error"), dict)
+        and "code" in payload["error"]
+    )
+
+
+def _print_envelope_error(err_console, payload: dict) -> int:
+    """Render a gateway error envelope as a single colored error line."""
+    err = payload["error"]
+    title = err.get("title") or err.get("detail") or "Operation failed"
+    suggestions = err.get("suggestions") or []
+    hint = suggestions[0] if suggestions else None
+    return _print_error(err_console, title, hint=hint, exit_code=1)
+
+
+def _cmd_ui(args: argparse.Namespace) -> int:
+    """Launch the Gradio web UI.
+
+    Thin wrapper that delegates straight to ``ui:main`` (the existing console
+    script). Forwards ``--port`` / ``--host`` / ``--share`` and propagates
+    ``--auth user:pass`` through the GRADIO_AUTH env var that ui.py already
+    reads for the public-tunnel auth check.
+
+    FE-W11-002: the README + docs advertise `tool-compass ui`; before this
+    subcommand it 404'd. Tests pass when `tool-compass ui --help` works and
+    the dispatch reaches ``ui.main``.
+    """
+    err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
+
+    # The UI is in an optional extras install (`tool-compass[ui]`). Probing the
+    # import lets us emit a friendly "pip install tool-compass[ui]" hint
+    # instead of leaking ModuleNotFoundError("gradio") into the user's face.
+    try:
+        import ui as _ui_module
+    except ImportError as e:
+        return _print_error(
+            err_console,
+            f"UI extras not installed ({e}).",
+            hint="Install with: pip install tool-compass[ui]",
+            exit_code=1,
+        )
+
+    # Bridge --auth to GRADIO_AUTH so ui.main's existing share-auth gate sees it.
+    if args.auth:
+        os.environ["GRADIO_AUTH"] = args.auth
+
+    # Rebuild argv for ui.main so it can re-parse with its own argparse. We
+    # forward only the flags ui.main knows about — extra root-parser flags
+    # like --no-color would crash ui's strict parser.
+    forwarded: List[str] = []
+    if args.port is not None:
+        forwarded += ["--port", str(args.port)]
+    if args.host:
+        forwarded += ["--host", args.host]
+    if args.share:
+        forwarded.append("--share")
+
+    # ui.main reads sys.argv directly, so swap it for the forwarded slice
+    # for the duration of the call and restore on return.
+    saved_argv = sys.argv
+    try:
+        sys.argv = ["tool-compass-ui"] + forwarded
+        return _ui_module.main() or 0
+    finally:
+        sys.argv = saved_argv
+
+
+def _cmd_status(args: argparse.Namespace) -> int:
+    """Print backend + index health (calls gateway.compass_status).
+
+    FE-W11-003: text mode renders a human-readable summary; --json emits the
+    raw gateway shape so dashboards / scripts can consume it unchanged. We
+    don't re-implement the gateway's logic — single source of truth.
+    """
+    err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
+    out_console = _make_console(no_color_flag=_no_color(args))
+    json_mode = bool(getattr(args, "json", False))
+
+    try:
+        from gateway import compass_status
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"Could not import gateway: {type(e).__name__}: {e}",
+            exit_code=2,
+        )
+
+    try:
+        payload = asyncio.run(compass_status())
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"compass_status failed: {type(e).__name__}: {e}",
+            exit_code=1,
+        )
+
+    if json_mode:
+        return _dump_json(payload)
+
+    # Text mode — render the key facts. Each block is wrapped so a missing
+    # subsystem (e.g. analytics disabled) just dims instead of erroring.
+    if _is_error_envelope(payload):
+        return _print_envelope_error(err_console, payload)
+
+    index_info = payload.get("index") or {}
+    backends_info = payload.get("backends") or {}
+    health = payload.get("health") or {}
+    sync_info = payload.get("sync") or {}
+
+    total_tools = index_info.get("total_tools", 0)
+    out_console.print(f"[bold]Tool Compass status[/bold]")
+    out_console.print(f"  [{_C_DIM}]index:[/{_C_DIM}] {total_tools} tools indexed")
+    by_server = index_info.get("by_server") or {}
+    if by_server:
+        out_console.print(
+            f"  [{_C_DIM}]servers:[/{_C_DIM}] "
+            + ", ".join(f"{k}={v}" for k, v in sorted(by_server.items()))
+        )
+
+    # Backend health — degraded_mode flag is the load-bearing signal.
+    connected = backends_info.get("connected_backends") or []
+    configured = backends_info.get("configured_backends") or []
+    if connected:
+        _print_success(
+            out_console,
+            f"backends connected: {len(connected)}/{len(configured) or len(connected)}",
+        )
+    elif configured:
+        _print_warn(
+            out_console,
+            f"no backends connected ({len(configured)} configured)",
+            hint="Check `tool-compass doctor` for details.",
+        )
+
+    if health.get("ollama_available"):
+        _print_success(out_console, "ollama reachable")
+    else:
+        _print_warn(out_console, "ollama unreachable",
+                    hint="Run `ollama serve` or set OLLAMA_URL.")
+    if not health.get("index_available", True):
+        _print_warn(out_console, "index in degraded mode",
+                    hint="Run `tool-compass sync` to rebuild.")
+    if health.get("degraded_mode"):
+        _print_warn(out_console, "compass is serving DEGRADED responses")
+
+    if sync_info and "last_sync_at" in sync_info:
+        out_console.print(
+            f"  [{_C_DIM}]last sync:[/{_C_DIM}] {sync_info.get('last_sync_at')}"
+        )
+
+    _maybe_suggest_sync(err_console)
+    return 0
+
+
+def _cmd_categories(args: argparse.Namespace) -> int:
+    """List categories + counts (calls gateway.compass_categories)."""
+    err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
+    out_console = _make_console(no_color_flag=_no_color(args))
+    json_mode = bool(getattr(args, "json", False))
+
+    try:
+        from gateway import compass_categories
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"Could not import gateway: {type(e).__name__}: {e}",
+            exit_code=2,
+        )
+
+    try:
+        payload = asyncio.run(compass_categories())
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"compass_categories failed: {type(e).__name__}: {e}",
+            exit_code=1,
+        )
+
+    if json_mode:
+        return _dump_json(payload)
+
+    if _is_error_envelope(payload):
+        return _print_envelope_error(err_console, payload)
+
+    cats = payload.get("categories") or {}
+    total = payload.get("total_tools", 0)
+    out_console.print(f"[bold]Categories[/bold] ({total} tools indexed)")
+    out_console.print(f"[{_C_DIM}]{'-' * 40}[/{_C_DIM}]")
+    if not cats:
+        out_console.print(f"  [{_C_DIM}](no categories — index empty)[/{_C_DIM}]")
+        _maybe_suggest_sync(err_console)
+        return 0
+    # Sort by count desc so the heavyweights show first.
+    for name, count in sorted(cats.items(), key=lambda kv: (-kv[1], kv[0])):
+        out_console.print(f"  [{_C_SUCCESS}]{count:>5}[/{_C_SUCCESS}]  {name}")
+    return 0
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    """Comprehensive system audit (calls gateway.compass_audit)."""
+    err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
+    out_console = _make_console(no_color_flag=_no_color(args))
+    json_mode = bool(getattr(args, "json", False))
+
+    try:
+        from gateway import compass_audit
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"Could not import gateway: {type(e).__name__}: {e}",
+            exit_code=2,
+        )
+
+    try:
+        payload = asyncio.run(
+            compass_audit(
+                include_tools=bool(args.include_tools),
+                timeframe=args.timeframe,
+            )
+        )
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"compass_audit failed: {type(e).__name__}: {e}",
+            exit_code=1,
+        )
+
+    if json_mode:
+        return _dump_json(payload)
+
+    if _is_error_envelope(payload):
+        return _print_envelope_error(err_console, payload)
+
+    system = payload.get("system") or {}
+    categories = payload.get("categories") or {}
+    servers = payload.get("servers") or {}
+    out_console.print(f"[bold]Tool Compass audit[/bold] ({args.timeframe})")
+    out_console.print(
+        f"  [{_C_DIM}]version:[/{_C_DIM}] {system.get('version', 'unknown')}  "
+        f"[{_C_DIM}]tools:[/{_C_DIM}] {system.get('total_tools', 0)}"
+    )
+    if categories:
+        out_console.print(
+            f"  [{_C_DIM}]categories:[/{_C_DIM}] "
+            + ", ".join(f"{k}={v}" for k, v in sorted(categories.items()))
+        )
+    if servers:
+        out_console.print(
+            f"  [{_C_DIM}]servers:[/{_C_DIM}] "
+            + ", ".join(f"{k}={v}" for k, v in sorted(servers.items()))
+        )
+
+    # Backends + hot cache + chain summary if present.
+    if "backends" in payload:
+        be = payload["backends"]
+        if isinstance(be, dict) and not be.get("error"):
+            connected = be.get("connected_backends") or []
+            configured = be.get("configured_backends") or []
+            _print_success(
+                out_console,
+                f"backends: {len(connected)}/{len(configured) or len(connected)} connected",
+            )
+        elif isinstance(be, dict) and be.get("error"):
+            _print_warn(out_console, f"backends error: {be['error']}")
+    if "hot_cache" in payload and isinstance(payload["hot_cache"], dict):
+        hc = payload["hot_cache"]
+        size = hc.get("size", 0)
+        out_console.print(f"  [{_C_DIM}]hot cache:[/{_C_DIM}] {size} tools")
+    if "chains" in payload and isinstance(payload["chains"], dict):
+        ch = payload["chains"]
+        total_chains = ch.get("total", 0)
+        out_console.print(f"  [{_C_DIM}]chains:[/{_C_DIM}] {total_chains} detected")
+
+    if args.include_tools:
+        tools = payload.get("tools") or []
+        out_console.print(f"\n[bold]Tools ({len(tools)})[/bold]")
+        for t in tools:
+            name = t.get("name") if isinstance(t, dict) else str(t)
+            out_console.print(f"  {name}")
+    _maybe_suggest_sync(err_console)
+    return 0
+
+
+def _cmd_analytics(args: argparse.Namespace) -> int:
+    """Usage statistics (calls gateway.compass_analytics)."""
+    err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
+    out_console = _make_console(no_color_flag=_no_color(args))
+    json_mode = bool(getattr(args, "json", False))
+
+    try:
+        from gateway import compass_analytics
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"Could not import gateway: {type(e).__name__}: {e}",
+            exit_code=2,
+        )
+
+    include_failures = not bool(args.no_failures)
+    try:
+        payload = asyncio.run(
+            compass_analytics(
+                timeframe=args.timeframe,
+                include_failures=include_failures,
+            )
+        )
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"compass_analytics failed: {type(e).__name__}: {e}",
+            exit_code=1,
+        )
+
+    if json_mode:
+        return _dump_json(payload)
+
+    if _is_error_envelope(payload):
+        return _print_envelope_error(err_console, payload)
+
+    out_console.print(f"[bold]Tool Compass analytics[/bold] ({args.timeframe})")
+    # Top tools — list the first ~10 by call count if the gateway returned a
+    # sorted shape. The gateway's exact shape can vary by analytics build, so
+    # we fall back to `_dump_json` rendering if the expected keys are absent.
+    top_tools = payload.get("top_tools") or payload.get("hot_tools") or []
+    if isinstance(top_tools, list) and top_tools:
+        out_console.print(f"  [{_C_DIM}]top tools:[/{_C_DIM}]")
+        for entry in top_tools[:10]:
+            if isinstance(entry, dict):
+                name = entry.get("tool_name") or entry.get("name") or "?"
+                count = entry.get("call_count") or entry.get("count") or 0
+                out_console.print(f"    {count:>5}  {name}")
+            else:
+                out_console.print(f"    {entry}")
+    summary = payload.get("summary") or {}
+    if summary:
+        total = summary.get("total_calls", 0)
+        out_console.print(f"  [{_C_DIM}]total calls:[/{_C_DIM}] {total}")
+    if include_failures:
+        failures = payload.get("failures") or []
+        if failures:
+            _print_warn(err_console, f"{len(failures)} failure(s) recorded in window")
+    return 0
+
+
+def _cmd_chains(args: argparse.Namespace) -> int:
+    """List or detect workflow chains (calls gateway.compass_chains)."""
+    err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
+    out_console = _make_console(no_color_flag=_no_color(args))
+    json_mode = bool(getattr(args, "json", False))
+
+    try:
+        from gateway import compass_chains
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"Could not import gateway: {type(e).__name__}: {e}",
+            exit_code=2,
+        )
+
+    try:
+        payload = asyncio.run(compass_chains(action=args.action))
+    except Exception as e:
+        return _print_error(
+            err_console,
+            f"compass_chains failed: {type(e).__name__}: {e}",
+            exit_code=1,
+        )
+
+    if json_mode:
+        return _dump_json(payload)
+
+    if _is_error_envelope(payload):
+        return _print_envelope_error(err_console, payload)
+
+    if args.action == "list":
+        chains = payload.get("chains") or []
+        out_console.print(
+            f"[bold]Tool chains[/bold] ({len(chains)} total)"
+        )
+        if not chains:
+            out_console.print(f"  [{_C_DIM}](no chains detected yet)[/{_C_DIM}]")
+            return 0
+        for c in chains:
+            name = c.get("name", "?")
+            tools = c.get("tools") or []
+            use_count = c.get("use_count", 0)
+            tag = " (auto)" if c.get("is_auto_detected") else ""
+            out_console.print(
+                f"  [{_C_SUCCESS}]{name}[/{_C_SUCCESS}]{tag}  "
+                f"[{_C_DIM}]used {use_count}×[/{_C_DIM}]"
+            )
+            if tools:
+                out_console.print(f"    [{_C_DIM}]→ {' -> '.join(tools)}[/{_C_DIM}]")
+    elif args.action == "detect":
+        detected = payload.get("detected") or []
+        count = payload.get("count", len(detected))
+        out_console.print(f"[bold]Detection complete[/bold]: {count} chain(s) detected")
+        for c in detected:
+            if isinstance(c, dict):
+                name = c.get("name", "?")
+                tools = c.get("tools") or []
+                out_console.print(
+                    f"  [{_C_SUCCESS}]{name}[/{_C_SUCCESS}]  "
+                    f"[{_C_DIM}]{' -> '.join(tools)}[/{_C_DIM}]"
+                )
+            else:
+                out_console.print(f"  {c}")
+    return 0
+
+
+# =============================================================================
 # Top-level dispatch
 # =============================================================================
 
@@ -912,6 +1528,31 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         if args.command is None or args.command == "serve":
+            # FE-W11-007: --http used to be parsed but ignored (the gateway
+            # reads PORT from env). Wire it so a value triggers HTTP transport
+            # at the requested port; a bare flag falls back to the existing
+            # PORT env or 8080. This keeps backward compatibility (existing
+            # PORT-only deployments still work) while fixing the documented
+            # surface.
+            http_val = getattr(args, "http", None) if args.command == "serve" else None
+            if http_val is not None:
+                # http_val is "" when --http was passed with no value
+                # (argparse const). Otherwise it's the string the user gave us.
+                port = http_val.strip() if http_val else os.environ.get("PORT", "8080")
+                if not port:
+                    port = "8080"
+                # Validate that we got an integer; reject anything else with a
+                # usage error so we don't hand a garbage value to the gateway.
+                try:
+                    int(port)
+                except ValueError:
+                    return _print_error(
+                        err_console,
+                        f"--http expects an integer port, got: {http_val!r}",
+                        hint="Try `tool-compass serve --http 8080`.",
+                        exit_code=2,
+                    )
+                os.environ["PORT"] = str(port)
             # Backward-compat path: legacy behavior was to launch the server.
             from gateway import main as gateway_main
 
@@ -924,6 +1565,18 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _cmd_describe(args)
         if args.command == "sync":
             return _cmd_sync(args)
+        if args.command == "ui":
+            return _cmd_ui(args)
+        if args.command == "status":
+            return _cmd_status(args)
+        if args.command == "categories":
+            return _cmd_categories(args)
+        if args.command == "audit":
+            return _cmd_audit(args)
+        if args.command == "analytics":
+            return _cmd_analytics(args)
+        if args.command == "chains":
+            return _cmd_chains(args)
     except KeyboardInterrupt:
         # Standard Unix convention: 128 + SIGINT (2) = 130.
         err_console.print(

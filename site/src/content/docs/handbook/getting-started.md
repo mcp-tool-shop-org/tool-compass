@@ -138,22 +138,30 @@ Tool Compass includes a Gradio web interface for interactive exploration. Instal
 pip install "tool-compass[ui]"
 
 # Launch on default port 7860 (binds to 127.0.0.1)
-tool-compass-ui
+tool-compass ui
 
 # Custom port
-tool-compass-ui --port 7861
+tool-compass ui --port 7861
 ```
+
+(The original `tool-compass-ui` console script is still installed and works
+identically — `tool-compass ui` is just the subcommand alias added in Wave-11
+so the CLI surface matches the README.)
 
 ### Public share links require GRADIO_AUTH
 
-`--share` creates a public Gradio tunnel that anyone with the URL can reach. Tool Compass requires basic-auth credentials before it will start in shared mode — set `GRADIO_AUTH="user:pass"` in your environment, or the launcher exits with code 2:
+`--share` creates a public Gradio tunnel that anyone with the URL can reach. Tool Compass requires basic-auth credentials before it will start in shared mode — pass `--auth user:pass` to the subcommand (or export `GRADIO_AUTH="user:pass"` directly), or the launcher exits with code 2:
 
 ```bash
+# Inline auth — sets GRADIO_AUTH for you
+tool-compass ui --share --auth user:secret
+
+# Equivalent: export the env var first
 export GRADIO_AUTH="user:secret"
-tool-compass-ui --share
+tool-compass ui --share
 ```
 
-Without `GRADIO_AUTH` set, `--share` is refused.
+Without `GRADIO_AUTH` set (or `--auth` passed), `--share` is refused.
 
 ## Testing
 

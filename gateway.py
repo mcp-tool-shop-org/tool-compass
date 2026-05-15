@@ -2403,7 +2403,10 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         # Use stderr for diagnostics if needed
         import sys
 
-        print("Starting Tool Compass Gateway v2.0...", file=sys.stderr)
+        # FE-W11-008: read __version__ from _version.py rather than embedding
+        # a hardcoded literal that drifts on every release. The Wave-10 audit
+        # called this out as a stale banner.
+        print(f"Starting Tool Compass Gateway v{__version__}...", file=sys.stderr)
         print(
             "Tools: compass, describe, execute, compass_categories, compass_status",
             file=sys.stderr,

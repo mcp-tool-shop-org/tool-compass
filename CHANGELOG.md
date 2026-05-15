@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Wave-11 CLI feature parity + test hardening on top of the Stage B+C
+release-hygiene work. Resolves audit findings flagged in Wave-10. No
+breaking changes — the new subcommands are additive, and the existing
+default-to-`serve` behavior is preserved.
+
+### Added (Wave-11 — CLI feature parity)
+- **`tool-compass ui`** — launch the Gradio web UI inline. Thin wrapper
+  that forwards `--port`, `--host`, `--share`, and `--auth user:pass`
+  (the last bridges to the `GRADIO_AUTH` env var ui.py reads). Closes
+  the gap where the README + handbook advertised `tool-compass ui` but
+  only `tool-compass-ui` existed. Requires `pip install
+  tool-compass[ui]` extras (FE-W11-002).
+- **`tool-compass status`** — delegates to `compass_status`; renders
+  index health, backend connection counts, health flags (ollama
+  reachable, index available, degraded_mode), and last sync timestamp.
+  Honors `--json` for script-friendly output (FE-W11-003).
+- **`tool-compass categories`** — delegates to `compass_categories`;
+  prints categories sorted by tool count desc, with `--json`
+  (FE-W11-004).
+- **`tool-compass audit`** — delegates to `compass_audit`. Accepts
+  `--timeframe` (1h/24h/7d/30d) and `--include-tools`. Renders system
+  version, category/server counts, backend health, hot cache size, and
+  chain summary; `--json` emits the raw payload (FE-W11-005).
+- **`tool-compass analytics`** — delegates to `compass_analytics`.
+  Accepts `--timeframe` and `--no-failures`. Renders top tools and
+  total calls; gracefully unwraps the `analytics_disabled` error
+  envelope when analytics is off (FE-W11-006a).
+- **`tool-compass chains`** — delegates to `compass_chains`. Accepts
+  `--action {list,detect}`; renders chain name, use count, auto-detect
+  tag, and the tool arrow chain (FE-W11-006b).
+
+### Fixed (Wave-11)
+- **`tool-compass serve --http` now actually sets the port.** Previously
+  the flag was parsed but ignored — the gateway only read `PORT` from
+  env. `--http <port>` now exports `PORT=<port>`; bare `--http` falls
+  back to existing `PORT` env or 8080. Validates integer input; rejects
+  garbage with exit code 2 and a usage hint (FE-W11-007).
+- **Gateway startup banner reads `_version.__version__`** instead of
+  the hardcoded `"v2.0..."` literal that drifted on every release
+  (gateway.py:2406). Matches the source-of-truth pattern used by `tool-compass
+  --version` and the audit / status JSON shapes (FE-W11-008).
+
+### Changed (Wave-11 — tests)
+- **GW-FT-001 un-skipped.** The per-backend stdout reader has been
+  shipped (`backend_client_simple.py:432`); the test fixture now spins
+  up `_read_task` explicitly and feeds responses through an
+  `asyncio.Queue` so the head-of-line guarantee is exercised even on
+  systems where the previous timeout-then-skip pattern masked a
+  genuine routing regression (FE-W11-009).
+- **MCC-FT-002 conditional skips removed.** `get_canonical_name` and
+  `ToolDefinition.deprecated_aliases` both ship in v2.2.0; the
+  conditional `pytest.skip` lines turned silent regressions into
+  invisible no-ops. Both `test_deprecated_aliases_resolves_to_canonical`
+  and `test_analytics_canonicalizes_deprecated_name` are now hard
+  assertions on the canonical path (FE-W11-010).
+- 11 new smoke tests covering the 6 new subcommands, `--http` PORT
+  export (with and without explicit value), `--auth` -> GRADIO_AUTH
+  bridge, argparse choice enforcement, and the banner version-read.
+
+---
+
 CI / supply-chain / release-hygiene hardening pass (Dogfood Stage B+C,
 ci-tooling domain, wave-7 of swarm-1778813065-e2dc). No public API or
 runtime behavior changes.
