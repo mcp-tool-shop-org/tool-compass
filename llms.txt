@@ -4,23 +4,34 @@
 
 ## Overview
 
-Tool Compass is an orchestration layer for 115+ MCP tools across 6 backend servers. Instead of memorizing tool names, describe what you want to accomplish and Tool Compass finds the right tools using semantic search.
+Tool Compass is an orchestration layer for indexed MCP tools across multiple backend servers. Instead of memorizing tool names, describe what you want to accomplish and Tool Compass finds the right tools using semantic search.
+
+The exact tool count depends on which backends you connect; the indexer auto-discovers tools at sync time. Connect Tool Compass to your MCP backends, run `tool-compass sync`, and the index is rebuilt automatically.
 
 ## Quick Start
 
 ```bash
 pip install tool-compass
+tool-compass sync          # build the index
+tool-compass               # run the MCP gateway
 ```
+
+MCP client configuration (e.g., Claude Desktop `~/.config/claude/claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "tool-compass": {
-      "command": "python",
-      "args": ["-m", "tool_compass.gateway"]
+      "command": "tool-compass"
     }
   }
 }
+```
+
+If you prefer the Gradio web UI (`pip install tool-compass[ui]`):
+
+```bash
+tool-compass-ui --port 7860
 ```
 
 ## Core Tools
@@ -29,7 +40,7 @@ pip install tool-compass
 Find tools by describing what you want to do.
 - `intent`: Natural language description (e.g., "read a file", "generate an image")
 - `top_k`: Maximum results (1-10, default 5)
-- Returns: Tool matches with names, descriptions, confidence scores
+- Returns: Tool matches with names, descriptions, confidence scores. When Ollama is unreachable, falls back to keyword matching and sets `degraded: true` on each match.
 
 ### describe(tool_name)
 Get full schema for a specific tool.
@@ -44,6 +55,9 @@ Run a tool on its backend server.
 
 ### compass_categories()
 List available tool categories and servers.
+
+### compass_status()
+System health snapshot — index size, embedding model status, Ollama reachability, backend liveness. The fastest single-call diagnostic.
 
 ### compass_analytics(timeframe="24h")
 Get usage statistics and tool health metrics.

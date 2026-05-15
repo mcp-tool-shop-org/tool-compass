@@ -32,6 +32,8 @@ env/
 .coverage
 htmlcov/
 .tox/
+.hypothesis/
+.benchmarks/
 
 # Build artifacts
 dist/
@@ -46,6 +48,7 @@ Thumbs.db
 # Local development files
 *.local.json
 .env.local
+.env*
 
 # Gradio cache
 flagged/
@@ -54,3 +57,28 @@ flagged/
 db/*.db
 db/*.hnsw
 !db/.gitkeep
+
+# Sources that don't belong in the production image (CT-B-004).
+# These are intentionally excluded so a future regression to
+# `COPY . .` doesn't silently ship them.
+tests/
+docs/
+site/
+archive/
+.github/
+.claude/
+# Translation READMEs (re-run on TranslateGemma 12B; not runtime artifacts)
+README.ja.md
+README.zh.md
+README.es.md
+README.fr.md
+README.hi.md
+README.it.md
+README.pt-BR.md
+# Audit / governance docs — not needed at runtime
+SCORECARD.md
+SHIP_GATE.md
+CODE_OF_CONDUCT.md
+CONTRIBUTING.md
+SECURITY.md
+CHANGELOG.md

@@ -49,10 +49,25 @@ class SyncManager:
         ANALYTICS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
     def _get_db(self) -> sqlite3.Connection:
-        """Get or create database connection."""
+        """Get or create database connection.
+
+        BE-A-011 + BE-B-010: check_same_thread=False is needed because the
+        sync poll_loop runs on the asyncio event loop while the sync DB may
+        also be touched from worker threads. WAL + busy_timeout serialize
+        across this connection AND the analytics + chain_indexer connections
+        without losing throughput.
+        """
         if self._db is None:
-            self._db = sqlite3.connect(str(ANALYTICS_DB_PATH))
+            self._db = sqlite3.connect(
+                str(ANALYTICS_DB_PATH), check_same_thread=False
+            )
             self._db.row_factory = sqlite3.Row
+            try:
+                self._db.execute("PRAGMA busy_timeout = 5000")
+                self._db.execute("PRAGMA journal_mode = WAL")
+                self._db.execute("PRAGMA synchronous = NORMAL")
+            except sqlite3.Error as e:
+                logger.debug(f"sqlite PRAGMA setup failed: {e}")
             self._init_sync_table()
         return self._db
 
@@ -477,21 +492,24 @@ class SyncManager:
             return
 
         async def poll_loop():
+            # BE-A-017 + BE-B-012: removed asyncio.shield wrapper around
+            # sync_if_needed. Shield was intended to prevent corruption
+            # during cancellation, but it fights graceful shutdown — a
+            # SIGTERM during a 60s rebuild would wait the full 60s before
+            # unwinding, often escalating to SIGKILL and losing the
+            # in-flight DB commit. Sync operations are designed to be
+            # cancellable: each backend's update commits atomically via
+            # BEGIN IMMEDIATE / COMMIT (see indexer.build_index), so a
+            # cancellation between backends leaves a coherent state.
             while True:
-                # Explicit cancellation check at loop top so we exit promptly
-                # when stop_background_polling is called.
-                if asyncio.current_task().cancelled():
-                    return
-                await asyncio.sleep(interval_seconds)
                 try:
-                    # Shield the critical section: once we've taken the sync
-                    # lock, a cancel shouldn't leave the lock in a weird state
-                    # or abort a partial rebuild.
-                    results = await asyncio.shield(self.sync_if_needed())
+                    await asyncio.sleep(interval_seconds)
+                    results = await self.sync_if_needed()
                     synced = [k for k, v in results.items() if v == "synced"]
                     if synced:
                         logger.info(f"Background sync completed for: {synced}")
                 except asyncio.CancelledError:
+                    logger.info("Background polling cancelled")
                     raise
                 except Exception as e:
                     logger.error(f"Background sync error: {e}")

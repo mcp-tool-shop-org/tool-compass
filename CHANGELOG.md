@@ -5,6 +5,83 @@ All notable changes to Tool Compass will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+CI / supply-chain / release-hygiene hardening pass (Dogfood Stage B+C,
+ci-tooling domain, wave-7 of swarm-1778813065-e2dc). No public API or
+runtime behavior changes.
+
+### Added
+- SLSA build provenance attestations on PyPI publish via
+  `attestations: true` on `pypa/gh-action-pypi-publish` (CT-B-009).
+- SLSA `provenance: mode=max` plus SBOM attestation on the multi-arch
+  GHCR image via `docker/build-push-action` (CT-B-009).
+- `.github/dependabot.yml` docker ecosystem entry with the all-docker
+  group (minor + patch); pairs with the digest-pinned base image
+  (CT-B-005).
+- Daily security-only Dependabot overlay for pip + github-actions +
+  docker ecosystems with PR cap 10 (CT-B-006).
+- `actions/configure-pages` step in `pages-build` so Pages config is no
+  longer an implicit dependency on the Settings → Pages UI (CT-B-016).
+- `.pre-commit-config.yaml` with `ruff-format`, `ruff --fix`, the
+  standard pre-commit-hooks set, and gitleaks for a secrets scan.
+  CONTRIBUTING.md quick-start now includes `pre-commit install`
+  (CT-B-018).
+- `scripts/regenerate-scorecard.sh` — refreshes the auto-generated
+  block in SCORECARD.md between SHIPCHECK markers while preserving
+  hand-curated sections (Known Gaps, Remediation History). New
+  `make scorecard` + `make verify-scorecard` wrappers (CT-B-017).
+- `scripts/verify-metrics.sh` + `make verify-metrics` — boots the
+  gateway, scrapes `/metrics`, asserts the Four Golden Signals surface
+  is present. Includes warn-only checks for the saturation gauges
+  expected from BE-B-002 (CT-B-008).
+- `maintainers` field in `pyproject.toml [project]` (CT-B-019).
+
+### Changed
+- All remaining floating GitHub Actions tags pinned by full commit SHA:
+  `actions/github-script@v7` → `60a0d83...` (CT-B-001) and
+  `docker/setup-qemu-action@v3` → `c7c5346...` (CT-B-002). Every action
+  in `.github/workflows/` is now SHA-pinned.
+- `Dockerfile` base image pinned by digest: `python:3.11-slim@sha256:9a7765b367...`
+  on both the builder and production stages. Dependabot's docker
+  ecosystem (CT-B-005) keeps the digest fresh (CT-B-003).
+- Production Dockerfile stage now copies only the builder-assembled
+  `/build` tree instead of the full build context. Tests, docs, site,
+  `.github`, translation READMEs, and audit docs no longer ship inside
+  the production image (CT-B-004).
+- `.dockerignore` extended with the same exclude list for
+  defense-in-depth and to keep the build context small.
+- `LABEL version="..."` removed from the Dockerfile; the OCI
+  `opencontainers.image.version` label is emitted at publish time by
+  `docker/metadata-action` from the git tag (CT-B-015).
+- `Python :: 3.13` classifier removed from `pyproject.toml` until
+  hnswlib ships a working `cp313` wheel (`requires-python` still
+  permits install on 3.13; this only affects PyPI search filters)
+  (CT-B-019).
+- Every CI job in `ci.yml` and `publish.yml` now declares
+  `timeout-minutes` (lint 5, test 15, integration 25, docker 20,
+  nightly-fuzz 45, pages-build 10, pages-deploy 5, build 10,
+  publish-pypi 10, docker 30, release-smoke 15) — replaces the 360-min
+  GitHub default (CT-B-011).
+- All `actions/upload-artifact` invocations now set `retention-days`
+  (14 for JUnit + pip-audit diagnostic reports in `ci.yml`; 7 for the
+  `dist/` build-to-publish handoff in `publish.yml`) (CT-B-012).
+- `release-smoke` PyPI-install retry loop now loud-fails when no
+  iteration succeeds, replacing the redundant follow-up install that
+  silently masked propagation failures (CT-B-014).
+- `SECURITY.md` consolidates the preferred reporting path (GitHub
+  Security Advisories) and tightens the Critical resolution SLA to 72h
+  acknowledged plan / 7d patch (CT-B-020).
+- `SCORECARD.md` Date + Version refreshed; auto-generated block now
+  lives between `SHIPCHECK-AUTO-START/END` markers so regenerations
+  preserve Known Gaps + Remediation History.
+
+### Notes
+- Translations (`README.{ja,zh,es,fr,hi,it,pt-BR}.md`) re-run on
+  TranslateGemma 12B as Phase 10 of release prep BEFORE
+  `npm publish` / `gh release create` per the global ordering rule
+  (CT-B-013). This wave intentionally left them untouched.
+
 ## [2.2.2] - 2026-04-23
 
 Patch release. Fixes the Docker image so the `tool-compass` console script

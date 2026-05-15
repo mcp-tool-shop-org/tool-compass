@@ -12,6 +12,12 @@ requires-python = ">=3.10,<3.15"
 authors = [
     { name = "mcp-tool-shop", email = "64996768+mcp-tool-shop@users.noreply.github.com" }
 ]
+# Explicit maintainers per PEP 621 — currently the same identity as authors,
+# but having both fields populated is the convention for projects where
+# authorship and on-call maintenance might diverge (CT-B-019).
+maintainers = [
+    { name = "mcp-tool-shop", email = "64996768+mcp-tool-shop@users.noreply.github.com" }
+]
 keywords = [
     "mcp",
     "model-context-protocol",
@@ -33,7 +39,11 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
+    # Python :: 3.13 classifier intentionally omitted (CT-B-019). hnswlib
+    # 0.8.0's cp313 wheel SIGILLs on common runners (see ci.yml matrix
+    # comment); re-add once hnswlib ships a working cp313 wheel or
+    # IDX-FT-001 lands a pluggable vector backend. `requires-python`
+    # still allows install on 3.13 — this only controls PyPI search filters.
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
@@ -148,6 +158,7 @@ timeout_method = "thread"
 markers = [
     "integration: marks tests requiring external services (Ollama, backends)",
     "slow: marks tests that take a long time to run",
+    "golden: marks the frozen golden-set retrieval benchmark (TS-B-006)",
 ]
 # Narrowed from blanket DeprecationWarning ignore to known-noisy modules only,
 # so new deprecations in our own code still surface.

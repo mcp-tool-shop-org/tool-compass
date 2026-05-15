@@ -26,16 +26,40 @@ def _build_parser() -> argparse.ArgumentParser:
 
     Pulled out of main() so tests can introspect the parser without invoking
     any subcommand side effects.
+
+    FE-A-010: top-level description names every subcommand the user might
+    type next, including `ui` (which delegates to `tool-compass-ui` if the
+    extras are installed). New users running `tool-compass --help` now have
+    a discoverable path to the Gradio surface.
+
+    FE-B-009: every subcommand carries an `epilog` with one curated
+    example, per clig.dev (CLI Guidelines) and Heroku CLI style.
     """
     parser = argparse.ArgumentParser(
         prog="tool-compass",
-        description="Semantic MCP tool discovery gateway",
+        description=(
+            "Tool Compass — semantic MCP tool discovery gateway.\n"
+            "\n"
+            "With no subcommand, runs the gateway server (default).\n"
+            "Subcommands: serve, search, describe, sync, doctor.\n"
+            "Web UI: install `tool-compass[ui]` and run `tool-compass-ui`."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  tool-compass                       # run the MCP gateway\n"
+            "  tool-compass search 'read a file'  # one-shot search\n"
+            "  tool-compass describe bridge:read_file\n"
+            "  tool-compass sync                  # rebuild the index\n"
+            "  tool-compass doctor                # diagnostics JSON\n"
+        ),
     )
-    # --version lives on the root parser (not a subcommand) so release-smoke
-    # and `tool-compass --version` work out of the box.
+    # FE-A-017: catch the wider exception set so a bad regex, syntax error,
+    # or import-time side-effect in _version.py does not crash the CLI on
+    # first run. The fallback is the same "unknown" string we used before.
     try:
         from _version import __version__ as _tc_version
-    except ImportError:  # pragma: no cover — defensive fallback
+    except Exception:  # pragma: no cover — defensive fallback
         _tc_version = "unknown"
     parser.add_argument(
         "--version",
@@ -45,26 +69,98 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     # doctor — environment snapshot (delegates to config.doctor()).
-    sub.add_parser("doctor", help="Print diagnostic info")
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Print diagnostic info (config path, backends, Ollama reach)",
+        epilog=(
+            "Example:\n  tool-compass doctor | jq .config_path"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_doctor.add_argument(
+        "--text",
+        action="store_true",
+        help="Text summary (default emits JSON for jq pipelines).",
+    )
 
     # search — one-shot semantic search against the built index.
-    p_search = sub.add_parser("search", help="One-shot semantic search")
-    p_search.add_argument("intent", type=str, help="What you want to do")
-    p_search.add_argument("--top", type=int, default=5)
-    p_search.add_argument("--json", action="store_true")
+    p_search = sub.add_parser(
+        "search",
+        help="One-shot semantic search (free-text intent)",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass search 'generate an AI image'\n"
+            "  tool-compass search 'read a file' --top 3 --json | jq '.[0].tool'\n"
+            "\n"
+            "If Ollama is unreachable, search falls back to keyword matching."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_search.add_argument(
+        "intent",
+        type=str,
+        help="Free-text description of what you want to do.",
+    )
+    p_search.add_argument(
+        "--top", type=int, default=5,
+        help="Maximum number of results to return (default 5; 1-10 valid).",
+    )
+    p_search.add_argument(
+        "--json", action="store_true",
+        help="JSON output suitable for jq/script pipelines.",
+    )
 
     # describe — print the schema / metadata for a specific tool.
-    p_describe = sub.add_parser("describe", help="Print tool schema")
-    p_describe.add_argument("tool_name", type=str)
-    p_describe.add_argument("--json", action="store_true")
+    p_describe = sub.add_parser(
+        "describe",
+        help="Print tool schema (parameters, examples, server, category)",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass describe bridge:read_file\n"
+            "  tool-compass describe comfy:comfy_generate --json"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_describe.add_argument(
+        "tool_name",
+        type=str,
+        help="Qualified tool name (e.g., bridge:read_file).",
+    )
+    p_describe.add_argument(
+        "--json", action="store_true",
+        help="JSON output (default emits Markdown).",
+    )
 
     # sync — rebuild the index from configured backends.
-    p_sync = sub.add_parser("sync", help="Rebuild index from backends")
-    p_sync.add_argument("--force", action="store_true")
+    p_sync = sub.add_parser(
+        "sync",
+        help="Rebuild the index from backends (run after config changes)",
+        epilog=(
+            "Example:\n"
+            "  tool-compass sync\n"
+            "\n"
+            "Idempotent. Reads compass_config.json."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_sync.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "Force a full rebuild even if no backend changes are detected. "
+            "Currently a no-op (full_sync always rebuilds) — reserved for "
+            "the incremental-sync path."
+        ),
+    )
 
     # serve — explicit form of the default (server launch). Kept separate
     # so `tool-compass --http` still works on the root parser in future.
-    p_serve = sub.add_parser("serve", help="Run MCP gateway server (default)")
+    p_serve = sub.add_parser(
+        "serve",
+        help="Run MCP gateway server (default when no subcommand given)",
+        epilog="Example:\n  tool-compass serve --http",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p_serve.add_argument("--http", action="store_true", help="HTTP transport")
 
     return parser
@@ -117,7 +213,15 @@ def _cmd_search(args: argparse.Namespace) -> int:
         return 0
 
     if not results:
+        # FE-B-010 + Nielsen #9: empty results is an error-adjacent state.
+        # State the problem AND suggest the next action; keep exit code 0
+        # (an intentional empty result is not a failure).
         print(f"No tools matched intent: {args.intent!r}")
+        print(
+            "Try a broader intent, lower --top to widen, or run "
+            "`tool-compass describe <name>` if you know the tool name.",
+            file=sys.stderr,
+        )
         return 0
 
     # Plain-text table — width-tolerant, no external deps.
@@ -151,12 +255,26 @@ def _cmd_describe(args: argparse.Namespace) -> int:
 
     conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
+    suggestions: List[str] = []
     try:
         row = conn.execute(
             "SELECT name, description, category, server, parameters, examples, is_core "
             "FROM tools WHERE name = ?",
             (args.tool_name,),
         ).fetchone()
+        # FE-A-018: if no exact match, gather up to 3 substring suggestions
+        # so the user is not left on a dead-end "not found". Matches the UI
+        # surface's partial-match LIKE path so CLI and UI behave the same.
+        if row is None:
+            needle = f"%{args.tool_name}%"
+            rows = conn.execute(
+                "SELECT name FROM tools "
+                "WHERE name LIKE ? OR description LIKE ? "
+                "ORDER BY (CASE WHEN name LIKE ? THEN 0 ELSE 1 END), name "
+                "LIMIT 3",
+                (needle, needle, needle),
+            ).fetchall()
+            suggestions = [r["name"] for r in rows]
     except sqlite3.OperationalError as e:
         print(f"DB query failed: {e}", file=sys.stderr)
         conn.close()
@@ -165,6 +283,16 @@ def _cmd_describe(args: argparse.Namespace) -> int:
 
     if row is None:
         print(f"Tool not found: {args.tool_name}", file=sys.stderr)
+        if suggestions:
+            print("Did you mean:", file=sys.stderr)
+            for s in suggestions:
+                print(f"  - {s}", file=sys.stderr)
+        else:
+            print(
+                "Run `tool-compass search` with the intent you have in mind "
+                "to discover available tools.",
+                file=sys.stderr,
+            )
         return 1
 
     parameters = json.loads(row["parameters"]) if row["parameters"] else {}
@@ -248,32 +376,84 @@ def _cmd_sync(args: argparse.Namespace) -> int:
     return asyncio.run(_run())
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Print diagnostic info.
+
+    FE-A-011: wrap config.doctor() in try/except so a corrupted config or
+    transient permission error returns a non-zero exit code with a single
+    user-facing line instead of a raw traceback. The error goes to stderr;
+    JSON/text payload goes to stdout, keeping the contract pipeline-safe.
+
+    FE-B-018: default is JSON (this is the canonical machine-readable
+    diagnostic surface — release-smoke + CI gates consume the JSON form);
+    `--text` switches to a compact human-readable summary so terminal
+    users aren't forced to install jq.
+    """
+    try:
+        from config import doctor
+
+        payload = doctor()
+    except Exception as e:
+        print(
+            f"Diagnostic check failed: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 2
+
+    if getattr(args, "text", False):
+        # Compact text summary — version, config path, backend count.
+        version = payload.get("version", "unknown")
+        config_path = payload.get("config_path", "(unknown)")
+        backends = payload.get("backends") or {}
+        ollama_url = payload.get("ollama_url", "(unset)")
+        print(f"tool-compass {version}")
+        print(f"config: {config_path}")
+        print(f"backends: {len(backends)} configured")
+        print(f"ollama:  {ollama_url}")
+        return 0
+
+    print(json.dumps(payload, indent=2, default=str))
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Top-level CLI dispatch.
 
     Default behavior (no args, or explicit `serve`) delegates to the gateway
     server so existing `tool-compass` integrations keep working without
     edits. New subcommands short-circuit before touching gateway.
+
+    FE-A-011: every subcommand path is wrapped — unexpected exceptions
+    produce a single-line stderr message and exit code 2 (system error)
+    instead of leaking a traceback to terminals or log scrapers.
     """
     parser = _build_parser()
     args = parser.parse_args(argv)
 
-    if args.command is None or args.command == "serve":
-        # Backward-compat path: legacy behavior was to launch the server.
-        from gateway import main as gateway_main
+    try:
+        if args.command is None or args.command == "serve":
+            # Backward-compat path: legacy behavior was to launch the server.
+            from gateway import main as gateway_main
 
-        return gateway_main() or 0
-    if args.command == "doctor":
-        from config import doctor
-
-        print(json.dumps(doctor(), indent=2, default=str))
-        return 0
-    if args.command == "search":
-        return _cmd_search(args)
-    if args.command == "describe":
-        return _cmd_describe(args)
-    if args.command == "sync":
-        return _cmd_sync(args)
+            return gateway_main() or 0
+        if args.command == "doctor":
+            return _cmd_doctor(args)
+        if args.command == "search":
+            return _cmd_search(args)
+        if args.command == "describe":
+            return _cmd_describe(args)
+        if args.command == "sync":
+            return _cmd_sync(args)
+    except KeyboardInterrupt:
+        # Standard Unix convention: 128 + SIGINT (2) = 130.
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
+    except Exception as e:
+        print(
+            f"tool-compass {args.command} failed: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 2
 
     parser.print_help()
     return 2

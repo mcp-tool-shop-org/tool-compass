@@ -20,6 +20,10 @@ jobs:
   build:
     name: Build package
     runs-on: ubuntu-latest
+    # CT-B-011: fail-fast budgets per SRE 'fail fast' (Google SRE Book ch.21).
+    # Default GitHub timeout is 360 min; a wedged dependency install or twine
+    # check is well outside the legitimate envelope at 10 min.
+    timeout-minutes: 10
 
     steps:
       - name: Checkout repository
@@ -46,14 +50,26 @@ jobs:
         with:
           name: dist
           path: dist/
+          # CT-B-012: dist/ is an ephemeral build-to-publish handoff; the
+          # canonical artifacts live at PyPI + GHCR after publish completes.
+          # Keep the workflow copy around 7 days for incident-response replays.
+          retention-days: 7
 
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
     needs: build
     environment: pypi
+    # CT-B-011: PyPI upload + propagation; 10 min covers retries.
+    timeout-minutes: 10
     permissions:
       id-token: write
+      # CT-B-009: attestations:write enables SLSA provenance attestations on
+      # the published wheel + sdist via pypa/gh-action-pypi-publish v1.13+.
+      # Combined with `attestations: true` below, PyPI surfaces a verifiable
+      # build attestation tied to this commit + workflow run.
+      attestations: write
+      contents: read
 
     steps:
       - name: Download build artifacts
@@ -64,6 +80,12 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          # CT-B-009: emit SLSA build provenance attestations for the wheel
+          # and sdist. PyPI verifies the attestation against the workflow's
+          # OIDC identity; downstream consumers can audit the chain from a
+          # specific commit -> workflow run -> published artifact.
+          attestations: true
 
   docker:
     name: Publish to GHCR
@@ -71,9 +93,16 @@ jobs:
     # PyPI ships first (CDS-B-005). If PyPI fails, Docker must not ship a
     # half-release; if PyPI succeeds, Docker becomes the recoverable tail.
     needs: publish-pypi
+    # CT-B-011: multi-arch buildx (linux/amd64 + linux/arm64) + push to GHCR
+    # is the longest leg; 30 min covers the warm cache path with headroom.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
+      # CT-B-009: id-token + attestations enable buildx SLSA provenance
+      # mode=max on the image manifest below.
+      id-token: write
+      attestations: write
 
     steps:
       - name: Checkout repository
@@ -99,8 +128,10 @@ jobs:
 
       # QEMU is required to cross-build linux/arm64 from an amd64 runner.
       - name: Set up QEMU
-        # TODO(swarm): pin docker/setup-qemu-action by SHA on next dependabot sweep.
-        uses: docker/setup-qemu-action@v3
+        # SHA-pinned per SLSA L3 supply-chain hygiene (CT-B-002). publish job
+        # carries packages:write — a compromised mutable v3 tag would inherit
+        # GHCR write capability during a release window. Bump via dependabot.
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -115,11 +146,21 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          # CT-B-009: SLSA provenance mode=max emits buildx provenance
+          # attestation (including all input source digests) attached to the
+          # image manifest. sbom: true emits an SPDX SBOM attestation in the
+          # same manifest. Both consumable via `cosign verify-attestation`
+          # or `docker buildx imagetools inspect`.
+          provenance: mode=max
+          sbom: true
 
   release-smoke:
     name: Release smoke test
     runs-on: ubuntu-latest
     needs: [publish-pypi, docker]
+    # CT-B-011: PyPI propagation retry loop + docker pull + version handshake.
+    # 15 min is the propagation-retry window plus headroom.
+    timeout-minutes: 15
     permissions:
       contents: read
       packages: read
@@ -141,14 +182,22 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
-          # PyPI propagation is fast but not instant; retry briefly.
+          # PyPI propagation is fast but not instant; retry briefly. If no
+          # iteration succeeds the loop falls through and the subsequent
+          # `tool-compass --version` invocation fails with a clear "command
+          # not found", which is the desired loud failure mode (CT-B-014).
+          install_ok=0
           for _ in $(seq 1 12); do
             if pip install "tool-compass==${VERSION}"; then
+              install_ok=1
               break
             fi
             sleep 10
           done
-          pip install "tool-compass==${VERSION}"
+          if [ "$install_ok" -ne 1 ]; then
+            echo "::error::PyPI smoke failed: tool-compass==${VERSION} did not become installable in the propagation window"
+            exit 1
+          fi
           OUT="$(tool-compass --version 2>&1 || true)"
           echo "tool-compass --version → $OUT"
           echo "$OUT" | grep -Fq "${VERSION}" || {

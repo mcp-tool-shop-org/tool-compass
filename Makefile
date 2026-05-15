@@ -1,4 +1,4 @@
-.PHONY: verify test lint build dev dev-ui scorecard verify-scorecard
+.PHONY: verify test lint build dev dev-ui scorecard verify-scorecard verify-metrics
 
 verify: lint test build
 	@echo "✓ All checks passed"
@@ -25,14 +25,21 @@ dev-ui:
 	pip install -e .[all]
 	python ui.py
 
-# CDS-FT-001: regenerate SCORECARD.md from shipcheck audit output.
-# `verify-scorecard` fails if SCORECARD.md drifts from what shipcheck emits.
+# CDS-FT-001 / CT-B-017: regenerate the auto-generated block of SCORECARD.md
+# from shipcheck audit output, preserving hand-curated sections (Known Gaps,
+# Remediation History, operator notes) between the SHIPCHECK-AUTO markers.
+# `verify-scorecard` fails if the auto block drifts from what shipcheck emits.
 # CI currently runs this as a soft-fail (continue-on-error) while the
 # shipcheck markdown format settles — flip to hard-fail once stable.
 scorecard:
-	npx @mcptoolshop/shipcheck audit --format markdown > SCORECARD.md
-	@echo "Regenerated SCORECARD.md"
+	bash scripts/regenerate-scorecard.sh
 
 verify-scorecard:
-	npx @mcptoolshop/shipcheck audit --format markdown > /tmp/scorecard-generated.md
-	@diff -u SCORECARD.md /tmp/scorecard-generated.md || { echo "SCORECARD.md is out of sync — run 'make scorecard'"; exit 1; }
+	bash scripts/regenerate-scorecard.sh --check
+
+# CT-B-008: smoke-test the /metrics endpoint Four Golden Signals coverage.
+# Boots the gateway briefly, scrapes /metrics, asserts the expected gauges
+# and counters are present. Runs without Ollama (the metrics endpoint is
+# tolerant of degraded backends).
+verify-metrics:
+	bash scripts/verify-metrics.sh

@@ -4,7 +4,10 @@
 # =============================================================================
 # Stage 1: Builder
 # =============================================================================
-FROM python:3.11-slim AS builder
+# Base image is digest-pinned (CT-B-003) so re-published 3.11-slim tags cannot
+# silently change what we ship; Dependabot's docker ecosystem (CT-B-005) bumps
+# the digest monthly via .github/dependabot.yml.
+FROM python:3.11-slim@sha256:9a7765b36773a37061455b332f18e265e7f58f6fea9c419a550d2a8b0e9db834 AS builder
 
 WORKDIR /build
 
@@ -33,12 +36,15 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # =============================================================================
 # Stage 2: Production
 # =============================================================================
-FROM python:3.11-slim AS production
+# Digest-pinned base (CT-B-003). Dependabot keeps both FROMs in lockstep.
+FROM python:3.11-slim@sha256:9a7765b36773a37061455b332f18e265e7f58f6fea9c419a550d2a8b0e9db834 AS production
 
 LABEL maintainer="Tool Compass <github.com/mcp-tool-shop-org/tool-compass>"
 LABEL description="Semantic search gateway for MCP tools"
-# Keep in sync with pyproject.toml [project] version
-LABEL version="2.2.2"
+# Version label is set automatically at publish-time by docker/metadata-action
+# (publish.yml) via the OCI annotation opencontainers.image.version, computed
+# from the git release tag. The hand-maintained "LABEL version" was dropped
+# per CT-B-015 to remove the manual sync hazard.
 
 # Security: Run as non-root user
 RUN groupadd -r compass && useradd -r -g compass compass
@@ -49,8 +55,12 @@ WORKDIR /app/tool_compass
 COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-# Copy application code
-COPY --chown=compass:compass . .
+# Copy only the runtime artifacts the builder explicitly assembled (CT-B-004).
+# This excludes tests/, docs/, site/, .github/, .hypothesis/, archive/,
+# translation READMEs, SCORECARD/SHIP_GATE drafts, etc. from the production
+# image — both attack-surface reduction and image-size win. Mirrors the
+# builder's explicit module list at line 19-22.
+COPY --chown=compass:compass --from=builder /build /app/tool_compass
 
 # Create data directory for indexes
 RUN mkdir -p /app/tool_compass/db && \

@@ -116,10 +116,10 @@ ollama pull nomic-embed-text
 
 ### Index not found
 
-Rebuild the index:
+Rebuild the index using the v2.2 canonical CLI:
 
 ```bash
-python gateway.py --sync
+tool-compass sync
 ```
 
 ### Backend not connecting

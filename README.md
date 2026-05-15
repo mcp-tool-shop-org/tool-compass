@@ -303,17 +303,21 @@ Tool Compass is a **local-first** development tool. See [SECURITY.md](SECURITY.m
 
 ## Scorecard
 
-Per-category scores are regenerated post-swarm from `npx @mcptoolshop/shipcheck audit`.
-See [SCORECARD.md](SCORECARD.md) for the current authoritative breakdown — the table
-below mirrors it and is intentionally not hand-authored.
+Per-category scores are regenerated post-swarm via
+`bash scripts/regenerate-scorecard.sh` (which wraps `npx
+@mcptoolshop/shipcheck audit`). See [SCORECARD.md](SCORECARD.md) for the
+current authoritative breakdown — the table below mirrors it and is
+intentionally not hand-authored. Hand-curated sections (Known Gaps,
+Remediation History) live outside the `<!-- SHIPCHECK-AUTO-START/END -->`
+markers in SCORECARD.md and survive regenerations.
 
 | Category | Score | Notes |
 |----------|-------|-------|
-| A. Security | TBD | SECURITY.md present; pip-audit warn-only pending CVE baseline |
+| A. Security | TBD | SHA-pinned actions; digest-pinned base image; SLSA provenance + SBOM on PyPI + GHCR; pre-commit secrets scan |
 | B. Error Handling | TBD | Structured results, graceful degradation, exit codes |
-| C. Operator Docs | TBD | README, CHANGELOG, LICENSE, Makefile `verify` |
-| D. Shipping Hygiene | TBD | CI consolidated; pytest config in pyproject.toml |
-| E. Identity (soft) | TBD | Logo, landing page, GitHub metadata present |
+| C. Operator Docs | TBD | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Shipping Hygiene | TBD | CI consolidated; timeout-minutes + retention-days on every job; pytest config in pyproject.toml |
+| E. Identity (soft) | TBD | Logo, landing page, GitHub metadata; explicit maintainers in pyproject.toml |
 | **Total** | **TBD** | Regenerate via `make scorecard` |
 
 ## License

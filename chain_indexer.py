@@ -85,10 +85,25 @@ class ChainIndexer:
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
     def _get_db(self) -> sqlite3.Connection:
-        """Get database connection (uses analytics DB)."""
+        """Get database connection (uses analytics DB).
+
+        BE-A-008 + BE-B-010: opened with check_same_thread=False because the
+        analytics DB is shared across analytics.py + sync_manager.py +
+        chain_indexer.py — these three each held independent connections
+        that raced for the file lock. WAL + busy_timeout serialize them
+        cleanly at the SQLite level.
+        """
         if self._db is None:
-            self._db = sqlite3.connect(str(ANALYTICS_DB_PATH))
+            self._db = sqlite3.connect(
+                str(ANALYTICS_DB_PATH), check_same_thread=False
+            )
             self._db.row_factory = sqlite3.Row
+            try:
+                self._db.execute("PRAGMA busy_timeout = 5000")
+                self._db.execute("PRAGMA journal_mode = WAL")
+                self._db.execute("PRAGMA synchronous = NORMAL")
+            except sqlite3.Error as e:
+                logger.debug(f"sqlite PRAGMA setup failed: {e}")
         return self._db
 
     def create_chain_embedding_text(self, chain: ToolChain) -> str:

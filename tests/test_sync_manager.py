@@ -36,10 +36,32 @@ def mock_config():
 
 @pytest.fixture
 def mock_index():
-    """Mock CompassIndex."""
-    index = AsyncMock()
+    """Mock CompassIndex with production-shape sync + async split.
+
+    TS-B-001 fix: previously this fixture was a bare ``AsyncMock()``, which
+    made *every* attribute access on the mock return an awaitable. That broke
+    the diff-sync code path (``_get_backend_tool_names``) which is SYNCHRONOUS
+    and calls ``self.index.db.execute(...).fetchall()`` — under AsyncMock,
+    that chain returned unawaited coroutines, raising RuntimeWarning at every
+    sync_manager test and silently bypassing the IDX-FT-004 'removed tools'
+    branch entirely.
+
+    Fix: use Mock(spec=CompassIndex) so attribute access matches the real API
+    surface (and unknown attributes raise AttributeError, not return another
+    Mock). The two known-async methods are explicitly AsyncMock; the sync
+    .db handle has a real execute(...).fetchall() chain that returns [].
+    """
+    from indexer import CompassIndex
+
+    index = Mock(spec=CompassIndex)
     index.build_index = AsyncMock(return_value={"tools_indexed": 5})
     index.add_single_tool = AsyncMock(return_value=True)
+
+    # Sync .db handle — mirrors sqlite3.Connection.execute(...).fetchall().
+    # _get_backend_tool_names iterates the rows; default to no prior tools.
+    db = Mock()
+    db.execute.return_value.fetchall.return_value = []
+    index.db = db
     return index
 
 

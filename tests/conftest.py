@@ -24,11 +24,9 @@ Nightly run (1000 examples, no deadline):
     HYPOTHESIS_PROFILE=nightly pytest
 
 `pytest-timeout` is picked up automatically from pyproject.toml when
-installed. It is NOT a hard dependency — install it locally (or in CI)
-to benefit. TODO(ci-docs-site agent): add `pytest-timeout>=2.3.0` to
-[project.optional-dependencies].dev in pyproject.toml so this is always
-available. This file deliberately does not touch pyproject.toml — that
-is the ci-docs-site agent's domain.
+installed. The dep is wired into [project.optional-dependencies].dev in
+pyproject.toml (pinned at >=2.3.0); the soft-import probe below remains
+the canonical mechanism in case it's ever made optional again.
 """
 
 import os

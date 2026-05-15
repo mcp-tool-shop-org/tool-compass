@@ -11,12 +11,24 @@
 
 We take security seriously. If you discover a security vulnerability in Tool Compass, please report it responsibly.
 
-**Email:** 64996768+mcp-tool-shop@users.noreply.github.com
+### Preferred channel — GitHub Security Advisories
+
+Open a private advisory through GitHub's confidential channel:
+[github.com/mcp-tool-shop-org/tool-compass/security/advisories/new](https://github.com/mcp-tool-shop-org/tool-compass/security/advisories/new).
+Reports through this path are end-to-end encrypted via GitHub and are
+automatically routed to the maintainers — no PGP key handoff is required.
+
+### Fallback — email
+
+If GitHub Security Advisories are unavailable for any reason, email
+**64996768+mcp-tool-shop@users.noreply.github.com**. PGP / sigstore keys
+are not currently published; use the GitHub Advisories path above
+whenever possible.
 
 ### How to Report
 
-1. **Do NOT open a public GitHub issue** for security vulnerabilities
-2. Email us or use [GitHub Security Advisories](https://docs.github.com/en/code-security/security-advisories/guidance-on-reporting-and-writing-information-about-vulnerabilities/privately-reporting-a-security-vulnerability)
+1. **Do NOT open a public GitHub issue** for security vulnerabilities.
+2. Use the preferred channel above; fall back to email only if needed.
 3. Include:
    - Description of the vulnerability
    - Steps to reproduce
@@ -27,8 +39,10 @@ We take security seriously. If you discover a security vulnerability in Tool Com
 
 - **Acknowledgment**: Within 48 hours
 - **Initial Assessment**: Within 5 business days
-- **Resolution Timeline**: Depends on severity
-  - Critical: 24-48 hours
+- **Resolution Timeline** (tightened on the Critical lane per industry
+  practice — see RFC 9116 + FIRST.org Vulnerability Coordination Maturity
+  Model):
+  - Critical: 72 hours to acknowledged remediation plan; 7 days to patch
   - High: 7 days
   - Medium: 30 days
   - Low: 90 days
@@ -97,6 +111,7 @@ pip-audit
 
 ## Contact
 
-For security concerns: Use [GitHub Security Advisories](https://github.com/mcp-tool-shop-org/tool-compass/security/advisories/new) (private)
+For security concerns: use the preferred channel described above
+([GitHub Security Advisories](https://github.com/mcp-tool-shop-org/tool-compass/security/advisories/new)).
 
-For general questions: Open a [GitHub Discussion](https://github.com/mcp-tool-shop-org/tool-compass/discussions)
+For general questions: Open a [GitHub Discussion](https://github.com/mcp-tool-shop-org/tool-compass/discussions).

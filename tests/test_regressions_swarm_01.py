@@ -370,11 +370,34 @@ class TestMCCA005ConcurrentRecordSearch:
     ):
         """record_search shares a sqlite3 connection via check_same_thread
         and serializes writes under self._lock. Calling it from two threads
-        concurrently must complete without raising."""
+        concurrently must complete without raising.
+
+        TS-B-002 hardening:
+          - ``threading.Barrier(2)`` synchronizes both workers immediately
+            before the contention point so they really race. Without it,
+            ``t1.start()`` followed by ``t2.start()`` on a slow CI runner can
+            let t1 complete before t2 even begins — the "concurrent" claim
+            becomes vacuous.
+          - ``not t1.is_alive()`` / ``not t2.is_alive()`` after each join
+            converts silent deadlock into an explicit liveness failure.
+            Without these, a deadlock elapsed the 10s timeout, both threads
+            exited the run() context as zombies, and the downstream
+            ``count == 2`` would fail with the misleading shape
+            "count mismatch" instead of "threads deadlocked."
+
+        Research basis: Python Free-Threading Guide (https://py-free-threading.github.io/porting/)
+        on threading.Barrier for race-window maximization, and CPython
+        Lib/test/lock_tests.py for the canonical
+        ``join + assertFalse(is_alive())`` pattern.
+        """
         errors: list[BaseException] = []
+        barrier = threading.Barrier(2)
 
         def worker(query: str):
             try:
+                # Race-window maximization: both threads block here until the
+                # other arrives, then both proceed simultaneously.
+                barrier.wait(timeout=5)
                 asyncio.run(
                     test_analytics.record_search(
                         query=query,
@@ -391,6 +414,11 @@ class TestMCCA005ConcurrentRecordSearch:
         t2.start()
         t1.join(timeout=10)
         t2.join(timeout=10)
+
+        # Liveness checks — distinguish "thread completed" from "thread
+        # silently timed out under a deadlock."
+        assert not t1.is_alive(), "thread-1 did not finish within 10s (deadlock?)"
+        assert not t2.is_alive(), "thread-2 did not finish within 10s (deadlock?)"
 
         assert not errors, f"concurrent record_search raised: {errors!r}"
 

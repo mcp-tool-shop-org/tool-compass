@@ -132,16 +132,28 @@ real embedding queries.
 
 ## Gradio UI
 
-Tool Compass includes a Gradio web interface for interactive exploration:
+Tool Compass includes a Gradio web interface for interactive exploration. Install the UI extra first:
 
 ```bash
-# Launch on default port 7860
-python ui.py
+pip install "tool-compass[ui]"
 
-# Custom port or public share link
-python ui.py --port 7861
-python ui.py --share
+# Launch on default port 7860 (binds to 127.0.0.1)
+tool-compass-ui
+
+# Custom port
+tool-compass-ui --port 7861
 ```
+
+### Public share links require GRADIO_AUTH
+
+`--share` creates a public Gradio tunnel that anyone with the URL can reach. Tool Compass requires basic-auth credentials before it will start in shared mode — set `GRADIO_AUTH="user:pass"` in your environment, or the launcher exits with code 2:
+
+```bash
+export GRADIO_AUTH="user:secret"
+tool-compass-ui --share
+```
+
+Without `GRADIO_AUTH` set, `--share` is refused.
 
 ## Testing
 

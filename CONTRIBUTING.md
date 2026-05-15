@@ -39,6 +39,11 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 # Install dependencies (editable + dev extras)
 pip install -e .[all]
 
+# Install the pre-commit hooks (formatting + lint + secrets scan).
+# One-time setup; thereafter `git commit` runs the hooks automatically.
+pip install pre-commit
+pre-commit install
+
 # Start Ollama and pull embedding model
 ollama pull nomic-embed-text
 
@@ -173,10 +178,15 @@ Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
 1. **Create a branch** from `main`
 2. **Make changes** with tests
 3. **Run tests** locally: `pytest`
-4. **Format code**: `black . && isort .`
-5. **Lint**: `ruff check .`
-6. **Commit** with descriptive message
-7. **Push** and create PR
+4. **Run pre-commit** (covers formatting + lint + secrets scan):
+   `pre-commit run --all-files`. The hooks also fire automatically on
+   `git commit` once `pre-commit install` has run once in the clone.
+5. **Commit** with descriptive message
+6. **Push** and create PR
+
+Note: ruff replaces black + isort + flake8 per Astral guidance — the
+pre-commit config runs `ruff-format` and `ruff --fix` together. You can
+still invoke them manually as `ruff format . && ruff check --fix .`.
 
 ## Pull Request Process
 

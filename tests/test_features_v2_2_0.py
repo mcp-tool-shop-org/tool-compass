@@ -204,8 +204,14 @@ def test_metrics_includes_embed_latency_p95():
     assert resp.status_code == 200
 
     body = resp.text
-    if "tool_compass_embed_latency_p95_ms" not in body:
-        pytest.skip("embed_latency_p95 metric not yet wired (ok if GW-FT-003 partial)")
+    # TS-B-004: the embed_latency_p95 metric SHIPPED in v2.2.0 (gateway.py
+    # line 1620 emits it unconditionally). The previous skip-then-assert
+    # masked regressions — converted to a hard fail so a future change that
+    # strips the metric surfaces loudly.
+    assert "tool_compass_embed_latency_p95_ms" in body, (
+        "tool_compass_embed_latency_p95_ms missing from /metrics body — "
+        "this metric shipped in v2.2.0 and should always be present."
+    )
 
     # Find the metric line and confirm the last token is a real number.
     metric_lines = [
@@ -422,8 +428,14 @@ def _require_cli():
 def test_cli_doctor_returns_json(capsys):
     """`tool-compass doctor` must emit JSON with version + config_path keys."""
     cli = _require_cli()
-    if not hasattr(cli, "main"):
-        pytest.skip("cli.main not defined yet")
+    # TS-B-004: cli.main shipped in v2.2.0 (cli.py:24-73). The previous
+    # skip-if-missing path masked regressions where cli.main was renamed.
+    # Hard assert: if cli.main disappears, the CLI subcommand surface
+    # broke and the test should fail loudly.
+    assert hasattr(cli, "main"), (
+        "cli.main missing — cli subcommand surface shipped in v2.2.0 and "
+        "should always be present."
+    )
 
     try:
         rc = cli.main(["doctor"])
@@ -457,8 +469,14 @@ def test_cli_doctor_returns_json(capsys):
 def test_cli_search_returns_results(capsys, monkeypatch):
     """`tool-compass search foo --json` must emit a JSON array of results."""
     cli = _require_cli()
-    if not hasattr(cli, "main"):
-        pytest.skip("cli.main not defined yet")
+    # TS-B-004: cli.main shipped in v2.2.0 (cli.py:24-73). The previous
+    # skip-if-missing path masked regressions where cli.main was renamed.
+    # Hard assert: if cli.main disappears, the CLI subcommand surface
+    # broke and the test should fail loudly.
+    assert hasattr(cli, "main"), (
+        "cli.main missing — cli subcommand surface shipped in v2.2.0 and "
+        "should always be present."
+    )
 
     # Monkeypatch whatever search entry-point cli.py uses. We support the
     # common shapes: a module-level `search_tools` function, or a CompassIndex
@@ -544,8 +562,14 @@ def test_cli_search_returns_results(capsys, monkeypatch):
 def test_cli_describe_unknown_tool_exits_nonzero():
     """`tool-compass describe nonexistent` must exit with a non-zero code."""
     cli = _require_cli()
-    if not hasattr(cli, "main"):
-        pytest.skip("cli.main not defined yet")
+    # TS-B-004: cli.main shipped in v2.2.0 (cli.py:24-73). The previous
+    # skip-if-missing path masked regressions where cli.main was renamed.
+    # Hard assert: if cli.main disappears, the CLI subcommand surface
+    # broke and the test should fail loudly.
+    assert hasattr(cli, "main"), (
+        "cli.main missing — cli subcommand surface shipped in v2.2.0 and "
+        "should always be present."
+    )
 
     try:
         rc = cli.main(["describe", "definitely_not_a_real_tool_xyz"])
@@ -559,8 +583,14 @@ def test_cli_describe_unknown_tool_exits_nonzero():
 def test_cli_no_args_falls_through_to_gateway(monkeypatch):
     """`tool-compass` with no args must invoke gateway.main (serve default)."""
     cli = _require_cli()
-    if not hasattr(cli, "main"):
-        pytest.skip("cli.main not defined yet")
+    # TS-B-004: cli.main shipped in v2.2.0 (cli.py:24-73). The previous
+    # skip-if-missing path masked regressions where cli.main was renamed.
+    # Hard assert: if cli.main disappears, the CLI subcommand surface
+    # broke and the test should fail loudly.
+    assert hasattr(cli, "main"), (
+        "cli.main missing — cli subcommand surface shipped in v2.2.0 and "
+        "should always be present."
+    )
 
     import gateway
 
@@ -667,6 +697,9 @@ async def test_analytics_canonicalizes_deprecated_name(test_analytics):
 
     original_tools = list(tm.TOOLS)
     tm.TOOLS.append(canonical)
+    # Rebuild the alias map so get_canonical_name knows about the test tool.
+    if hasattr(tm, "_rebuild_alias_map"):
+        tm._rebuild_alias_map()
     try:
         await test_analytics.record_tool_call(
             tool_name="svc:legacy_op", success=True, latency_ms=5.0
@@ -683,23 +716,29 @@ async def test_analytics_canonicalizes_deprecated_name(test_analytics):
             db.close()
     finally:
         tm.TOOLS[:] = original_tools
+        if hasattr(tm, "_rebuild_alias_map"):
+            tm._rebuild_alias_map()
 
-    if not names:
-        pytest.skip("record_tool_call did not persist a row (analytics degraded?)")
+    assert names, (
+        "record_tool_call did not persist any row — analytics broke. "
+        "Previously skipped under a degraded-analytics rationale (TS-B-004); "
+        "the row should always land since record_tool_call ships in v2.2.0."
+    )
 
-    # The canonicalization feature must rewrite the persisted name.
-    if "svc:legacy_op" in names and "svc:canonical_op" not in names:
-        pytest.skip(
-            "analytics canonicalization not yet wired "
-            "(MCC-FT-002 integration pending)"
-        )
+    # TS-B-004: get_canonical_name() shipped in v2.2.0 (tool_manifest.py:830)
+    # and the analytics rewrite ships in record_tool_call (analytics.py:397).
+    # The previous skip-then-assert masked the case where the rewrite branch
+    # regressed. Converted to a hard assert now that the alias map rebuild
+    # is wired correctly.
     assert "svc:canonical_op" in names, (
-        f"Expected canonical name in analytics rows, got {names}"
+        f"MCC-FT-002 regression: analytics canonicalization did not rewrite "
+        f"the deprecated name. Got: {names}"
     )
 
 
 # =============================================================================
-# Quick-win features (owned by ci-docs-site agent — tests stay light)
+# Build / CI infrastructure checks (owned by ci-tooling domain — tests stay
+# light. See CHANGELOG or ROADMAP for status on each gap.)
 # =============================================================================
 
 
@@ -717,7 +756,7 @@ def test_pyproject_has_coverage_threshold():
     if not (has_addopts_gate or has_coverage_report):
         pytest.skip(
             "Coverage threshold not yet configured in pyproject.toml "
-            "(ci-docs-site agent feature pending)"
+            "(owned by ci-tooling; see ROADMAP/CHANGELOG for status)"
         )
     assert has_addopts_gate or has_coverage_report
 
@@ -732,7 +771,10 @@ def test_makefile_has_dev_target():
     import re
 
     if not re.search(r"(?m)^dev\s*:", text):
-        pytest.skip("`dev:` target not yet added (ci-docs-site pending)")
+        pytest.skip(
+            "`dev:` target not yet added "
+            "(owned by ci-tooling; see ROADMAP/CHANGELOG for status)"
+        )
     assert re.search(r"(?m)^dev\s*:", text)
 
 
@@ -745,5 +787,8 @@ def test_makefile_has_scorecard_target():
     import re
 
     if not re.search(r"(?m)^scorecard\s*:", text):
-        pytest.skip("`scorecard:` target not yet added (ci-docs-site pending)")
+        pytest.skip(
+            "`scorecard:` target not yet added "
+            "(owned by ci-tooling; see ROADMAP/CHANGELOG for status)"
+        )
     assert re.search(r"(?m)^scorecard\s*:", text)

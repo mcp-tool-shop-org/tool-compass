@@ -24,28 +24,13 @@ from chain_indexer import (
 # =============================================================================
 
 
-@pytest.fixture
-def mock_embedder():
-    """Mock embedder for testing."""
-    embedder = Mock()
-
-    def mock_embed(text: str) -> np.ndarray:
-        hash_val = hash(text) % (2**32)
-        np.random.seed(hash_val)
-        vec = np.random.randn(EMBEDDING_DIM).astype(np.float32)
-        return vec / np.linalg.norm(vec)
-
-    async def async_embed(text: str) -> np.ndarray:
-        return mock_embed(text)
-
-    async def async_embed_query(query: str) -> np.ndarray:
-        return mock_embed(f"query: {query}")
-
-    embedder.embed = AsyncMock(side_effect=async_embed)
-    embedder.embed_query = AsyncMock(side_effect=async_embed_query)
-    embedder.close = AsyncMock()
-
-    return embedder
+# TS-B-009: the local mock_embedder fixture that used to live here has been
+# removed in favour of conftest.py's canonical one. The local version was a
+# stale fork — missing **kwargs on async_embed_query (Stage C trace_id
+# propagation), embed_batch (cache warming), health_check (/ready probe),
+# and the base_url/model attributes that IDX-FT-003 writes into sqlite for
+# cache keying. Mocks that diverge from the production contract silently
+# bypass production code paths.
 
 
 @pytest.fixture
@@ -461,9 +446,22 @@ class TestChainSearch:
             "file operations", top_k=3, min_confidence=0.0
         )
 
-        # Results may be empty with mock embeddings, just verify types
+        # TS-B-013: previous version asserted only on types, which passed
+        # vacuously on the empty list. The conftest mock_embedder uses
+        # process-salted hash() so we cannot reliably assert
+        # `len(results) > 0` (PYTHONHASHSEED variability would make this
+        # flaky). The strengthened contract: bounded top_k, every result
+        # has a populated chain + numeric score. For deterministic
+        # content-shape coverage of retrieval, see tests/test_golden_set.py.
         assert isinstance(results, list)
         assert all(isinstance(r, ChainSearchResult) for r in results)
+        assert len(results) <= 3, "top_k=3 violated"
+        for r in results:
+            assert r.chain is not None, (
+                "TS-B-013 regression: search returned a result with a "
+                "None chain — _id_to_chain mapping is broken."
+            )
+            assert isinstance(r.score, float)
 
     @pytest.mark.asyncio
     async def test_search_chains_respects_top_k(self, chain_indexer, sample_chains):
