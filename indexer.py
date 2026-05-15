@@ -247,10 +247,15 @@ class CompassIndex:
                 try:
                     self.db.execute("DELETE FROM tools")
                     self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+                    # BE-A2-001: allow_replace_deleted=True permits re-adding a
+                    # previously-deleted label on the UPDATE path in
+                    # add_single_tool. Without it, hnswlib raises on duplicate
+                    # labels and silently breaks updates of changed tools.
                     self.index.init_index(
                         max_elements=1000,
                         ef_construction=HNSW_EF_CONSTRUCTION,
                         M=HNSW_M,
+                        allow_replace_deleted=True,
                     )
                     self.index.set_ef(HNSW_EF_SEARCH)
                     self.index.save_index(str(self.index_path))
@@ -369,10 +374,15 @@ class CompassIndex:
             # Build HNSW index
             logger.info("Building HNSW index...")
             self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+            # BE-A2-001: allow_replace_deleted=True permits replacing a label
+            # marked deleted on the UPDATE path in add_single_tool. Without
+            # this flag, hnswlib raises on duplicate labels and silently fails
+            # updates of changed tools.
             self.index.init_index(
                 max_elements=max(len(tools) * 2, 1000),  # Room to grow
                 ef_construction=HNSW_EF_CONSTRUCTION,
                 M=HNSW_M,
+                allow_replace_deleted=True,
             )
 
             # Add vectors with tool IDs
@@ -467,7 +477,13 @@ class CompassIndex:
 
             # Load HNSW index
             self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
-            self.index.load_index(str(self.index_path))
+            # BE-A2-001: pass allow_replace_deleted=True at load so the
+            # restored index supports mark_deleted + replace_deleted on the
+            # add_single_tool UPDATE path. Without it, persisted indexes
+            # silently revert to default-strict mode after restart.
+            self.index.load_index(
+                str(self.index_path), allow_replace_deleted=True
+            )
             self.index.set_ef(HNSW_EF_SEARCH)
 
             # Post-load sanity: HNSW count vs DB mapping. A mismatch hurts
@@ -767,8 +783,29 @@ class CompassIndex:
                         self.index.resize_index(new_max)
                         logger.info(f"Resized HNSW index to {new_max} elements")
 
-                    # Add to HNSW index
-                    self.index.add_items(embedding.reshape(1, -1), [tool_id])
+                    # BE-A2-001: on the UPDATE path, hnswlib raises on a
+                    # duplicate label by default. The index is initialized
+                    # with allow_replace_deleted=True so we can mark the old
+                    # label deleted and re-add with replace_deleted=True. This
+                    # is the supported way to overwrite an existing vector.
+                    if existing:
+                        try:
+                            self.index.mark_deleted(tool_id)
+                        except RuntimeError as mark_err:
+                            # mark_deleted raises if the label is already
+                            # marked deleted (idempotent for our purposes) or
+                            # not present in the index (HNSW/DB drift — treat
+                            # as a fresh add). Log and continue.
+                            logger.debug(
+                                f"mark_deleted({tool_id}) skipped: {mark_err}"
+                            )
+                        self.index.add_items(
+                            embedding.reshape(1, -1),
+                            [tool_id],
+                            replace_deleted=True,
+                        )
+                    else:
+                        self.index.add_items(embedding.reshape(1, -1), [tool_id])
 
                     # Save index before committing SQLite.
                     self.index.save_index(str(self.index_path))

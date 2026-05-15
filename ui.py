@@ -74,34 +74,59 @@ _init_lock = threading.RLock()
 
 
 def get_index() -> CompassIndex:
-    """Get or initialize compass index (thread-safe)."""
+    """Get or initialize compass index (thread-safe).
+
+    FE-A2-003: Bind to a local first; only publish to the module global
+    after load_index() succeeds. The previous implementation assigned
+    ``_index = CompassIndex()`` BEFORE ``_index.load_index()`` was
+    awaited — if load_index() raised, the global was left pointing at a
+    half-initialized object, and the next ``_index is not None`` short
+    circuit returned that broken singleton forever, masking the original
+    failure and bleeding AttributeError into every downstream tab.
+    """
     global _index
     if _index is not None:
         return _index
     with _init_lock:
         if _index is not None:
             return _index
-        _index = CompassIndex()
-        if not _index.load_index():
+        idx = CompassIndex()
+        if not idx.load_index():
             raise RuntimeError("Failed to load index. Run: python gateway.py --sync")
+        _index = idx
     return _index
 
 
 def get_analytics_instance() -> CompassAnalytics:
-    """Get or initialize analytics (thread-safe)."""
+    """Get or initialize analytics (thread-safe).
+
+    FE-A2-005: Same partial-init guard as get_index — hot_cache load can
+    raise (sqlite3.OperationalError, schema mismatch, DB locked from
+    concurrent sync_manager/chain_indexer writes). Bind to a local, run
+    the load, then publish; a failure leaves the global at ``None`` so the
+    next caller re-attempts initialization.
+    """
     global _analytics
     if _analytics is not None:
         return _analytics
     with _init_lock:
         if _analytics is not None:
             return _analytics
-        _analytics = get_analytics()
-        run_async(_analytics.load_hot_cache_from_db())
+        analytics = get_analytics()
+        run_async(analytics.load_hot_cache_from_db())
+        _analytics = analytics
     return _analytics
 
 
 def get_chain_indexer_instance() -> Optional[ChainIndexer]:
-    """Get or initialize chain indexer (thread-safe)."""
+    """Get or initialize chain indexer (thread-safe).
+
+    FE-A2-004: Same partial-init guard. ChainIndexer.load_chain_index has
+    its own failure modes (missing HNSW file, embedder mismatch); a raise
+    inside load must NOT leave _chain_indexer pointing at an unloaded
+    instance, because subsequent Workflows-tab calls would short-circuit
+    on the truthy global and silently return zero/garbage results.
+    """
     global _chain_indexer, _config
     with _init_lock:
         if _config is None:
@@ -110,8 +135,9 @@ def get_chain_indexer_instance() -> Optional[ChainIndexer]:
         if _chain_indexer is None and _config.chain_indexing_enabled:
             index = get_index()
             analytics = get_analytics_instance()
-            _chain_indexer = get_chain_indexer(index.embedder, analytics)
-            run_async(_chain_indexer.load_chain_index())
+            ci = get_chain_indexer(index.embedder, analytics)
+            run_async(ci.load_chain_index())
+            _chain_indexer = ci
 
     return _chain_indexer
 
@@ -183,8 +209,19 @@ def _check_ollama_banner() -> str:
 
 
 def format_error(error: Exception, context: str = "") -> str:
-    """Format error message for user display."""
+    """Format error message for user display.
+
+    FE-A2-001/002: All caller-supplied context and exception strings are
+    HTML-escaped before interpolation. Both ``context`` (often contains the
+    user query / tool_name) and ``str(error)`` (can carry arbitrary backend
+    payloads from Ollama, sqlite, hnswlib, MCP servers) are untrusted from
+    the renderer's perspective — escape at the boundary, not at every
+    caller, so future callers can't reintroduce the gap.
+    """
     error_type = type(error).__name__
+    safe_error_type = html.escape(error_type, quote=True)
+    safe_error_str = html.escape(str(error)[:200], quote=True)
+    safe_context = html.escape(context, quote=True) if context else ""
 
     # MCC-B-008: error banners get role="alert" so screen readers announce
     # them immediately; warning emoji gets an aria-label so it isn't read as
@@ -214,10 +251,10 @@ def format_error(error: Exception, context: str = "") -> str:
         return f"""
         <div role="alert" style="border: 1px solid #ef5350; border-radius: 8px; padding: 16px; margin: 8px 0; background: #2a1a1a;">
             <div style="color: #ef5350; font-weight: bold;">{warn_icon} Error:</div>
-            <p style="color: #ccc; margin: 8px 0;">{context or "An error occurred"}</p>
+            <p style="color: #ccc; margin: 8px 0;">{safe_context or "An error occurred"}</p>
             <details style="color: #888; font-size: 0.85em;">
                 <summary>Technical details</summary>
-                <code>{error_type}: {str(error)[:200]}</code>
+                <code>{safe_error_type}: {safe_error_str}</code>
             </details>
         </div>
         """
@@ -279,7 +316,10 @@ def search_tools(
 
         results = run_async(do_search())
     except Exception as e:
-        return format_error(e, f"Search failed for: {query}"), "{}"
+        # FE-A2-001: format_error escapes context, but escape here too so the
+        # raw query never leaves this scope as live HTML even if a future
+        # renderer skips the helper.
+        return format_error(e, f"Search failed for: {html.escape(query, quote=True)}"), "{}"
 
     # Filter by confidence
     results = [r for r in results if r.score >= min_confidence]
@@ -410,7 +450,10 @@ def search_chains(query: str, top_k: int = 5, min_confidence: float = 0.3) -> st
 
         results = run_async(do_search())
     except Exception as e:
-        return format_error(e, f"Workflow search failed for: {query}")
+        # FE-A2-001: escape query at the call boundary in addition to
+        # format_error's own escape, so the raw query is never carried as
+        # live HTML through any intermediate string.
+        return format_error(e, f"Workflow search failed for: {html.escape(query, quote=True)}")
 
     # No results
     if not results:
@@ -631,7 +674,9 @@ def get_tool_details(tool_name: str) -> str:
             )
             row = cursor.fetchone()
     except Exception as e:
-        return format_error(e, f"Could not search for tool: {tool_name}")
+        # FE-A2-001: tool_name is user-controlled (input box). Escape at the
+        # boundary even though format_error escapes context too.
+        return format_error(e, f"Could not search for tool: {html.escape(tool_name, quote=True)}")
 
     # Tool not found
     if not row:
