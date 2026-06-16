@@ -108,6 +108,16 @@ class CompassAnalytics:
         # via check_same_thread=False; we serialize writes ourselves).
         self._lock = threading.Lock()
 
+        # MCC-FT-003: dedicated lock for lazy connection initialization. The
+        # write lock (self._lock) does NOT cover _get_db()/_init_db, so two
+        # threads first-touching the DB concurrently used to race here — each
+        # saw self.db is None, each opened a connection and ran the DDL,
+        # interleaving CREATE + commit on a shared handle and corrupting
+        # transaction state ("cannot commit - no transaction is active"). A
+        # separate init lock keeps that serialization orthogonal to the write
+        # path (writers never block on init once the connection is published).
+        self._init_lock = threading.Lock()
+
         # Session tracking for chain detection. Use a bounded deque so a long
         # session never drops middle items on truncation — patterns are saved
         # before the window slides.
@@ -133,13 +143,23 @@ class CompassAnalytics:
         (analytics + sync_manager + chain_indexer) needs both to not race
         for the file lock.
         """
+        # MCC-FT-003: double-checked locking. The fast path (already
+        # initialized) takes no lock. On first touch, serialize under
+        # self._init_lock and publish self.db ONLY after the connection is
+        # fully built + schema-initialized, so a concurrent caller never
+        # observes a half-constructed connection. _init_db operates on the
+        # local `conn` (not self.db) precisely so nothing is visible until
+        # it is complete.
         if self.db is None:
-            self.db = sqlite3.connect(
-                str(self.db_path), check_same_thread=False
-            )
-            self.db.row_factory = sqlite3.Row
-            self._apply_sqlite_pragmas(self.db)
-            self._init_db()
+            with self._init_lock:
+                if self.db is None:
+                    conn = sqlite3.connect(
+                        str(self.db_path), check_same_thread=False
+                    )
+                    conn.row_factory = sqlite3.Row
+                    self._apply_sqlite_pragmas(conn)
+                    self._init_db(conn)
+                    self.db = conn
         return self.db
 
     @staticmethod
@@ -157,10 +177,14 @@ class CompassAnalytics:
         except sqlite3.Error as e:
             logger.debug(f"sqlite PRAGMA setup failed: {e}")
 
-    def _init_db(self):
-        """Initialize analytics database with all tables."""
-        db = self._get_db()
+    def _init_db(self, db: sqlite3.Connection):
+        """Initialize analytics database with all tables.
 
+        MCC-FT-003: takes the connection explicitly rather than calling
+        _get_db(). During lazy init the connection is not yet published to
+        self.db (so a concurrent reader can't see a half-built handle); this
+        method must operate on the passed-in `db` for that to hold.
+        """
         db.executescript("""
             -- Search query tracking
             CREATE TABLE IF NOT EXISTS search_queries (
@@ -264,12 +288,19 @@ class CompassAnalytics:
             (str(CURRENT_SCHEMA_VERSION),),
         )
         db.commit()
-        self._run_migrations()
+        self._run_migrations(db)
         logger.info(f"Analytics database initialized at {self.db_path}")
 
-    def get_schema_version(self) -> int:
-        """Return the current analytics DB schema version (MCC-B-003)."""
-        db = self._get_db()
+    def get_schema_version(
+        self, db: Optional[sqlite3.Connection] = None
+    ) -> int:
+        """Return the current analytics DB schema version (MCC-B-003).
+
+        Accepts an optional connection so it can be called during lazy init
+        (before self.db is published — MCC-FT-003); falls back to _get_db()
+        for ordinary public use.
+        """
+        db = db if db is not None else self._get_db()
         row = db.execute(
             "SELECT value FROM schema_meta WHERE key = 'schema_version'"
         ).fetchone()
@@ -280,15 +311,18 @@ class CompassAnalytics:
         except (KeyError, TypeError, ValueError):
             return 0
 
-    def _run_migrations(self) -> None:
+    def _run_migrations(self, db: Optional[sqlite3.Connection] = None) -> None:
         """Apply any pending schema migrations.
 
         Schema version 1 is the initial shape; there is nothing to migrate
         yet. The hook exists so future changes (new columns, new tables,
         value backfills) can land without scattering conditional logic
         across the codebase. See module docstring for the pattern.
+
+        MCC-FT-003: accepts an optional connection so it runs against the
+        in-flight connection during lazy init, before self.db is published.
         """
-        current = self.get_schema_version()
+        current = self.get_schema_version(db)
         if current == CURRENT_SCHEMA_VERSION:
             logger.debug(
                 f"Analytics schema version {current}; no migrations needed"

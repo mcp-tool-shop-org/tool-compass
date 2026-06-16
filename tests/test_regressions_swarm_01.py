@@ -25,6 +25,7 @@ Findings covered:
 
 import asyncio
 import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -429,3 +430,104 @@ class TestMCCA005ConcurrentRecordSearch:
             "SELECT COUNT(*) FROM search_queries WHERE query IN ('thread-1','thread-2')"
         ).fetchone()[0]
         assert count == 2
+
+
+# =============================================================================
+# MCC-FT-003: lazy DB init must be race-free on concurrent first-touch
+# =============================================================================
+
+
+class TestMCCFT003ConcurrentFirstTouchInit:
+    """Deterministic regression for the init-race root cause behind the
+    flaky MCC-A-005 failure.
+
+    ``_get_db()`` lazily opens the sqlite connection and runs ``_init_db``
+    (DDL + commit). That path is NOT covered by the write lock. Before the
+    fix, two threads first-touching the DB simultaneously each saw
+    ``self.db is None``, each opened its own connection, and interleaved
+    ``CREATE TABLE`` + ``commit`` on the shared handle — corrupting
+    transaction state ("cannot commit - no transaction is active"). One
+    thread got marked degraded and its write was lost, so only one of the
+    two rows landed (the ``assert 1 == 2`` seen in CI under coverage, which
+    widens the race window via tracing).
+
+    The plain MCC-A-005 test is timing-dependent — on a fast host both
+    threads can serialize past the window and it passes even when the bug is
+    present. This test makes the failure DETERMINISTIC by slowing
+    ``sqlite3.connect`` so every racing thread is guaranteed to be inside the
+    init window at once, then asserts the load-bearing invariant: lazy init
+    creates EXACTLY ONE shared connection no matter how many threads
+    first-touch concurrently. Pre-fix that count is > 1 (and analytics
+    degrades, dropping rows); post-fix it is exactly 1 and every write lands.
+    """
+
+    def test_concurrent_first_touch_opens_single_connection(
+        self, temp_analytics_db, monkeypatch
+    ):
+        import analytics as analytics_mod
+
+        analytics = analytics_mod.CompassAnalytics(
+            db_path=temp_analytics_db,
+            hot_cache_size=5,
+            chain_min_occurrences=2,
+        )
+
+        # Slow the real connect so all barrier-released threads are inside
+        # the lazy-init window simultaneously — turns the timing-dependent
+        # race into a guaranteed one. Patch the module's sqlite3 reference so
+        # only analytics connections are affected.
+        real_connect = analytics_mod.sqlite3.connect
+        connect_count = 0
+        count_lock = threading.Lock()
+
+        def slow_connect(*args, **kwargs):
+            nonlocal connect_count
+            with count_lock:
+                connect_count += 1
+            time.sleep(0.05)
+            return real_connect(*args, **kwargs)
+
+        monkeypatch.setattr(analytics_mod.sqlite3, "connect", slow_connect)
+
+        n_threads = 6
+        barrier = threading.Barrier(n_threads)
+        errors: list[BaseException] = []
+
+        def worker(i: int):
+            try:
+                barrier.wait(timeout=5)
+                asyncio.run(
+                    analytics.record_search(
+                        query=f"first-touch-{i}",
+                        results=[],
+                        latency_ms=1.0,
+                    )
+                )
+            except BaseException as exc:  # noqa: BLE001 — capture everything
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=worker, args=(i,)) for i in range(n_threads)
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert all(
+            not t.is_alive() for t in threads
+        ), "a worker did not finish within 10s (deadlock?)"
+        assert not errors, f"concurrent first-touch raised: {errors!r}"
+
+        # Load-bearing invariant: ONE connection, regardless of N racers.
+        assert connect_count == 1, (
+            f"lazy init opened {connect_count} connections under concurrent "
+            "first-touch; expected exactly 1 (init race regressed)"
+        )
+        # No write was lost to a degraded-mode short-circuit.
+        assert analytics._degraded is False
+        db = analytics._get_db()
+        count = db.execute("SELECT COUNT(*) FROM search_queries").fetchone()[0]
+        assert count == n_threads
+
+        analytics.close()
