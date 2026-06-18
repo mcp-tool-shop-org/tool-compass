@@ -245,10 +245,14 @@ jobs:
           gh release view "$TAG" --repo "${{ github.repository }}" --json assets
           exit 1
 
+      # OIDC trusted publishing requires npm >= 11.5.1; Node 22 bundles
+      # npm 10.9.x, so upgrade the global npm before the publish call.
+      - name: Upgrade npm for OIDC trusted publishing (>= 11.5.1)
+        run: npm install -g npm@latest
+
       - name: Publish to npm with provenance
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # Auth via npm Trusted Publishing (OIDC) - intentionally NO NODE_AUTH_TOKEN.
         run: |
           set -euo pipefail
           cd npm
