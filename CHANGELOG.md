@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-06-20
+
+Dogfood swarm v3 — full health pass (bug/security → proactive → humanization
+→ visual) + a user-scoped feature pass. Tests 991 → 1151; ruff errors 31 → 0.
+No breaking changes; the default config path, the Ollama embedding default,
+and all existing tool/CLI behavior are unchanged.
+
+### Added
+- **`tool-compass init`** — scaffolds `compass_config.json` at the resolved
+  config path and prints a ready-to-paste Claude Desktop `mcpServers` snippet.
+  `--force` to overwrite, `--json` for machine output.
+- **Pluggable embedding backend** — `embedding_provider` config selects the
+  embedder: `ollama` (default, unchanged) or `openai`/`openai-compatible`
+  (`/v1/embeddings`; covers OpenAI, LM Studio, and any compatible server),
+  with `embedding_base_url`, `embedding_api_key` (redacted;
+  `TOOL_COMPASS_EMBEDDING_API_KEY` env override), and prefix overrides.
+- MCP-client registration recipes (Claude Desktop, Cursor, Cline) in the handbook.
+- `LOG_LEVEL`, `TOOL_COMPASS_ANALYTICS_DISABLED`, and
+  `TOOL_COMPASS_HOT_CACHE_SIZE` env overrides are now honored (previously
+  advertised in `.env.example` but ignored).
+
+### Fixed
+- **`tool-compass serve` / `serve --http`** crashed with "unrecognized
+  arguments: serve" — the CLI now neutralizes `sys.argv` before delegating to
+  the gateway.
+- Oversize backend lines (>1 MiB) no longer wedge a connection — the read loop
+  caught the wrong exception type (`LimitOverrunError` vs the `ValueError`
+  `readline()` actually raises).
+- `config doctor`/`show_config` no longer leak `${VAR}`-resolved secrets in
+  backend `headers`/`env`/`args` or credentialed `ollama_url`/backend URLs.
+- Cold-start (`get_index()` RuntimeError) now returns the structured
+  service-unavailable envelope on every read tool instead of a raw stack.
+- `tool-compass sync` reports the honest indexed count + warns on backends
+  that failed to connect (was a fabricated "+0 ~0 -0" line); per-backend sync
+  status is now durable (a failing backend stops reporting healthy).
+- `gateway.py --sync` exits non-zero when it indexes nothing (CI-safe).
+- Gradio UI: pinned the dark theme surface (the UI was invisible in light
+  mode); Status tab now probes the configured Ollama; empty index shows a
+  "run sync" card.
+- Cross-event-loop `RuntimeError` in the embedder semaphore + gateway locks
+  (per-loop keying); several unguarded `json.loads`/error paths hardened.
+
+### Changed
+- Lint gate cleaned (31 ruff errors → 0); 4 vacuous/skip-masking tests
+  hardened so `/ready` + `/metrics` now have executing coverage.
+
 ## [2.3.0] - 2026-05-15
 
 Dogfood swarm v2 release — comprehensive Stage A bug/security pass +

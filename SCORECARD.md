@@ -3,20 +3,20 @@
 > Score a repo before remediation. Fill this out first, then use SHIP_GATE.md to fix.
 
 **Repo:** tool-compass
-**Date:** 2026-05-14
-**Version:** 2.2.2
+**Date:** 2026-06-20
+**Version:** 2.4.0
 **Type tags:** [pypi] [mcp] [cli]
 
 <!-- SHIPCHECK-AUTO-START -->
 
-[1mshipcheck audit[0m
+shipcheck audit
 
-[32mChecked:[0m   30
-[33mUnchecked:[0m 0
-[2mSkipped:[0m   7
-[1mPass rate:[0m 100%
+Checked:   32
+Unchecked: 0
+Skipped:   5
+Pass rate: 100%
 
-[32m[1mAll hard gates pass. Ship it.[0m
+All hard gates pass. Ship it.
 
 <!-- SHIPCHECK-AUTO-END -->
 

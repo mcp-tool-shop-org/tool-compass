@@ -9,7 +9,7 @@ export const config: SiteConfig = {
   footerText: 'MIT Licensed — built by <a href="https://github.com/mcp-tool-shop-org" style="color:var(--color-muted);text-decoration:underline">mcp-tool-shop-org</a>',
 
   hero: {
-    badge: 'MCP Gateway — v2.2',
+    badge: 'MCP Gateway — v2.4',
     headline: 'Find tools by',
     headlineAccent: 'intent, not memory.',
     description: 'Semantic search for MCP tools. 95% fewer tokens, ~15ms latency, graceful Ollama-offline fallback, trace IDs you can paste into a bug report.',
@@ -71,8 +71,8 @@ export const config: SiteConfig = {
     {
       kind: 'features',
       id: 'whats-new',
-      title: "What's new in v2.2",
-      subtitle: 'Stage A bug/security pass (23 HIGH), Stage B/C humanization (15 HIGH), plus 12 shipped features.',
+      title: "What's new in v2.4",
+      subtitle: 'tool-compass init + Claude Desktop snippet, a pluggable embedding backend (OpenAI / LM Studio, not just Ollama), honest sync feedback, and a fully dark UI.',
       features: [
         {
           title: 'tool-compass CLI',
