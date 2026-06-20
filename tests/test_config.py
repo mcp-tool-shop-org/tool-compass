@@ -4,6 +4,7 @@ Tests for Tool Compass configuration module.
 Tests cross-platform path handling and environment variable support.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,8 @@ from config import (
     get_config_path,
     get_default_config,
     load_config,
+    doctor,
+    _redact_config,
 )
 
 
@@ -242,3 +245,178 @@ class TestLoadConfig:
             config = load_config()
             assert config.embedding_model == "custom-model"
             assert config.auto_sync is False
+
+
+class TestRedactConfig:
+    """CFG-A-001: structural redaction of resolved secrets in doctor() dumps.
+
+    Name-based redaction only catches keys that *look* secret
+    (_token/_key/_secret/_password). But the ${VAR} substitution feature
+    resolves env secrets INTO backend headers/env/args, where the KEY names
+    (e.g. 'Authorization', 'GITHUB_TOKEN') don't all match those hints —
+    so resolved secret VALUES used to leak verbatim from doctor()'s dump.
+    Redact STRUCTURALLY: for every backend's 'env'/'headers' (dicts) redact
+    all VALUES, and for 'args' (list) redact all entries, while KEEPING THE
+    KEYS visible so the dump stays diagnosable.
+    """
+
+    SECRET_HEADER = "Bearer SEKRET_HEADER_TOKEN_abc123"
+    SECRET_ENV = "ghp_SEKRET_ENV_TOKEN_xyz789"
+    SECRET_ARG = "--password=SEKRET_ARG_VALUE_qwe456"
+
+    def _secret_values(self):
+        return [self.SECRET_HEADER, self.SECRET_ENV, self.SECRET_ARG]
+
+    def _build_config(self):
+        return CompassConfig(
+            backends={
+                "remote": HttpBackend(
+                    url="http://localhost:9000/mcp",
+                    headers={"Authorization": self.SECRET_HEADER},
+                ),
+                "local": StdioBackend(
+                    command="python",
+                    args=["-m", "server", self.SECRET_ARG],
+                    env={"GITHUB_TOKEN": self.SECRET_ENV},
+                ),
+            }
+        )
+
+    def test_redact_config_hides_resolved_secret_values(self):
+        """Resolved secret VALUES must not appear; KEYS must remain visible."""
+        cfg = self._build_config()
+        redacted = _redact_config(cfg.to_dict())
+
+        blob = json.dumps(redacted)
+        for secret in self._secret_values():
+            assert secret not in blob, (
+                f"secret value leaked into redacted dump: {secret!r}"
+            )
+
+        backends = redacted["backends"]
+        # Header value redacted, but the 'Authorization' key still visible.
+        assert "Authorization" in backends["remote"]["headers"]
+        assert backends["remote"]["headers"]["Authorization"] == "[REDACTED]"
+        # Env value redacted, key 'GITHUB_TOKEN' still visible.
+        assert "GITHUB_TOKEN" in backends["local"]["env"]
+        assert backends["local"]["env"]["GITHUB_TOKEN"] == "[REDACTED]"
+        # Args entries redacted (the secret-bearing entry at minimum).
+        assert self.SECRET_ARG not in backends["local"]["args"]
+        assert all(a == "[REDACTED]" for a in backends["local"]["args"])
+        # Non-secret structural fields stay intact for diagnosability.
+        assert backends["remote"]["url"] == "http://localhost:9000/mcp"
+        assert backends["remote"]["type"] == "http"
+        assert backends["local"]["command"] == "python"
+
+    def test_doctor_does_not_leak_resolved_secrets(self, tmp_path):
+        """End-to-end: a config file with resolved ${VAR} secrets in a
+        header + env must not surface those secret values from doctor()."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {
+                "remote": {
+                    "type": "http",
+                    "url": "http://localhost:9000/mcp",
+                    "headers": {"Authorization": "Bearer ${MY_API_TOKEN}"},
+                },
+                "local": {
+                    "type": "stdio",
+                    "command": "python",
+                    "args": ["-m", "server", "${MY_CLI_ARG}"],
+                    "env": {"GITHUB_TOKEN": "${MY_GH_TOKEN}"},
+                },
+            }
+        }))
+
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "MY_API_TOKEN": "live_header_secret_111",
+            "MY_GH_TOKEN": "ghp_live_env_secret_222",
+            "MY_CLI_ARG": "--password=live_arg_secret_333",
+        }
+        with patch.dict(os.environ, env):
+            report = doctor()
+
+        blob = json.dumps(report, default=str)
+        for secret in (
+            "live_header_secret_111",
+            "ghp_live_env_secret_222",
+            "live_arg_secret_333",
+        ):
+            assert secret not in blob, f"doctor() leaked secret {secret!r}"
+
+        # Keys remain visible in the redacted config so the dump is usable.
+        backends = report["config"]["backends"]
+        assert "Authorization" in backends["remote"]["headers"]
+        assert backends["remote"]["headers"]["Authorization"] == "[REDACTED]"
+        assert "GITHUB_TOKEN" in backends["local"]["env"]
+        assert backends["local"]["env"]["GITHUB_TOKEN"] == "[REDACTED]"
+
+
+class TestValidateAndClampCoercion:
+    """CFG-A-002: validate_and_clamp must survive non-numeric hand-edited
+    values. The compare-before-coerce ordering raised TypeError on a string
+    or null numeric BEFORE the int()/float() cast, and from_file's recovery
+    except only catches (json.JSONDecodeError, OSError) — so a hand-edited
+    config crashed startup with a raw traceback, contradicting the docstring's
+    'safe even with a hand-edited config file.'"""
+
+    def test_from_dict_bad_numeric_types_do_not_crash(self):
+        """A config dict with string/null numeric fields must coerce-or-reset
+        to defaults instead of raising TypeError."""
+        defaults = CompassConfig()
+        data = {
+            "backends": {},
+            "min_confidence": "high",          # non-numeric string
+            "default_top_k": None,             # null
+            "sync_polling_interval": "soon",   # non-numeric string
+            "hot_cache_size": None,            # null
+            "chain_detection_min_occurrences": "lots",
+            "ollama_breaker_failure_threshold": None,
+            "ollama_breaker_open_seconds": "forever",
+            "ollama_retry_attempts": None,
+            "hnsw_m": "big",
+            "hnsw_ef_construction": None,
+            "hnsw_ef_search": "fast",
+        }
+        # Must NOT raise.
+        config = CompassConfig.from_dict(data)
+
+        # Each bad field reset to its in-range default (or a clamped default).
+        assert config.min_confidence == defaults.min_confidence
+        assert config.default_top_k == defaults.default_top_k
+        assert config.sync_polling_interval == defaults.sync_polling_interval
+        assert config.hot_cache_size == defaults.hot_cache_size
+        assert (
+            config.chain_detection_min_occurrences
+            == defaults.chain_detection_min_occurrences
+        )
+        assert (
+            config.ollama_breaker_failure_threshold
+            == defaults.ollama_breaker_failure_threshold
+        )
+        assert (
+            config.ollama_breaker_open_seconds
+            == defaults.ollama_breaker_open_seconds
+        )
+        assert config.ollama_retry_attempts == defaults.ollama_retry_attempts
+        assert config.hnsw_m == defaults.hnsw_m
+        assert config.hnsw_ef_construction == defaults.hnsw_ef_construction
+        assert config.hnsw_ef_search == defaults.hnsw_ef_search
+
+    def test_from_file_with_hand_edited_bad_values_recovers(self, tmp_path):
+        """from_file on a syntactically-valid JSON with bad numeric types
+        must load without crashing (the docstring's stated guarantee)."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "min_confidence": "high",
+            "default_top_k": None,
+            "embedding_model": "custom-model",
+        }))
+        with patch.dict(os.environ, {"TOOL_COMPASS_CONFIG": str(config_file)}):
+            config = load_config()  # must not raise
+        # Non-numeric fields untouched, numeric fields reset to defaults.
+        assert config.embedding_model == "custom-model"
+        assert config.min_confidence == CompassConfig().min_confidence
+        assert config.default_top_k == CompassConfig().default_top_k

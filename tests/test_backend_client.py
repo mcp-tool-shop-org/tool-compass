@@ -4,8 +4,10 @@ Tests for Tool Compass backend client module.
 Tests MCP backend connections, tool discovery, and execution.
 """
 
+import os
 import pytest
 import asyncio
+from typing import Any, Dict
 from unittest.mock import Mock, AsyncMock, patch
 
 from backend_client_mcp import (
@@ -917,3 +919,131 @@ class TestBackendManagerEdgeCases:
 
             assert call_count == 1
             assert result["success"] is True
+
+
+# =============================================================================
+# BC-003 / BC-004 — experimental MCP client parity with the runtime client
+# =============================================================================
+
+
+class TestExperimentalClientParity:
+    """Regression coverage for the dormant backend_client_mcp module.
+
+    These guard the two parity gaps where the experimental client diverged
+    from backend_client_simple (the runtime client) in a way that would
+    mis-route calls or leak secrets if this module were ever reactivated.
+    """
+
+    @pytest.mark.asyncio
+    async def test_execute_tool_index_first_parse_for_colon_in_server_name(self):
+        """BC-003: a backend name containing ':' must route via the tool index,
+        not a naive ``split(':', 1)`` that would mis-split the qualified name.
+
+        Server name ``"server:weird"`` + tool ``"tool"`` -> qualified
+        ``"server:weird:tool"``. The naive split yields server ``"server"``
+        (wrong backend) and tool ``"weird:tool"`` (wrong tool). The index-first
+        parse must recover server ``"server:weird"`` and tool ``"tool"``.
+        """
+        config = CompassConfig(
+            backends={
+                "server:weird": StdioBackend(command="python", args=["-m", "s"]),
+            }
+        )
+        manager = BackendManager(config=config)
+
+        mock_conn = AsyncMock()
+        mock_result = Mock()
+        mock_result.isError = False
+        mock_result.content = [Mock(text="ok")]
+        mock_conn.call_tool = AsyncMock(return_value=mock_result)
+        manager._backends["server:weird"] = mock_conn
+        manager._tool_index["server:weird:tool"] = "server:weird"
+
+        result = await manager.execute_tool("server:weird:tool", {"a": 1})
+
+        assert result["success"] is True
+        # The call must have gone to the correct backend with the *correct*
+        # tool name ("tool"), not "weird:tool".
+        mock_conn.call_tool.assert_awaited_once()
+        called_tool_name = mock_conn.call_tool.await_args.args[0]
+        assert called_tool_name == "tool"
+
+    @pytest.mark.asyncio
+    async def test_connect_env_inheritance_none_starts_empty(self):
+        """BC-004: ``__env_inheritance__='none'`` must start the backend env
+        from empty (no parent-process leakage) and consume the reserved key,
+        mirroring the runtime client's BR-A-006 policy.
+        """
+        backend = StdioBackend(
+            command="python",
+            args=["-m", "s"],
+            env={"__env_inheritance__": "none", "SECRET_FOR_BACKEND": "x"},
+        )
+        conn = BackendConnection("sandboxed", backend)
+
+        captured: Dict[str, Any] = {}
+
+        def capture_params(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            # Short-circuit the rest of connect(): raising here is caught by
+            # connect()'s broad ``except Exception`` -> returns False. We only
+            # care about the env that was assembled.
+            raise RuntimeError("stop after params built")
+
+        with patch(
+            "backend_client_mcp.StdioServerParameters", side_effect=capture_params
+        ):
+            ok = await conn.connect(timeout=1.0)
+
+        assert ok is False  # connect aborted by our sentinel
+        env = captured["env"]
+        assert env is not None
+        # Reserved policy key consumed, never forwarded.
+        assert "__env_inheritance__" not in env
+        # Explicit backend var preserved.
+        assert env.get("SECRET_FOR_BACKEND") == "x"
+        # No parent inheritance: a var that exists in os.environ must be absent.
+        injected_key = "BC004_PARENT_ONLY_VAR"
+        os.environ[injected_key] = "leak"
+        try:
+            captured.clear()
+            with patch(
+                "backend_client_mcp.StdioServerParameters",
+                side_effect=capture_params,
+            ):
+                await conn.connect(timeout=1.0)
+            assert injected_key not in captured["env"]
+        finally:
+            os.environ.pop(injected_key, None)
+
+    @pytest.mark.asyncio
+    async def test_connect_env_inheritance_default_inherits_parent(self):
+        """BC-004: default policy ('all') keeps inherit-parent behaviour when
+        the backend declares overrides, and still consumes no reserved key."""
+        injected_key = "BC004_DEFAULT_INHERIT_VAR"
+        os.environ[injected_key] = "present"
+        backend = StdioBackend(
+            command="python",
+            args=["-m", "s"],
+            env={"EXTRA": "1"},
+        )
+        conn = BackendConnection("inheriting", backend)
+
+        captured: Dict[str, Any] = {}
+
+        def capture_params(*args, **kwargs):
+            captured["env"] = kwargs.get("env")
+            raise RuntimeError("stop after params built")
+
+        try:
+            with patch(
+                "backend_client_mcp.StdioServerParameters",
+                side_effect=capture_params,
+            ):
+                await conn.connect(timeout=1.0)
+            env = captured["env"]
+            assert env is not None
+            assert env.get(injected_key) == "present"  # parent inherited
+            assert env.get("EXTRA") == "1"  # override applied
+        finally:
+            os.environ.pop(injected_key, None)

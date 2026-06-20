@@ -233,6 +233,42 @@ class TestToolSerialization:
         assert restored.examples == original.examples
         assert restored.is_core == original.is_core
 
+    def test_from_dict_ignores_unknown_keys(self):
+        """MSYNC-A-004: a manifest with an extra/newer per-tool key must load.
+
+        Before the fix, ``cls(**data)`` raised TypeError on any key not a
+        dataclass field, so a manifest written by a newer build (carrying a
+        forward-compat field) was rejected wholesale by an older binary. The
+        loader must drop unknown keys and construct successfully from the
+        known ones.
+        """
+        data = {
+            "name": "test:forward_compat",
+            "description": "Tool from a newer manifest",
+            "category": "test",
+            "server": "test",
+            "parameters": {"arg": "str"},
+            "examples": ["example"],
+            "is_core": True,
+            # Keys an older binary has never heard of:
+            "future_field": {"weight": 1.0},
+            "another_new_key": "ignored",
+        }
+
+        tool = ToolDefinition.from_dict(data)
+
+        # Known fields preserved.
+        assert tool.name == "test:forward_compat"
+        assert tool.description == "Tool from a newer manifest"
+        assert tool.category == "test"
+        assert tool.server == "test"
+        assert tool.parameters == {"arg": "str"}
+        assert tool.examples == ["example"]
+        assert tool.is_core is True
+        # Unknown keys did not leak onto the instance.
+        assert not hasattr(tool, "future_field")
+        assert not hasattr(tool, "another_new_key")
+
 
 # =============================================================================
 # TOOLS Constant Tests

@@ -118,12 +118,21 @@ async def test_embedder_circuit_breaker_opens_after_3_failures(exc_factory):
     mock_client = AsyncMock()
     mock_client.post = always_fail
 
+    # TESTS-004: narrow from (httpx.HTTPError, Exception) — which caught
+    # literally anything — to the EXACT type the embedder surfaces on
+    # exhaustion. For these transient transport errors _post_embed_with_retry
+    # re-raises the original httpx exception on the final attempt, so the
+    # surfaced type is precisely exc_factory()'s class. If the embedder ever
+    # surfaced a different class (e.g. a bare RuntimeError), this now fails
+    # instead of passing vacuously.
+    expected_exc = type(exc_factory())
+
     try:
         with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
             # First call exhausts retries (3 attempts) and opens the breaker
             # — one call surfaces _BREAKER_FAILURE_THRESHOLD failures inside
             # _post_embed_with_retry.
-            with pytest.raises((httpx.HTTPError, Exception)):
+            with pytest.raises(expected_exc):
                 await emb.embed("one")
 
         assert emb.circuit_breaker_state() == "open", (
@@ -195,10 +204,17 @@ async def test_embedder_metrics_track_failures(exc_factory):
     mock_client = AsyncMock()
     mock_client.post = always_fail
 
+    # TESTS-004: narrow to the EXACT surfaced type (see the comment in
+    # test_embedder_circuit_breaker_opens_after_3_failures). On exhaustion of
+    # these transient transport errors the embedder re-raises the original
+    # httpx exception, so the surfaced type is precisely exc_factory()'s
+    # class — not "anything that is an Exception".
+    expected_exc = type(exc_factory())
+
     try:
         stats_before = emb.get_stats()
         with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
-            with pytest.raises((httpx.HTTPError, Exception)):
+            with pytest.raises(expected_exc):
                 await emb.embed("x")
         stats_after = emb.get_stats()
 

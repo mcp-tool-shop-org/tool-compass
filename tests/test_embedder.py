@@ -6,10 +6,12 @@ Tests Ollama embedding generation, both async and sync wrappers.
 
 import pytest
 import asyncio
+import threading
 import numpy as np
 from unittest.mock import Mock, AsyncMock, patch
 import httpx
 
+import embedder as embedder_module
 from embedder import (
     Embedder,
     SyncEmbedder,
@@ -726,3 +728,193 @@ class TestEdgeCases:
             result = await embedder.embed(special_text)
 
             assert isinstance(result, np.ndarray)
+
+
+# =============================================================================
+# SC-001: Concurrency-cap semaphore must be per-event-loop
+# =============================================================================
+
+
+def _ok_embed_response():
+    """A 200-OK httpx-like response carrying a valid embedding."""
+    resp = Mock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "embeddings": [np.random.randn(EMBEDDING_DIM).tolist()]
+    }
+    return resp
+
+
+class TestConcurrencyCapMultiLoop:
+    """SC-001 regression: the process-wide concurrency cap must not be a
+    single module-global asyncio.Semaphore awaited from multiple event
+    loops.
+
+    SyncEmbedder._run, CompassIndex.search_sync, and the Gradio UI all spin
+    a fresh worker-thread loop per call (asyncio.run). A single module-global
+    Semaphore that acquired *waiters* on loop A then got awaited from loop B
+    raised "RuntimeError: ... is bound to a different event loop", silently
+    degrading to lexical fallback. The fix keys the semaphore on the running
+    loop (created lazily inside that loop), so each loop has its own cap.
+    """
+
+    @staticmethod
+    def _run_concurrent_embeds_in_own_loop(n_concurrent: int):
+        """In a brand-new event loop, embed n_concurrent texts at once.
+
+        Each embed acquires the global concurrency semaphore; with
+        n_concurrent > the cap, waiters form on this loop's semaphore. That
+        is the exact precondition that bound the OLD module-global semaphore
+        to this loop and broke the NEXT loop.
+        """
+        embedder = Embedder()
+
+        async def _slow_post(*_args, **_kwargs):
+            # Hold the slot briefly so concurrent acquirers queue as waiters.
+            await asyncio.sleep(0.02)
+            return _ok_embed_response()
+
+        async def _go():
+            mock_client = AsyncMock()
+            mock_client.post = _slow_post
+            with patch.object(
+                embedder, "_get_client", AsyncMock(return_value=mock_client)
+            ):
+                results = await asyncio.gather(
+                    *[embedder.embed(f"text {i}") for i in range(n_concurrent)]
+                )
+            await embedder.close()
+            return results
+
+        return asyncio.run(_go())
+
+    def test_global_semaphore_survives_multiple_loops(self):
+        """Run the same global cap from several independent worker-thread
+        loops, concurrently — no RuntimeError about a semaphore bound to a
+        different loop, and every embed returns a vector.
+        """
+        # Force the cap low so we reliably create waiters even with a modest
+        # number of concurrent embeds per loop.
+        n_concurrent = embedder_module._GLOBAL_EMBED_CONCURRENCY + 4
+
+        errors: list = []
+        results_seen: list = []
+
+        def thread_target():
+            try:
+                res = self._run_concurrent_embeds_in_own_loop(n_concurrent)
+                results_seen.append(len(res))
+            except Exception as e:  # noqa: BLE001 — capture for assertion
+                errors.append(repr(e))
+
+        # Several threads, each with its OWN asyncio.run loop, all hammering
+        # the same module-global concurrency cap at the same time. On the old
+        # code at least one of these raised the cross-loop RuntimeError.
+        threads = [threading.Thread(target=thread_target) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, (
+            "SC-001 regression: cross-loop concurrency cap raised "
+            f"RuntimeError(s): {errors}"
+        )
+        assert results_seen, "no thread completed an embed"
+        assert all(c == n_concurrent for c in results_seen), (
+            f"each loop should embed {n_concurrent} texts; got {results_seen}"
+        )
+
+    def test_sequential_loops_reuse_then_rebind_cleanly(self):
+        """A simpler, deterministic form: loop A forms waiters on the global
+        cap, finishes, then loop B uses the cap. The old single global
+        semaphore stayed bound to loop A's (now-dead) loop and broke loop B.
+        """
+        n_concurrent = embedder_module._GLOBAL_EMBED_CONCURRENCY + 4
+
+        # Loop A
+        res_a = self._run_concurrent_embeds_in_own_loop(n_concurrent)
+        assert len(res_a) == n_concurrent
+
+        # Loop B — must not raise "bound to a different event loop".
+        res_b = self._run_concurrent_embeds_in_own_loop(n_concurrent)
+        assert len(res_b) == n_concurrent
+
+
+# =============================================================================
+# SC-003: total_calls counted once per logical embed (not per retry attempt)
+# =============================================================================
+
+
+class TestMetricsTotalCallsAccounting:
+    """SC-003 regression: _record_failure incremented total_calls on each
+    failed attempt and _record_success incremented it again, so one logical
+    embed that failed twice then succeeded recorded total_calls=3 /
+    failures=2 — inflating failure_rate and tripping the breaker after fewer
+    LOGICAL calls than the threshold implies. total_calls must count the
+    logical embed exactly once regardless of retries.
+    """
+
+    @pytest.mark.asyncio
+    async def test_total_calls_is_one_for_retried_then_succeeded_embed(self):
+        """One embed: 2 failed attempts (HTTP 500) then success ->
+        total_calls == 1.
+        """
+        # No real backoff sleeps.
+        async def _no_sleep(_s):
+            return None
+
+        emb = Embedder()
+
+        attempt = {"n": 0}
+
+        async def flaky_post(*_args, **_kwargs):
+            attempt["n"] += 1
+            if attempt["n"] < 3:
+                resp = Mock()
+                resp.status_code = 500
+                resp.text = "transient"
+                return resp
+            return _ok_embed_response()
+
+        mock_client = AsyncMock()
+        mock_client.post = flaky_post
+
+        try:
+            with patch.object(asyncio, "sleep", _no_sleep):
+                with patch.object(
+                    emb, "_get_client", AsyncMock(return_value=mock_client)
+                ):
+                    result = await emb.embed("retry me")
+
+            stats = emb.get_stats()
+            assert isinstance(result, np.ndarray)
+            assert attempt["n"] == 3, "expected 2 failed attempts + 1 success"
+            # The logical embed must be counted exactly once.
+            assert stats["total_calls"] == 1, (
+                "SC-003 regression: a single logical embed that retried was "
+                f"counted {stats['total_calls']} times in total_calls"
+            )
+            # total_failures still tracks individual failed attempts.
+            assert stats["total_failures"] == 2
+            # failure_rate is failures/calls; with the bug this read 2/3.
+            assert stats["failure_rate"] == 2.0
+        finally:
+            await emb.close()
+
+    @pytest.mark.asyncio
+    async def test_total_calls_is_one_per_successful_embed(self):
+        """A clean single embed bumps total_calls by exactly 1."""
+        emb = Embedder()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=_ok_embed_response())
+        try:
+            before = emb.get_stats()["total_calls"]
+            with patch.object(
+                emb, "_get_client", AsyncMock(return_value=mock_client)
+            ):
+                await emb.embed("once")
+            after = emb.get_stats()["total_calls"]
+            assert after - before == 1
+        finally:
+            await emb.close()

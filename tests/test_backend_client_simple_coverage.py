@@ -51,8 +51,6 @@ from backend_client_simple import (
     OUTCOME_TOOL_ERROR,
     OUTCOME_TRANSPORT_ERROR,
     MAX_INFLIGHT_REQUESTS_PER_BACKEND,
-    KILL_WAIT_TIMEOUT,
-    HEALTH_PROBE_TIMEOUT,
 )
 from config import CompassConfig, StdioBackend
 
@@ -295,10 +293,15 @@ class TestReadLoop:
         assert conn._read_task.done()
 
     async def test_oversize_line_triggers_limit_overrun_path(self):
-        """BR-A-002 read path: asyncio.LimitOverrunError aborts the loop
+        """BR-A-002 read path: an oversize-line overrun aborts the loop
         cleanly and fails pending futures with an oversize-line RuntimeError.
 
-        The LimitOverrunError branch fails pending futures with a structured
+        BC-001: StreamReader.readline() raises a *plain ValueError* on limit
+        overrun (LimitOverrunError is NOT a subclass of ValueError), so this
+        test injects the REAL exception type. Injecting LimitOverrunError here
+        masked the bug because that branch was never reached at runtime.
+
+        The oversize branch fails pending futures with a structured
         ``RuntimeError`` BEFORE the ``finally`` block runs — so callers see the
         oversize-line message, which is the most actionable signal for the
         operator. The finally clean-up only resolves any future still pending.
@@ -308,12 +311,67 @@ class TestReadLoop:
 
         fut = asyncio.get_event_loop().create_future()
         conn._pending[3] = fut
-        # Inject an oversize-line failure on the next readline.
-        proc.stdout._raise_once = asyncio.LimitOverrunError("too big", 1)
+        # Inject the REAL overrun failure on the next readline: the plain
+        # ValueError that asyncio.StreamReader.readline() raises (verified
+        # against CPython: "Separator is found, but chunk is longer than
+        # limit"). The previous LimitOverrunError injection masked BC-001.
+        proc.stdout._raise_once = ValueError(
+            "Separator is found, but chunk is longer than limit"
+        )
 
         with pytest.raises(RuntimeError, match="oversize line"):
             await asyncio.wait_for(fut, timeout=2.0)
         await asyncio.wait_for(conn._read_task, timeout=2.0)
+
+    async def test_real_oversize_line_routes_to_oversize_branch(self):
+        """BC-001 end-to-end: a real >limit line through a genuine
+        asyncio.StreamReader hits the oversize branch, NOT the generic crash
+        handler.
+
+        This is the regression that the masking test could not provide: it
+        drives ``_read_loop`` against a *real* ``asyncio.StreamReader`` so the
+        exception is the actual one CPython raises on overrun (a plain
+        ``ValueError``). If the handler reverts to catching only
+        ``asyncio.LimitOverrunError``, the ValueError falls through to the
+        generic ``except Exception`` and the pending future is failed with a
+        "read loop crashed" RuntimeError instead — so the ``match="oversize
+        line"`` assertion below fails.
+
+        Uses a small reader limit (not the 1 MiB production limit) plus a line
+        comfortably larger than it: the CPython overrun code path is identical
+        regardless of the absolute limit, and this keeps the test fast.
+        """
+        reader_limit = 4096
+        real_reader = asyncio.StreamReader(limit=reader_limit)
+        # A line whose separator is found only after > limit bytes triggers
+        # the "Separator is found, but chunk is longer than limit" ValueError.
+        real_reader.feed_data(b"x" * (reader_limit * 4) + b"\n")
+        real_reader.feed_eof()
+
+        # Sanity: confirm the real reader raises the bug's actual exception
+        # type (plain ValueError, NOT LimitOverrunError).
+        probe = asyncio.StreamReader(limit=reader_limit)
+        probe.feed_data(b"x" * (reader_limit * 4) + b"\n")
+        probe.feed_eof()
+        with pytest.raises(ValueError) as probe_exc:
+            await probe.readline()
+        assert not isinstance(probe_exc.value, asyncio.LimitOverrunError)
+
+        conn, proc = make_connection()
+        # Swap the fake stdout for the real overrunning StreamReader.
+        proc.stdout = real_reader  # type: ignore[assignment]
+        conn._read_task = asyncio.create_task(conn._read_loop())
+
+        fut = asyncio.get_event_loop().create_future()
+        conn._pending[7] = fut
+
+        # Oversize branch must fire and fail the pending future with the
+        # actionable oversize-line message (not "read loop crashed").
+        with pytest.raises(RuntimeError, match="oversize line"):
+            await asyncio.wait_for(fut, timeout=2.0)
+        # Reader exits cleanly via the oversize branch's ``break``.
+        await asyncio.wait_for(conn._read_task, timeout=2.0)
+        assert conn._read_task.done()
 
     async def test_broken_pipe_in_readline_terminates_loop(self):
         """BrokenPipeError during read aborts the loop without crashing."""
@@ -414,7 +472,6 @@ class TestSendRequestGuards:
 
         # Make the drain fail, but flip the shutdown flag mid-flight so the
         # error translation branch runs.
-        original_drain = proc.stdin.drain
 
         async def failing_drain():
             conn._shutting_down = True
@@ -1046,13 +1103,70 @@ class TestReadStderr:
         await asyncio.wait_for(task, timeout=2.0)
 
     async def test_stderr_limit_overrun_truncates_and_continues(self):
+        """BC-002: StreamReader.readline() raises a *plain ValueError* on limit
+        overrun, not LimitOverrunError. Inject the REAL exception type so this
+        test exercises the live drain/continue branch instead of masking it,
+        and assert the truncation warning actually fired (proving the branch
+        ran rather than the reader dying silently)."""
         conn, proc = make_connection()
 
-        # Raise LimitOverrunError on first readline, then EOF.
-        proc.stderr._raise_once = asyncio.LimitOverrunError("too big", 1)
-        task = asyncio.create_task(conn._read_stderr())
-        proc.stderr.queue.put_nowait(b"")  # EOF after the oversize-line handling
-        await asyncio.wait_for(task, timeout=2.0)
+        captured: List[str] = []
+
+        def capture_warning(msg, *args, **kwargs):
+            captured.append(str(msg))
+
+        # Real overrun exception type; previously this injected
+        # LimitOverrunError, which never occurs at runtime — masking the bug.
+        proc.stderr._raise_once = ValueError(
+            "Separator is found, but chunk is longer than limit"
+        )
+        with patch(
+            "backend_client_simple.logger.warning", side_effect=capture_warning
+        ):
+            task = asyncio.create_task(conn._read_stderr())
+            proc.stderr.queue.put_nowait(b"")  # EOF after the oversize handling
+            await asyncio.wait_for(task, timeout=2.0)
+
+        assert any("truncated" in m for m in captured), (
+            "stderr oversize drain branch did not run / did not log truncation "
+            "(BC-002: the ValueError overrun path was not caught)"
+        )
+
+    async def test_stderr_real_oversize_line_drains_and_continues(self):
+        """BC-002 end-to-end: a real >limit stderr line through a genuine
+        asyncio.StreamReader is drained and logged, and the reader survives.
+
+        If the handler reverts to catching only ``asyncio.LimitOverrunError``,
+        the real ``ValueError`` propagates to the outer ``except Exception``
+        and the reader dies after logging a debug "Stderr reader error" — no
+        truncation warning, which this test asserts must be present.
+        """
+        reader_limit = 4096
+        real_stderr = asyncio.StreamReader(limit=reader_limit)
+        # Oversize first line (separator found only after > limit bytes), then
+        # a clean second line + EOF so the loop keeps running past the drain.
+        real_stderr.feed_data(b"x" * (reader_limit * 4) + b"\n")
+        real_stderr.feed_data(b"second line\n")
+        real_stderr.feed_eof()
+
+        conn, proc = make_connection()
+        proc.stderr = real_stderr  # type: ignore[assignment]
+
+        captured: List[str] = []
+
+        def capture_warning(msg, *args, **kwargs):
+            captured.append(str(msg))
+
+        with patch(
+            "backend_client_simple.logger.warning", side_effect=capture_warning
+        ):
+            task = asyncio.create_task(conn._read_stderr())
+            await asyncio.wait_for(task, timeout=2.0)
+
+        assert any("truncated" in m for m in captured), (
+            "real oversize stderr line was not drained/truncated — BC-002 "
+            "regression (ValueError overrun path not caught)"
+        )
 
     async def test_stderr_broken_pipe_terminates_loop(self):
         conn, proc = make_connection()
@@ -1401,7 +1515,7 @@ class TestManagerDisconnectAll:
 
         result = await mgr.disconnect_all()
         assert "alpha" in result["disconnected"]
-        assert any(l["name"] == "beta" for l in result["laggards"])
+        assert any(lag["name"] == "beta" for lag in result["laggards"])
 
     async def test_disconnect_all_times_out_when_budget_exceeded(
         self, config_two_backends
@@ -1419,7 +1533,7 @@ class TestManagerDisconnectAll:
         result = await mgr.disconnect_all(total_timeout=0.05)
         assert result["timed_out"] is True
         # Both names show up as laggards.
-        names = [l["name"] for l in result["laggards"]]
+        names = [lag["name"] for lag in result["laggards"]]
         assert "alpha" in names
         assert "beta" in names
 

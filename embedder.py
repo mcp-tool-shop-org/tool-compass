@@ -9,6 +9,7 @@ from typing import Callable, List, Optional, Tuple
 import asyncio
 import logging
 import time
+import weakref
 from collections import deque
 
 logger = logging.getLogger(__name__)
@@ -28,18 +29,47 @@ _RETRY_BACKOFFS = (0.5, 1.0, 2.0)
 # BE-A-010 + BE-B-005: process-wide concurrency cap on Ollama embed calls.
 # Previously embed_batch() created `asyncio.Semaphore(8)` per call, which
 # enforced batch-local concurrency but never serialized concurrent batches.
-# This module-level semaphore caps ACROSS the process: indexing rebuild
-# + simultaneous query embeddings share the same 8 slots.
+# The cap is per-event-loop: indexing rebuild + simultaneous query
+# embeddings on the SAME loop share the same 8 slots.
+#
+# SC-001: an asyncio.Semaphore is bound to the loop it has waiters on. The
+# SyncEmbedder._run / CompassIndex.search_sync / ui.py paths spin a fresh
+# worker-thread loop per call (asyncio.run). A single module-global
+# semaphore awaited from loop B once it had waiters on loop A raised
+# "RuntimeError: ... is bound to a different event loop", silently
+# degrading to lexical fallback. Keying the semaphore on id(running_loop)
+# — created lazily INSIDE the running loop — gives each loop its own cap
+# and removes the cross-loop binding entirely. A WeakValueDictionary lets
+# dead loops' semaphores be garbage-collected once their loop is gone.
 _GLOBAL_EMBED_CONCURRENCY = 8
-_global_embed_semaphore: Optional[asyncio.Semaphore] = None
+_loop_embed_semaphores: "weakref.WeakValueDictionary[int, asyncio.Semaphore]" = (
+    weakref.WeakValueDictionary()
+)
+# Strong refs keyed on the loop object keep each loop's semaphore alive for
+# the loop's lifetime (WeakValueDictionary alone would let it die between
+# awaits while no coroutine holds it). Entries drop when the loop is GC'd.
+_loop_embed_semaphore_owners: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore]" = (
+    weakref.WeakKeyDictionary()
+)
 
 
 def _get_global_embed_semaphore() -> asyncio.Semaphore:
-    """Lazy-init the process-wide semaphore on the active event loop."""
-    global _global_embed_semaphore
-    if _global_embed_semaphore is None:
-        _global_embed_semaphore = asyncio.Semaphore(_GLOBAL_EMBED_CONCURRENCY)
-    return _global_embed_semaphore
+    """Return the concurrency semaphore for the *running* event loop.
+
+    Created lazily inside the running loop and cached per-loop so a
+    semaphore is never awaited from a loop other than the one it was
+    created on (SC-001).
+    """
+    loop = asyncio.get_event_loop()
+    key = id(loop)
+    sem = _loop_embed_semaphores.get(key)
+    if sem is None:
+        sem = asyncio.Semaphore(_GLOBAL_EMBED_CONCURRENCY)
+        _loop_embed_semaphores[key] = sem
+        # Anchor a strong ref to the loop's lifetime so the semaphore
+        # isn't collected between awaits.
+        _loop_embed_semaphore_owners[loop] = sem
+    return sem
 
 
 class Embedder:
@@ -232,8 +262,14 @@ class Embedder:
             raise RuntimeError("Ollama circuit breaker half-open (probe in flight)")
 
     def _record_success(self, latency_ms: float) -> None:
-        """Reset breaker failure count and log latency sample."""
-        self._metrics["total_calls"] += 1
+        """Reset breaker failure count and log latency sample.
+
+        SC-003: total_calls is counted ONCE per logical embed in
+        _embed_with_concurrency_cap, NOT here — recording it on success (and
+        on every failed attempt in _record_failure) triple-counted a single
+        embed that retried, inflating failure_rate and tripping the breaker
+        sooner than the threshold implies.
+        """
         self._metrics["latency_samples"].append(latency_ms)
         self._metrics["consecutive_failures"] = 0
         self._metrics["last_success_at"] = time.monotonic()
@@ -245,8 +281,14 @@ class Embedder:
         br["probe_in_flight"] = False
 
     def _record_failure(self) -> None:
-        """Increment failure count; open breaker at threshold."""
-        self._metrics["total_calls"] += 1
+        """Increment failure count; open breaker at threshold.
+
+        SC-003: only touches failure_count / consecutive_failures /
+        total_failures. total_calls is incremented once per logical embed in
+        _embed_with_concurrency_cap, regardless of how many attempts the
+        retry loop made — so one embed that fails N times then succeeds
+        records total_calls=1, not N+1.
+        """
         self._metrics["total_failures"] += 1
         self._metrics["consecutive_failures"] += 1
         br = self._ollama_breaker
@@ -427,6 +469,12 @@ class Embedder:
             # only guard the closed→open transition during the queue wait.
             if self._ollama_breaker["state"] == "open":
                 raise RuntimeError("Ollama circuit breaker re-opened during queue wait")
+
+            # SC-003: count the LOGICAL embed exactly once here, regardless
+            # of how many retry attempts _post_embed_with_retry makes or
+            # whether it ultimately succeeds or raises. _record_success and
+            # _record_failure no longer touch total_calls.
+            self._metrics["total_calls"] += 1
 
             await self._inflight_incr()
             try:

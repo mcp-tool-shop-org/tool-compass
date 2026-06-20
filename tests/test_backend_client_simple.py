@@ -7,7 +7,6 @@ and the public API of SimpleBackendManager.
 
 import pytest
 import asyncio
-from pathlib import Path
 from unittest.mock import Mock, AsyncMock
 
 # TS-B-011: sys.path.insert is unnecessary — pyproject.toml sets

@@ -101,7 +101,7 @@ _health_state: Dict[str, Any] = {
 }
 
 
-# BE-B-011: registered by _run_http() so health-state changes invalidate
+# BE-B-011: registered by build_http_app() so health-state changes invalidate
 # the /ready cache immediately. Module-level so tests don't import HTTP code.
 _ready_cache_invalidators: List[Any] = []
 
@@ -285,6 +285,42 @@ def _augment_with_health(response: Dict[str, Any]) -> Dict[str, Any]:
     elif "degraded_reasons" not in response and is_degraded:
         response["degraded_reasons"] = []
     return response
+
+
+def _cold_start_envelope(
+    error: BaseException, *, trace_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Structured envelope for the get_index() cold-start RuntimeError.
+
+    GW-A-001: get_index() raises a RuntimeError when there is no baked index
+    on disk AND Ollama is unreachable — it cannot build the index without
+    embeddings. The handlers that call get_index() at the top of their body
+    (compass / describe / compass_categories) must surface that as the same
+    structured `service_unavailable` envelope that compass_status /
+    compass_audit already degrade into, never as a raw stack to the caller.
+
+    The code distinguishes the two halves of the precondition: if Ollama is
+    known-down we report `ollama_unavailable`; otherwise the index itself is
+    the blocker (`index_unhealthy`). Both are retryable — the operator can
+    bring Ollama up or run a sync and retry the same call.
+    """
+    ollama_down = not _health_state.get("ollama_available", True)
+    code = "ollama_unavailable" if ollama_down else "index_unhealthy"
+    title = "Ollama unavailable" if ollama_down else "Index unhealthy"
+    return _augment_with_health(
+        _error_envelope(
+            code=code,
+            title=title,
+            detail=f"Tool index unavailable on cold start: {error}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+            suggestions=[
+                "Start Ollama: ollama serve",
+                "Run python gateway.py --sync to build the index",
+            ],
+        )
+    )
 
 
 # Process-wide counters for /metrics (BE-B-002).
@@ -605,13 +641,22 @@ def _lexical_search_fallback(
 
     Each match is already in the response-envelope shape (``tool``,
     ``description``, ``server``, ``category``, ``confidence``, ``degraded``).
-    Confidence is a coarse heuristic: 0.6 for name match, 0.4 for description
-    match — enough to produce a sensible ordering without pretending it's a
-    real similarity score.
+    Confidence is a coarse heuristic: 0.6 for a whole-query name substring,
+    0.4 for a whole-query description substring, 0.3 for a row that only
+    matched on an individual token — enough to produce a sensible ordering
+    without pretending it's a real similarity score.
+
+    GW-A-003: the query is tokenized on whitespace and each token contributes
+    its own ``(name LIKE ? OR description LIKE ?)`` clause OR'd together, so a
+    multi-word degraded-mode intent like "read file" still matches a tool
+    named ``read_file`` whose name never contains the literal "read file"
+    substring. A row that matched only via a token (not the whole query) takes
+    the 0.3 confidence tier — previously unreachable dead code because the SQL
+    used a single whole-query needle.
 
     BE-B-007: empty queries return [] immediately rather than '%%' matching
-    the whole catalog. BE-A-007: % and _ in user input are escaped so they
-    don't act as wildcards.
+    the whole catalog. BE-A-007: % and _ in each token are escaped so they
+    don't act as wildcards (the ESCAPE clause stays paired with every LIKE).
     """
     if not index or not getattr(index, "db", None):
         return []
@@ -620,12 +665,23 @@ def _lexical_search_fallback(
     if not q:
         return []
 
-    needle = f"%{_escape_like(q)}%"
-    where = [
-        "(lower(name) LIKE lower(?) ESCAPE '\\' "
-        "OR lower(description) LIKE lower(?) ESCAPE '\\')"
-    ]
-    params: List[Any] = [needle, needle]
+    # Per-token LIKE: split on whitespace, drop empties, and fall back to the
+    # whole query when tokenization yields nothing (e.g. punctuation-only).
+    tokens = [t for t in q.split() if t]
+    if not tokens:
+        tokens = [q]
+
+    token_clauses: List[str] = []
+    params: List[Any] = []
+    for tok in tokens:
+        needle = f"%{_escape_like(tok)}%"
+        token_clauses.append(
+            "lower(name) LIKE lower(?) ESCAPE '\\' "
+            "OR lower(description) LIKE lower(?) ESCAPE '\\'"
+        )
+        params.extend([needle, needle])
+
+    where = ["(" + " OR ".join(token_clauses) + ")"]
     if category:
         where.append("category = ?")
         params.append(category)
@@ -651,7 +707,7 @@ def _lexical_search_fallback(
         elif q_lower in desc_lower:
             confidence = 0.4
         else:
-            # Matched via per-token LIKE but not a direct substring — neutral score
+            # Matched via per-token LIKE but not a whole-query substring.
             confidence = 0.3
         scored.append({
             "tool": row["name"],
@@ -727,7 +783,15 @@ async def compass(
     # Check for sync on first call
     await maybe_startup_sync()
 
-    index = await get_index()
+    # GW-A-001: get_index() raises RuntimeError on cold start (no baked index
+    # AND Ollama unreachable). Surface that as the structured
+    # service_unavailable envelope instead of letting it bubble as a raw
+    # stack — mirrors compass_status / compass_audit.
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        logger.error(f"[compass] [{trace_id}] index unavailable on cold start: {e}")
+        return _cold_start_envelope(e, trace_id=trace_id)
 
     # Search tools — on embedder/Ollama failure fall back to lexical LIKE
     # over the existing tools table so users keep getting results.
@@ -896,7 +960,13 @@ async def describe(tool_name: str) -> Dict[str, Any]:
     trace_id = uuid.uuid4().hex[:8]
     logger.info(f"[describe] [{trace_id}] tool_name={tool_name!r}")
 
-    index = await get_index()
+    # GW-A-001: surface the cold-start RuntimeError as a structured envelope
+    # rather than a raw stack (mirrors compass_status / compass_audit).
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        logger.error(f"[describe] [{trace_id}] index unavailable on cold start: {e}")
+        return _cold_start_envelope(e, trace_id=trace_id)
 
     # Try to find in index first (from manifest).
     # GW-B-009: trap sqlite errors so the user sees "index unhealthy" + a
@@ -919,8 +989,22 @@ async def describe(tool_name: str) -> Dict[str, Any]:
             _health_state["index_available"] = True
 
         if row:
-            params = json.loads(row["parameters"]) if row["parameters"] else {}
-            examples = json.loads(row["examples"]) if row["examples"] else []
+            # GW-A-002: a malformed JSON blob in the index row must NOT raise
+            # an uncaught JSONDecodeError. Degrade the same way a sqlite error
+            # does — flag the index unhealthy and fall back to {}/[] so the
+            # caller still gets a usable (if partial) schema.
+            try:
+                params = json.loads(row["parameters"]) if row["parameters"] else {}
+                examples = json.loads(row["examples"]) if row["examples"] else []
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(
+                    f"[describe] [{trace_id}] malformed index JSON for "
+                    f"{tool_name!r}: {type(e).__name__}: {e}"
+                )
+                _health_state["index_available"] = False
+                _health_state["last_index_error"] = f"{type(e).__name__}: {e}"
+                params = {}
+                examples = []
 
             response = {
                 "trace_id": trace_id,
@@ -1148,7 +1232,16 @@ async def compass_categories() -> Dict[str, Any]:
 
     Use this to understand what kinds of tools are available before searching.
     """
-    index = await get_index()
+    trace_id = uuid.uuid4().hex[:8]
+    # GW-A-001: surface the cold-start RuntimeError as a structured envelope
+    # rather than a raw stack (mirrors compass_status / compass_audit).
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        logger.error(
+            f"[compass_categories] [{trace_id}] index unavailable on cold start: {e}"
+        )
+        return _cold_start_envelope(e, trace_id=trace_id)
     stats = index.get_stats()
 
     response = {
@@ -1916,15 +2009,16 @@ async def async_main(args):
         await run_tests()
 
 
-def _run_http(port: int) -> None:
-    """Run the MCP gateway in HTTP mode with /health, /ready, /metrics.
+def build_http_app():
+    """Construct the gateway's HTTP ASGI app with the ops endpoints attached.
 
-    SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
-    Binding to a non-loopback interface exposes RCE-class surface. The HOST env
-    var defaults to 127.0.0.1 (loopback). Only bind to public interfaces when
-    running behind an authenticated reverse proxy (Fly.io edge, etc.).
+    Registers /health, /ready and /metrics on FastMCP's custom Starlette route
+    list (idempotently) and returns ``mcp.streamable_http_app()`` — the very
+    app ``_run_http`` serves. Exposed at module scope (GW-FT-003) so tests and
+    operators can mount the app, e.g. via ``starlette.testclient.TestClient``,
+    without binding a socket. The route handlers below are byte-for-byte the
+    ones used in production; nothing about their runtime behavior changes.
     """
-    import os
     from starlette.routing import Route
     from starlette.responses import JSONResponse, PlainTextResponse
 
@@ -1942,9 +2036,9 @@ def _run_http(port: int) -> None:
         _ready_cache["at"] = 0.0
         _ready_cache["status_code"] = 0
 
-    # BE-B-011: register a hook so _mark_ollama_down() can drop the cache
-    # immediately rather than waiting for the next 2s TTL window.
-    _ready_cache_invalidators.append(_invalidate_local_ready_cache)
+    # BE-B-011: a hook so _mark_ollama_down() can drop the cache immediately
+    # rather than waiting for the next 2s TTL window — registered once, in the
+    # guarded block below alongside the routes.
 
     async def health(_request):
         return JSONResponse({
@@ -2174,7 +2268,7 @@ def _run_http(port: int) -> None:
         # for higher resolution).
         lines.append("# HELP tool_compass_embedder_queue_wait_seconds p95 wait time for embedder concurrency slot.")
         lines.append("# TYPE tool_compass_embedder_queue_wait_seconds gauge")
-        lines.append(f"# UNIT tool_compass_embedder_queue_wait_seconds seconds")
+        lines.append("# UNIT tool_compass_embedder_queue_wait_seconds seconds")
         lines.append(
             f"tool_compass_embedder_queue_wait_seconds {_float_fmt((embed_qw_p95_ms or 0.0) / 1000.0)}"
         )
@@ -2323,13 +2417,36 @@ def _run_http(port: int) -> None:
         )
 
     # Add health / ready / metrics routes to FastMCP's custom routes
-    # (included in streamable_http_app).
-    mcp._custom_starlette_routes.append(Route("/health", health, methods=["GET"]))
-    mcp._custom_starlette_routes.append(Route("/ready", ready, methods=["GET"]))
-    mcp._custom_starlette_routes.append(Route("/metrics", metrics, methods=["GET"]))
+    # (included in streamable_http_app). Guarded against the *current* route
+    # list so repeated build_http_app() calls don't stack duplicate routes —
+    # keyed on path rather than a module flag so a test that swaps in a fresh
+    # _custom_starlette_routes still gets its handlers registered.
+    handlers = {"/health": health, "/ready": ready, "/metrics": metrics}
+    existing = {getattr(r, "path", None) for r in mcp._custom_starlette_routes}
+    if "/ready" not in existing:
+        # First registration onto this list also wires the cache invalidator
+        # so _mark_ollama_down() can drop the cached /ready result immediately.
+        _ready_cache_invalidators.append(_invalidate_local_ready_cache)
+    for path, handler in handlers.items():
+        if path not in existing:
+            mcp._custom_starlette_routes.append(Route(path, handler, methods=["GET"]))
 
-    # Use FastMCP's built-in HTTP runner (handles lifespan + session manager init)
+    return mcp.streamable_http_app()
+
+
+def _run_http(port: int) -> None:
+    """Run the MCP gateway in HTTP mode with /health, /ready, /metrics.
+
+    SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
+    Binding to a non-loopback interface exposes RCE-class surface. The HOST env
+    var defaults to 127.0.0.1 (loopback). Only bind to public interfaces when
+    running behind an authenticated reverse proxy (Fly.io edge, etc.).
+    """
+    import os
     from mcp.server.transport_security import TransportSecuritySettings
+
+    # Build + register the ops routes (idempotent) before the server starts.
+    build_http_app()
 
     host = os.environ.get("HOST", "127.0.0.1")
     if host not in ("127.0.0.1", "localhost", "::1"):

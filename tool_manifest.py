@@ -10,6 +10,7 @@ Each tool has:
 - examples: Example use cases (improves embedding quality)
 """
 
+import dataclasses
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 import json
@@ -72,8 +73,21 @@ class ToolDefinition:
 
     @classmethod
     def from_dict(cls, data: Dict) -> "ToolDefinition":
-        """Create from dictionary."""
-        return cls(**data)
+        """Create from dictionary.
+
+        MCC-FT-005: filter to known dataclass fields before constructing.
+        A manifest written by a newer build may carry an extra/newer per-tool
+        key; ``cls(**data)`` would raise TypeError and reject the whole
+        manifest. Drop unknown keys (debug-logged) so an old binary can still
+        load a forward-compatible manifest.
+        """
+        known = {f.name for f in dataclasses.fields(cls)}
+        dropped = [k for k in data if k not in known]
+        if dropped:
+            logger.debug(
+                f"ToolDefinition.from_dict dropping unknown key(s): {sorted(dropped)}"
+            )
+        return cls(**{k: v for k, v in data.items() if k in known})
 
 
 # =============================================================================

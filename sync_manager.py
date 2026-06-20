@@ -4,6 +4,7 @@ Detects backend changes and triggers index rebuilds.
 """
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import sqlite3
@@ -44,6 +45,16 @@ class SyncManager:
         self._last_check: Dict[str, datetime] = {}
         self._polling_task: Optional[asyncio.Task] = None
         self._db: Optional[sqlite3.Connection] = None
+
+        # MSYNC-A-002: the incremental diff path removes vanished tools via
+        # index.remove_tool, which only deletes the SQLite row — the HNSW
+        # vector is orphaned (hnswlib has no true delete). High-churn backends
+        # accumulate orphan vectors that consume the fixed search candidate
+        # window, thinning results until a full rebuild. We count incremental
+        # cycles that actually removed tools and force a real build_index()
+        # rebuild after this many, which atomically rebuilds a clean HNSW.
+        self._incremental_cycles_since_rebuild = 0
+        self._rebuild_after_incremental_cycles = 20
 
         # Ensure db directory exists
         ANALYTICS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -176,6 +187,23 @@ class SyncManager:
 
             return results
 
+    def _index_read_lock(self):
+        """Return the indexer's DB write lock as a context manager.
+
+        MSYNC-A-003: cross-thread reads of self.index.db from the event-loop
+        thread race with worker-thread index writes (search_sync dispatches
+        embedding work to a ThreadPoolExecutor; add_single_tool / remove_tool
+        mutate the same connection). The indexer serializes all of its own
+        mutations via _db_write_lock; we acquire that SAME lock here so our
+        reads can't observe a half-applied write (sqlite3.ProgrammingError on
+        a recursive-use connection). If the lock isn't present (older index or
+        a test double), fall back to a no-op so behaviour is unchanged.
+        """
+        lock = getattr(self.index, "_db_write_lock", None)
+        if lock is not None:
+            return lock
+        return contextlib.nullcontext()
+
     def _get_backend_tool_names(self, backend_name: str) -> set:
         """Return set of currently-indexed tool names for a backend.
 
@@ -187,10 +215,14 @@ class SyncManager:
         if idx_db is None:
             return names
         try:
-            cursor = idx_db.execute(
-                "SELECT name FROM tools WHERE server = ?", (backend_name,)
-            )
-            for row in cursor.fetchall():
+            # MSYNC-A-003: hold the indexer's write lock for this cross-thread
+            # read so a concurrent worker-thread index write can't raise.
+            with self._index_read_lock():
+                cursor = idx_db.execute(
+                    "SELECT name FROM tools WHERE server = ?", (backend_name,)
+                )
+                rows = cursor.fetchall()
+            for row in rows:
                 names.add(row["name"])
         except Exception as e:
             logger.debug(f"_get_backend_tool_names({backend_name}) failed: {e}")
@@ -291,10 +323,36 @@ class SyncManager:
                 f"{stats['updated']} updated, {stats['removed']} removed"
             )
 
-        # Rebuild index with new tools
-        if all_tools:
-            # For now, do incremental add (HNSW supports this)
-            # Full rebuild would be: await self.index.build_index(all_tools)
+        # MSYNC-A-002: did this incremental cycle remove any tools? Each
+        # removal orphans an HNSW vector (remove_tool only deletes the SQLite
+        # row), so removals — not adds — are what accumulate cruft. Count
+        # cycles that actually removed something and force a periodic full
+        # rebuild to compact the HNSW back to a clean state.
+        removed_this_cycle = sum(s["removed"] for s in diff_stats.values())
+        if removed_this_cycle:
+            self._incremental_cycles_since_rebuild += 1
+
+        if (
+            all_tools
+            and self._incremental_cycles_since_rebuild
+            >= self._rebuild_after_incremental_cycles
+        ):
+            # Enough churn has accumulated — do a real rebuild so orphaned
+            # vectors no longer eat the fixed search candidate window.
+            logger.info(
+                f"Orphan-vector compaction: {self._incremental_cycles_since_rebuild} "
+                f"incremental cycles with removals reached threshold "
+                f"({self._rebuild_after_incremental_cycles}); doing a full "
+                f"build_index rebuild of {len(all_tools)} tool(s)."
+            )
+            await self.index.build_index(all_tools)
+            self._incremental_cycles_since_rebuild = 0
+            logger.info(
+                f"Full rebuild complete: {len(all_tools)} tools from "
+                f"backends: {backend_names}"
+            )
+        elif all_tools:
+            # Normal incremental path — HNSW supports dynamic add.
             for tool in all_tools:
                 await self.index.add_single_tool(tool)
 
@@ -348,8 +406,13 @@ class SyncManager:
             idx_db = getattr(self.index, "db", None)
             if idx_db is not None:
                 try:
-                    cursor = idx_db.execute("SELECT name, server FROM tools")
-                    old_all_names = {row["name"] for row in cursor.fetchall()}
+                    # MSYNC-A-003: hold the indexer's write lock for this
+                    # cross-thread read so a concurrent worker-thread write
+                    # can't raise sqlite3.ProgrammingError mid-fetch.
+                    with self._index_read_lock():
+                        cursor = idx_db.execute("SELECT name, server FROM tools")
+                        rows = cursor.fetchall()
+                    old_all_names = {row["name"] for row in rows}
                 except Exception as e:
                     logger.debug(f"full_sync: baseline fetch failed: {e}")
 
@@ -449,7 +512,20 @@ class SyncManager:
                     "build_result": result,
                 }
             else:
-                return {"status": "no_tools", "tools_indexed": 0, "backends_synced": []}
+                # MSYNC-A-001: no tools across all backends. We MUST still
+                # rebuild with an empty set so build_index([]) atomically
+                # clears the tools table + resets the HNSW index. Returning
+                # early without this left the prior index live, so compass
+                # kept routing to dead tools — and the globally_removed log
+                # above claimed they were dropped when nothing was.
+                build_result = await self.index.build_index([])
+                logger.info("Full sync complete: index emptied (0 tools)")
+                return {
+                    "status": "no_tools",
+                    "tools_indexed": 0,
+                    "backends_synced": list(connect_results.keys()),
+                    "build_result": build_result,
+                }
 
     async def get_sync_status(self) -> Dict[str, Any]:
         """Get current sync status for all backends."""

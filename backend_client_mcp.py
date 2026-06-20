@@ -22,6 +22,7 @@ If/when this module is reactivated:
 
 import asyncio
 import logging
+import os
 from typing import Dict, List, Optional, Any
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
@@ -86,8 +87,25 @@ class BackendConnection:
         try:
             logger.info(f"Connecting to backend: {self.name} (timeout={timeout}s)")
 
-            # Build environment
-            env = dict(self.backend.env) if self.backend.env else None
+            # Build environment. BC-004: honor the BR-A-006 env-inheritance
+            # policy that the runtime client (backend_client_simple) enforces,
+            # so this experimental path does not leak the parent process's full
+            # environment to a backend that opted out. A backend may set the
+            # reserved ``__env_inheritance__`` key in its ``env`` dict to
+            # ``"none"`` to start from an empty environment; the key is consumed
+            # and never passed to the subprocess. Default ("all") preserves the
+            # prior inherit-parent behaviour.
+            backend_env = dict(self.backend.env) if self.backend.env else {}
+            inheritance_policy = backend_env.pop("__env_inheritance__", "all")
+            if inheritance_policy == "none":
+                env: Optional[Dict[str, str]] = dict(backend_env)
+            elif backend_env:
+                env = os.environ.copy()
+                env.update(backend_env)
+            else:
+                # No explicit overrides — let the MCP SDK apply its own default
+                # environment (env=None), matching prior behaviour.
+                env = None
 
             # Create server parameters
             server_params = StdioServerParameters(
@@ -334,8 +352,20 @@ class BackendManager:
         """
         timeout = timeout or TOOL_CALL_TIMEOUT
 
-        # Parse qualified name
-        if ":" in qualified_name:
+        # Parse qualified name. BC-003: mirror backend_client_simple's
+        # tool-index-first parse so a backend name containing ':' does not get
+        # silently mis-split by a naive ``split(':', 1)``. Prefer the known
+        # ``qualified_name -> server_name`` mapping and recover the tool name by
+        # stripping the resolved server prefix; only fall back to the naive
+        # split when the name is not indexed.
+        if qualified_name in self._tool_index:
+            server_name = self._tool_index[qualified_name]
+            prefix = f"{server_name}:"
+            if qualified_name.startswith(prefix):
+                tool_name = qualified_name[len(prefix):]
+            else:
+                tool_name = qualified_name
+        elif ":" in qualified_name:
             server_name, tool_name = qualified_name.split(":", 1)
         else:
             # Try to find in index

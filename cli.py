@@ -685,36 +685,44 @@ def _cmd_describe(args: argparse.Namespace) -> int:
     conn.row_factory = sqlite3.Row
     suggestions: List[str] = []
     try:
-        row = conn.execute(
-            "SELECT name, description, category, server, parameters, examples, is_core "
-            "FROM tools WHERE name = ?",
-            (args.tool_name,),
-        ).fetchone()
-        # FE-A-018: if no exact match, gather up to 3 substring suggestions
-        # so the user is not left on a dead-end "not found". Matches the UI
-        # surface's partial-match LIKE path so CLI and UI behave the same.
-        if row is None:
-            needle = f"%{args.tool_name}%"
-            rows = conn.execute(
-                "SELECT name FROM tools "
-                "WHERE name LIKE ? OR description LIKE ? "
-                "ORDER BY (CASE WHEN name LIKE ? THEN 0 ELSE 1 END), name "
-                "LIMIT 3",
-                (needle, needle, needle),
-            ).fetchall()
-            suggestions = [r["name"] for r in rows]
-    except sqlite3.OperationalError as e:
+        try:
+            row = conn.execute(
+                "SELECT name, description, category, server, parameters, examples, is_core "
+                "FROM tools WHERE name = ?",
+                (args.tool_name,),
+            ).fetchone()
+            # FE-A-018: if no exact match, gather up to 3 substring suggestions
+            # so the user is not left on a dead-end "not found". Matches the UI
+            # surface's partial-match LIKE path so CLI and UI behave the same.
+            if row is None:
+                needle = f"%{args.tool_name}%"
+                rows = conn.execute(
+                    "SELECT name FROM tools "
+                    "WHERE name LIKE ? OR description LIKE ? "
+                    "ORDER BY (CASE WHEN name LIKE ? THEN 0 ELSE 1 END), name "
+                    "LIMIT 3",
+                    (needle, needle, needle),
+                ).fetchall()
+                suggestions = [r["name"] for r in rows]
+        # SD-CLI-005: a corrupt DB file raises sqlite3.DatabaseError (the parent
+        # of OperationalError) — e.g. "file is not a database". Catching only
+        # OperationalError let that escape the rebuild-hint path with a raw
+        # traceback. Broaden to DatabaseError so any malformed/corrupt DB routes
+        # through the same actionable hint.
+        except sqlite3.DatabaseError as e:
+            return _print_error(
+                err_console,
+                f"DB query failed: {e}",
+                hint=(
+                    "The tool index may be corrupted. Try `tool-compass sync` "
+                    "to rebuild it."
+                ),
+                exit_code=2,
+            )
+    finally:
+        # Always close the connection — the previous early-return-on-error path
+        # leaked the open conn on some branches.
         conn.close()
-        return _print_error(
-            err_console,
-            f"DB query failed: {e}",
-            hint=(
-                "The tool index may be corrupted. Try `tool-compass sync` "
-                "to rebuild it."
-            ),
-            exit_code=2,
-        )
-    conn.close()
 
     if row is None:
         # Build a hint that includes suggestions when we have them.
@@ -1199,7 +1207,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     sync_info = payload.get("sync") or {}
 
     total_tools = index_info.get("total_tools", 0)
-    out_console.print(f"[bold]Tool Compass status[/bold]")
+    out_console.print("[bold]Tool Compass status[/bold]")
     out_console.print(f"  [{_C_DIM}]index:[/{_C_DIM}] {total_tools} tools indexed")
     by_server = index_info.get("by_server") or {}
     if by_server:
@@ -1544,7 +1552,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # Validate that we got an integer; reject anything else with a
                 # usage error so we don't hand a garbage value to the gateway.
                 try:
-                    int(port)
+                    port_int = int(port)
                 except ValueError:
                     return _print_error(
                         err_console,
@@ -1552,11 +1560,33 @@ def main(argv: Optional[List[str]] = None) -> int:
                         hint="Try `tool-compass serve --http 8080`.",
                         exit_code=2,
                     )
-                os.environ["PORT"] = str(port)
+                # An int alone isn't enough: '-1', '0', and '99999999' all parse
+                # but aren't bindable ports. Enforce the TCP port range so the
+                # gateway never gets handed an unbindable value.
+                if not (1 <= port_int <= 65535):
+                    return _print_error(
+                        err_console,
+                        f"--http port out of range: {port_int}",
+                        hint="Port must be in the valid range 1-65535.",
+                        exit_code=2,
+                    )
+                os.environ["PORT"] = str(port_int)
             # Backward-compat path: legacy behavior was to launch the server.
             from gateway import main as gateway_main
 
-            return gateway_main() or 0
+            # gateway.main() calls argparse.parse_args() with no args, so it
+            # reads sys.argv[1:]. When we're invoked as `tool-compass serve
+            # [--http ...]`, sys.argv still carries those tokens and gateway's
+            # strict parser dies with "unrecognized arguments: serve". The port
+            # is already handed off via os.environ['PORT'] (gateway reads PORT
+            # from env, never from argv), so neutralizing argv loses nothing.
+            # Same pattern _cmd_ui uses for ui.main.
+            saved_argv = sys.argv
+            try:
+                sys.argv = ["tool-compass"]
+                return gateway_main() or 0
+            finally:
+                sys.argv = saved_argv
         if args.command == "doctor":
             return _cmd_doctor(args)
         if args.command == "search":

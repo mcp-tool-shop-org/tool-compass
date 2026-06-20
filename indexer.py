@@ -146,7 +146,24 @@ class CompassIndex:
                 )
                 self.db.commit()
             return None
-        vector = np.frombuffer(row["vector"], dtype=np.float32).reshape(dim)
+        # SC-002: the column-dim check above is NOT sufficient. A row whose
+        # dim==EMBEDDING_DIM but whose BLOB byte length is inconsistent
+        # (truncated / corrupt write) makes reshape(dim) raise ValueError.
+        # Because _cache_get runs inside build_index's BEGIN IMMEDIATE txn,
+        # an uncaught ValueError there rolls back and re-raises EVERY rebuild
+        # forever, defeating the documented self-heal. Validate the actual
+        # byte length (float32 == 4 bytes/element) before reshape; on
+        # mismatch, treat as a miss and delete the bad row (mirroring the
+        # column-dim-mismatch branch above) so the next pass re-populates it.
+        blob = row["vector"]
+        if blob is None or len(blob) != dim * 4:
+            with self._db_write_lock:
+                self.db.execute(
+                    "DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,)
+                )
+                self.db.commit()
+            return None
+        vector = np.frombuffer(blob, dtype=np.float32).reshape(dim)
         # frombuffer returns a read-only view; copy so hnswlib can use it.
         return vector.copy()
 

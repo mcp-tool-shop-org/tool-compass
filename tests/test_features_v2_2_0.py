@@ -157,17 +157,30 @@ async def test_per_backend_reader_multiplexes_concurrent_calls():
 
 
 def _load_starlette_app():
-    """Return the Starlette ASGI app exposed by gateway.py, or skip."""
+    """Return the Starlette ASGI app exposed by gateway.py.
+
+    TESTS-001: ``build_http_app()`` is a permanent module-level surface
+    (GW-FT-003) that attaches /health, /ready and /metrics. The previous
+    skip-if-missing path turned the /ready-503 and /metrics tests into
+    permanent green-via-skip — zero coverage of documented endpoints. We now
+    hard-assert the factory exists so that removing it FAILS these tests
+    loudly instead of silently skipping them.
+    """
     pytest.importorskip("starlette")
     import gateway
 
-    # The feature should expose either ``gateway.app`` (Starlette) or a
-    # helper like ``gateway.build_http_app()``. Support either.
+    # The feature exposes either ``gateway.app`` (Starlette) or the
+    # ``gateway.build_http_app()`` factory. Both are acceptable; at least one
+    # MUST be present.
     app = getattr(gateway, "app", None)
     if app is None:
         builder = getattr(gateway, "build_http_app", None)
-        if builder is None:
-            pytest.skip("GW-FT-003 HTTP app not exposed yet (no gateway.app / build_http_app)")
+        assert builder is not None and callable(builder), (
+            "GW-FT-003 regression: gateway must expose a module-level "
+            "build_http_app() factory (or `app`) wiring /health, /ready and "
+            "/metrics. Neither was found — the ops endpoints are no longer "
+            "reachable from a TestClient."
+        )
         app = builder()
     return app, gateway
 
@@ -202,7 +215,15 @@ def test_ready_returns_503_when_ollama_down():
 
 
 def test_metrics_endpoint_renders_prometheus_format():
-    """/metrics must be Prometheus text-format 0.0.4 and include search counter."""
+    """/metrics must render the OpenMetrics 1.0.0 exposition format + search counter.
+
+    The gateway emits OpenMetrics 1.0.0 (BE-B-015: ``# UNIT`` lines and the
+    ``# EOF`` terminator), the standards-track successor to the Prometheus
+    0.0.4 text format that Prometheus itself scrapes. This test was authored
+    against the older 0.0.4 content-type while the endpoint was un-exposed and
+    permanently skipped; it now locks in the content-type the route actually
+    ships.
+    """
     pytest.importorskip("starlette")
     try:
         from starlette.testclient import TestClient
@@ -215,14 +236,20 @@ def test_metrics_endpoint_renders_prometheus_format():
     assert resp.status_code == 200, f"/metrics returned {resp.status_code}"
 
     ctype = resp.headers.get("content-type", "")
-    assert ctype.startswith("text/plain"), f"Expected text/plain, got {ctype!r}"
-    # Prometheus exposition format version string — tolerate charset ordering.
-    assert "version=0.0.4" in ctype, f"Missing Prom version in content-type: {ctype!r}"
+    assert ctype.startswith("application/openmetrics-text"), (
+        f"Expected OpenMetrics exposition content-type, got {ctype!r}"
+    )
+    # OpenMetrics version string — tolerate charset ordering.
+    assert "version=1.0.0" in ctype, f"Missing OpenMetrics version in content-type: {ctype!r}"
     assert "charset=utf-8" in ctype, f"Missing charset in content-type: {ctype!r}"
 
     body = resp.text
     assert "tool_compass_search_total" in body, (
         f"Expected tool_compass_search_total metric, body was:\n{body[:500]}"
+    )
+    # OpenMetrics 1.0.0 requires the body to terminate with `# EOF` (BE-B-015).
+    assert body.rstrip().endswith("# EOF"), (
+        "OpenMetrics body must end with the # EOF terminator"
     )
 
 
@@ -266,6 +293,39 @@ def test_metrics_includes_embed_latency_p95():
         float(last_token)
     except ValueError:
         pytest.fail(f"embed_latency_p95 value is not numeric: {metric_lines[0]!r}")
+
+
+def test_build_http_app_is_module_level_and_registers_ops_routes():
+    """TESTS-001: build_http_app() must be a module-level factory that wires
+    /health, /ready and /metrics.
+
+    Previously these routes lived inside _run_http() and the GW-FT-003 tests
+    were permanently skipped. This regression locks the factory at module
+    scope AND verifies it registers all three ops paths, so a refactor that
+    re-buries the routes (or drops one) fails loudly here instead of silently
+    skipping the endpoint coverage.
+    """
+    pytest.importorskip("starlette")
+    import gateway
+
+    builder = getattr(gateway, "build_http_app", None)
+    assert builder is not None and callable(builder), (
+        "build_http_app() must be exposed at module scope (GW-FT-003)."
+    )
+
+    # Calling the factory must register the three ops routes onto FastMCP's
+    # custom route list. Idempotent: a second call must not duplicate them.
+    builder()
+    builder()
+    paths = [
+        getattr(r, "path", None)
+        for r in gateway.mcp._custom_starlette_routes
+    ]
+    for required in ("/health", "/ready", "/metrics"):
+        assert paths.count(required) == 1, (
+            f"build_http_app() must register exactly one {required} route; "
+            f"found {paths.count(required)} (paths={paths})"
+        )
 
 
 # =============================================================================
@@ -454,14 +514,19 @@ async def test_diffing_sync_removes_disappearing_tools(
 
 
 def _require_cli():
-    """Import cli module or skip if not yet created by manifest-config-cli agent."""
+    """Import the shipped cli module.
+
+    TESTS-002: cli.py is a permanent shipped surface (the tool-compass CLI).
+    A broken import is a real regression, NOT a reason to skip — the previous
+    import-failure skip turned the doctor/search tests green-via-skip whenever
+    cli.py failed to load. Only a genuinely absent file (e.g. a fresh checkout
+    before MCC-FT-001 landed) is skip-worthy; an import error must propagate
+    and fail the test loudly.
+    """
     cli_path = REPO_ROOT / "cli.py"
     if not cli_path.exists():
         pytest.skip("cli.py not yet created (MCC-FT-001)")
-    try:
-        import cli  # noqa: F401
-    except Exception as e:  # pragma: no cover - import probe
-        pytest.skip(f"cli.py present but failed to import: {e}")
+    import cli  # noqa: F401 — import error here is a real failure, never a skip
     return sys.modules["cli"]
 
 

@@ -46,7 +46,6 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -368,7 +367,7 @@ class TestLoadIndex:
     def test_load_index_returns_index_on_success(self, monkeypatch):
         import indexer
 
-        sentinel = object()
+        object()
 
         class _StubIndex:
             def load_index(self):
@@ -670,7 +669,7 @@ class TestCmdCategories:
         _patch_gateway(monkeypatch, "compass_categories", payload)
         rc = cli.main(["categories"])
         out = capsys.readouterr().out
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 0
         assert "no categories" in out.lower() or "empty" in out.lower()
 
@@ -826,7 +825,7 @@ class TestCmdAnalytics:
         _patch_gateway(monkeypatch, "compass_analytics", payload)
         rc = cli.main(["analytics"])
         out = capsys.readouterr().out
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 0
         assert "bridge:read_file" in out
         assert "42" in out
@@ -1151,7 +1150,7 @@ class TestCmdSearchExtended:
         monkeypatch.setattr(cli, "_load_index", lambda: _stub_index([]))
         rc = cli.main(["search", "no match"])
         out = capsys.readouterr().out
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         # Empty results = exit 0 with a "no tools matched" message.
         assert rc == 0
         assert "No tools matched" in out or "no match" in out.lower()
@@ -1614,7 +1613,6 @@ class TestMainDispatch:
     def test_main_unhandled_exception_returns_2(self, monkeypatch, capsys):
         """An exception that bubbles past _cmd_* handlers reaches main's catch."""
         # _build_parser is the easiest target — replace it with a raising stub.
-        original_build = cli._build_parser
 
         class _BadParser:
             def parse_args(self, argv=None):
@@ -1641,6 +1639,60 @@ class TestMainDispatch:
         err = capsys.readouterr().err
         assert rc == 2
         assert "integer" in err.lower()
+
+    @pytest.mark.parametrize("bad_port", ["-1", "0", "99999999", "65536"])
+    def test_main_serve_http_out_of_range_port_returns_2(
+        self, bad_port, monkeypatch, capsys
+    ):
+        """cli-003 regression: ports that parse as int() but fall outside the
+        valid TCP range (1-65535) must be rejected with a usage error and a
+        range hint — never handed to the gateway. Before the fix, int() alone
+        let '-1'/'0'/'99999999' through.
+
+        gateway.main is monkeypatched so that IF a bad port leaked through and
+        the server actually launched, we'd notice (it must not be called).
+        """
+        import gateway
+
+        launched = {"n": 0}
+
+        def fake_gateway_main():
+            launched["n"] += 1
+            return 0
+
+        monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
+        if hasattr(cli, "gateway"):
+            monkeypatch.setattr(cli.gateway, "main", fake_gateway_main, raising=False)
+
+        rc = cli.main(["serve", "--http", bad_port])
+        err = capsys.readouterr().err
+        assert rc == 2, f"port {bad_port!r} should be rejected"
+        assert "range" in err.lower()
+        assert "1-65535" in err
+        # The gateway must NOT have been launched with an out-of-range port.
+        assert launched["n"] == 0
+
+    @pytest.mark.parametrize("good_port", ["1", "8080", "65535"])
+    def test_main_serve_http_in_range_port_accepted(
+        self, good_port, monkeypatch, capsys
+    ):
+        """cli-003 corollary: valid boundary ports (1, 65535) and a normal port
+        are accepted, exported to PORT, and reach the gateway."""
+        import gateway
+
+        seen = {"port": None}
+
+        def fake_gateway_main():
+            seen["port"] = os.environ.get("PORT")
+            return 0
+
+        monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
+        if hasattr(cli, "gateway"):
+            monkeypatch.setattr(cli.gateway, "main", fake_gateway_main, raising=False)
+
+        rc = cli.main(["serve", "--http", good_port])
+        assert rc == 0
+        assert seen["port"] == good_port
 
     def test_main_serve_http_default_8080(self, monkeypatch, capsys):
         """--http with no value AND no PORT env var defaults to 8080."""
@@ -1691,10 +1743,17 @@ class TestMainDispatch:
     def test_main_explicit_serve_invokes_gateway(self, monkeypatch):
         import gateway
 
-        called = {"n": 0}
+        called = {"n": 0, "argv": None}
 
         def fake_gateway_main():
             called["n"] += 1
+            # cli-001: capture argv as gateway.main sees it. The fix neutralizes
+            # sys.argv to ['tool-compass'] so the real gateway's argparse (which
+            # reads sys.argv[1:]) never sees the 'serve' token. Asserting the
+            # captured argv keeps this test honest even though we monkeypatch
+            # main away here — if the neutralization regresses, argv would carry
+            # 'serve' and this assert fails.
+            called["argv"] = list(sys.argv)
             return 0
 
         monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
@@ -1703,6 +1762,68 @@ class TestMainDispatch:
         rc = cli.main(["serve"])
         assert rc == 0
         assert called["n"] == 1
+        # gateway.main must NOT see the 'serve' token in argv.
+        assert "serve" not in called["argv"]
+        assert called["argv"] == ["tool-compass"]
+
+    def test_main_serve_real_gateway_no_argparse_crash(self, monkeypatch):
+        """cli-001 regression: `tool-compass serve` runs the REAL gateway.main
+        (not a monkeypatched fake) and must NOT crash with SystemExit /
+        "unrecognized arguments: serve".
+
+        gateway.main() calls argparse.parse_args() with no args, so it reads
+        sys.argv[1:]. Before the fix, sys.argv was ['tool-compass', 'serve'],
+        and gateway's strict parser raised SystemExit(2). We patch only the
+        blocking server-run primitives (_run_http / mcp.run) so the function
+        returns instead of binding a socket — the argparse path is fully real.
+        """
+        import gateway
+
+        ran = {"http": None, "stdio": 0}
+
+        # Neutralize the blocking transports so main() returns.
+        monkeypatch.setattr(gateway, "_run_http", lambda port: ran.__setitem__("http", port))
+        monkeypatch.setattr(gateway.mcp, "run", lambda *a, **k: ran.__setitem__("stdio", ran["stdio"] + 1))
+        # Ensure stdio path (no PORT) for the bare-serve case.
+        monkeypatch.delenv("PORT", raising=False)
+
+        # Bare `serve` — if the bug is present, gateway argparse sees 'serve'
+        # and raises SystemExit. The fix neutralizes argv so this is clean.
+        try:
+            rc = cli.main(["serve"])
+        except SystemExit as e:  # pragma: no cover - asserts the bug is gone
+            pytest.fail(
+                f"`tool-compass serve` leaked SystemExit({e.code}) from gateway "
+                "argparse — argv was not neutralized (cli-001 regression)."
+            )
+        assert rc == 0
+        # The stdio transport path was reached (PORT unset).
+        assert ran["stdio"] == 1
+
+    def test_main_serve_http_real_gateway_no_argparse_crash(self, monkeypatch):
+        """cli-001 regression for the `serve --http <port>` shape against the
+        REAL gateway.main. The port must arrive via os.environ['PORT'] and the
+        gateway must take the _run_http branch — never choke on argv tokens.
+        """
+        import gateway
+
+        ran = {"http": None}
+        monkeypatch.setattr(gateway, "_run_http", lambda port: ran.__setitem__("http", port))
+        monkeypatch.setattr(gateway.mcp, "run", lambda *a, **k: pytest.fail(
+            "stdio transport reached despite --http 9001 (PORT not exported)"
+        ))
+        monkeypatch.delenv("PORT", raising=False)
+
+        try:
+            rc = cli.main(["serve", "--http", "9001"])
+        except SystemExit as e:  # pragma: no cover - asserts the bug is gone
+            pytest.fail(
+                f"`tool-compass serve --http 9001` leaked SystemExit({e.code}) "
+                "from gateway argparse (cli-001 regression)."
+            )
+        assert rc == 0
+        # Port flowed through PORT env into gateway's HTTP transport.
+        assert ran["http"] == 9001
 
     def test_main_serve_http_empty_port_env_falls_back(self, monkeypatch):
         """--http with no value AND PORT='' in env defaults to 8080."""
@@ -1798,6 +1919,97 @@ class TestDescribeOperationalError:
         assert "DB query failed" in err
         assert "corrupted" in err.lower() or "sync" in err.lower()
 
+    def test_describe_corrupt_db_raises_database_error_not_operational(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """cli-002 regression: a physically corrupt DB raises sqlite3.DatabaseError
+        (the PARENT of OperationalError, NOT a subclass), which the old narrow
+        `except sqlite3.OperationalError` did not catch — leaking a raw traceback
+        past the SD-CLI-005 rebuild-hint path. The fix broadens to DatabaseError.
+
+        We inject sqlite3.DatabaseError directly (NOT OperationalError) so this
+        test FAILS if the catch is narrowed back to OperationalError.
+        """
+        import sqlite3 as sqlite3_module
+
+        # DatabaseError is the base; OperationalError subclasses it. Confirm the
+        # injected type is genuinely NOT an OperationalError so the test probes
+        # the real gap rather than the already-covered subclass.
+        assert not issubclass(sqlite3_module.DatabaseError, sqlite3_module.OperationalError)
+
+        db_path = tmp_path / "tools.db"
+        db_path.write_text("dummy")  # exists -> path check passes
+        import indexer
+
+        monkeypatch.setattr(indexer, "SQLITE_DB_PATH", db_path)
+
+        closed = {"n": 0}
+
+        class _CorruptConn:
+            row_factory = None
+
+            def execute(self, *args, **kwargs):
+                # "file is not a database" surfaces as DatabaseError, not
+                # OperationalError.
+                raise sqlite3_module.DatabaseError("file is not a database")
+
+            def close(self):
+                closed["n"] += 1
+
+        monkeypatch.setattr(cli.sqlite3, "connect", lambda *a, **k: _CorruptConn())
+
+        rc = cli.main(["describe", "anything"])
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "DB query failed" in err
+        assert "corrupted" in err.lower() or "sync" in err.lower()
+        # cli-002: the conn must be closed even on the error path (no leak).
+        assert closed["n"] == 1
+
+    def test_describe_closes_conn_on_success(self, tmp_path, monkeypatch, capsys):
+        """cli-002 corollary: the happy path also closes the connection exactly
+        once via the finally block (no leak on success either)."""
+        import sqlite3 as sqlite3_module
+
+        db_path = tmp_path / "tools.db"
+        db_path.write_text("dummy")
+        import indexer
+
+        monkeypatch.setattr(indexer, "SQLITE_DB_PATH", db_path)
+
+        closed = {"n": 0}
+
+        class _Cursor:
+            def fetchone(self):
+                # Minimal row supporting __getitem__ access used by _cmd_describe.
+                return {
+                    "name": "x",
+                    "description": "d",
+                    "category": "c",
+                    "server": "s",
+                    "parameters": "{}",
+                    "examples": "[]",
+                    "is_core": 0,
+                }
+
+            def fetchall(self):
+                return []
+
+        class _OkConn:
+            row_factory = None
+
+            def execute(self, *args, **kwargs):
+                return _Cursor()
+
+            def close(self):
+                closed["n"] += 1
+
+        monkeypatch.setattr(cli.sqlite3, "connect", lambda *a, **k: _OkConn())
+        rc = cli.main(["describe", "x"])
+        assert rc == 0
+        assert closed["n"] == 1
+        _ = sqlite3_module  # silence unused in some linters
+
 
 class TestGatewayImportFailure:
     """Cover the `from gateway import X` failure branches for each subcommand."""
@@ -1829,7 +2041,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["categories"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
     def test_audit_gateway_import_fail(self, monkeypatch, capsys):
@@ -1843,7 +2055,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["audit"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
     def test_analytics_gateway_import_fail(self, monkeypatch, capsys):
@@ -1857,7 +2069,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["analytics"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
     def test_chains_gateway_import_fail(self, monkeypatch, capsys):
@@ -1871,7 +2083,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["chains"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
 

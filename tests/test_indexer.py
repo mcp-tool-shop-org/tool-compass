@@ -4,9 +4,11 @@ Tests for Tool Compass indexer module.
 Tests HNSW index building, searching, and metadata management.
 """
 
+import numpy as np
 import pytest
 
 from indexer import CompassIndex, SearchResult
+from embedder import EMBEDDING_DIM
 from tool_manifest import ToolDefinition
 
 
@@ -130,6 +132,101 @@ class TestCompassIndex:
         )
 
         assert results == []
+
+
+class TestEmbeddingCacheSelfHeal:
+    """SC-002 regression: a corrupt/truncated embedding_cache BLOB whose
+    `dim` column still equals EMBEDDING_DIM must be treated as a cache MISS
+    (and deleted), not crash the rebuild.
+
+    _cache_get guarded reshape() only on the column-dim value, never the
+    actual BLOB byte length. A row with dim==EMBEDDING_DIM but a
+    truncated/corrupt BLOB made np.frombuffer(...).reshape(dim) raise
+    ValueError. Because _cache_get runs inside build_index's BEGIN IMMEDIATE
+    transaction, that uncaught ValueError rolled back and re-raised EVERY
+    rebuild forever — defeating the documented self-heal. The fix validates
+    len(blob) == dim * 4 and, on mismatch, deletes the bad row + reports a
+    miss so the next pass re-populates it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cache_get_truncated_blob_is_a_miss(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """Directly probe _cache_get: a dim-OK but wrong-length BLOB returns
+        None (miss) and the bad row is deleted (self-heal).
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        await index.build_index(sample_tools)
+
+        text = sample_tools[0].embedding_text()
+        text_hash = index._compute_text_hash(text)
+
+        # Corrupt the stored BLOB to a truncated length while leaving the
+        # `dim` column at the valid EMBEDDING_DIM — this is the exact shape
+        # the column-dim check fails to catch.
+        bad_blob = np.zeros(EMBEDDING_DIM - 5, dtype=np.float32).tobytes()
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE embedding_cache SET vector = ? WHERE text_hash = ?",
+                (bad_blob, text_hash),
+            )
+            index.db.commit()
+
+        # Must NOT raise ValueError; must report a miss (None).
+        result = index._cache_get(text_hash)
+        assert result is None, "corrupt-length BLOB must be treated as a miss"
+
+        # The bad row must have been deleted (self-heal).
+        row = index.db.execute(
+            "SELECT COUNT(*) AS c FROM embedding_cache WHERE text_hash = ?",
+            (text_hash,),
+        ).fetchone()
+        assert row["c"] == 0, "corrupt cache row should be deleted on miss"
+
+        await index.close()
+
+    @pytest.mark.asyncio
+    async def test_rebuild_self_heals_corrupt_cache_row(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """End-to-end: a corrupt cache row must not crash build_index — the
+        rebuild treats it as a miss, re-embeds, and completes successfully.
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        # First build populates the cache legitimately.
+        await index.build_index(sample_tools)
+
+        # Corrupt ONE cache row: keep dim == EMBEDDING_DIM, truncate the BLOB.
+        text = sample_tools[1].embedding_text()
+        text_hash = index._compute_text_hash(text)
+        bad_blob = np.zeros(EMBEDDING_DIM - 3, dtype=np.float32).tobytes()
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE embedding_cache SET vector = ? WHERE text_hash = ?",
+                (bad_blob, text_hash),
+            )
+            index.db.commit()
+
+        # On the OLD code, _cache_get's reshape() raised ValueError inside the
+        # BEGIN IMMEDIATE txn and this rebuild crashed (and would crash
+        # forever). The fix must let the rebuild succeed.
+        result = await index.build_index(sample_tools)
+        assert result["tools_indexed"] == len(sample_tools)
+
+        # And search still works after the self-heal.
+        results = await index.search("read a file", top_k=3)
+        assert len(results) > 0
+
+        await index.close()
 
 
 class TestIndexStats:

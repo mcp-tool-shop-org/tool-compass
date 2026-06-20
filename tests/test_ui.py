@@ -23,7 +23,6 @@ network call, real Ollama, or a real Gradio server.
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -410,6 +409,47 @@ class TestLexicalFallback:
         idx.db.execute.side_effect = sqlite3.OperationalError("no such table")
         with patch.dict("sys.modules", {"gateway": None}):
             assert ui._lexical_fallback_for_ui(idx, "q", 5, None, None) == []
+
+    def test_inline_fallback_underscore_is_not_a_wildcard(self):
+        """FE-SA-002: '_' in the query must be treated literally, not as a
+        single-char LIKE wildcard. The tool 'alpha' must NOT be returned for
+        the query 'a_pha' once % and _ are escaped with an ESCAPE clause.
+        Without the fix, '%a_pha%' matches 'alpha' (the '_' wildcard eats the
+        'l'), producing over-broad results.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "alpha", "description": "a tool",
+             "category": "file", "server": "s1"},
+        ])
+        with patch.dict("sys.modules", {"gateway": None}):
+            results = ui._lexical_fallback_for_ui(idx, "a_pha", 5, None, None)
+        assert results == []
+
+    def test_inline_fallback_percent_is_not_a_wildcard(self):
+        """FE-SA-002: '%' must be literal, not a multi-char LIKE wildcard.
+        Querying 'a%a' must NOT match 'alpha' once escaping + ESCAPE land.
+        Without the fix, '%a%a%' matches 'alpha'.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "alpha", "description": "a tool",
+             "category": "file", "server": "s1"},
+        ])
+        with patch.dict("sys.modules", {"gateway": None}):
+            results = ui._lexical_fallback_for_ui(idx, "a%a", 5, None, None)
+        assert results == []
+
+    def test_inline_fallback_literal_underscore_still_matches(self):
+        """FE-SA-002: escaping must not break legitimate literal matches —
+        a query whose '_' really appears in the tool name still matches.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "read_file", "description": "reads a file",
+             "category": "file", "server": "s1"},
+        ])
+        with patch.dict("sys.modules", {"gateway": None}):
+            results = ui._lexical_fallback_for_ui(idx, "read_file", 5, None, None)
+        assert len(results) == 1
+        assert results[0]["tool"] == "read_file"
 
 
 class TestNearestMatches:
@@ -1037,6 +1077,55 @@ class TestGetToolDetails:
             out = ui.get_tool_details("<script>x</script>")
         assert "<script>x</script>" not in out
         assert "&lt;script&gt;" in out
+
+    def test_corrupt_parameters_json_renders_gracefully(self):
+        """FE-SA-001: a malformed parameters blob must not raise out of the
+        callback. The json.loads on row['parameters'] sits outside the
+        try/except that closes before it; without a guard a JSONDecodeError
+        propagates and show_error=True dumps a raw traceback instead of the
+        styled card. The fix mirrors get_all_tools (defaults to {}/[]).
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "corrupt:tool", "description": "d",
+             "category": "file", "server": "s",
+             "parameters": {}, "examples": []},
+        ])
+        # Overwrite the row with a non-JSON parameters blob the helper can't
+        # produce on its own (it always json.dumps). This is the real on-disk
+        # corruption the finding describes.
+        idx.db.execute(
+            "UPDATE tools SET parameters = ? WHERE name = ?",
+            ("{not valid json", "corrupt:tool"),
+        )
+        idx.db.commit()
+        with patch.object(ui, "get_index", return_value=idx):
+            # Must not raise JSONDecodeError; renders the tool card.
+            out = ui.get_tool_details("corrupt:tool")
+        assert "corrupt:tool" in out
+        # Falls back to no-params view rather than crashing.
+        assert "No parameters required" in out
+
+    def test_corrupt_examples_json_renders_gracefully(self):
+        """FE-SA-001: the sibling json.loads on row['examples'] is equally
+        unguarded — a malformed examples blob must also degrade gracefully.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "badex:tool", "description": "d",
+             "category": "file", "server": "s",
+             "parameters": {"path": "str"}, "examples": []},
+        ])
+        idx.db.execute(
+            "UPDATE tools SET examples = ? WHERE name = ?",
+            ("[broken json", "badex:tool"),
+        )
+        idx.db.commit()
+        with patch.object(ui, "get_index", return_value=idx):
+            out = ui.get_tool_details("badex:tool")
+        assert "badex:tool" in out
+        # Parameters still render (only examples were corrupt).
+        assert "Parameters (1)" in out
+        # Corrupt examples default to [] → no Examples section.
+        assert "Examples (" not in out
 
 
 # =============================================================================

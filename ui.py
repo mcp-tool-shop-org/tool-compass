@@ -257,8 +257,17 @@ def _lexical_fallback_for_ui(
         # Inline fallback — defensive, matches gateway shape.
         if not index or not getattr(index, "db", None):
             return []
-        needle = f"%{query.strip()}%"
-        where = ["(lower(name) LIKE lower(?) OR lower(description) LIKE lower(?))"]
+        # FE-SA-002: escape LIKE wildcards (% and _) and pair with ESCAPE so a
+        # query containing those characters is matched literally, not as a
+        # wildcard — mirroring gateway._escape_like / _lexical_search_fallback.
+        escaped = (
+            query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        needle = f"%{escaped}%"
+        where = [
+            "(lower(name) LIKE lower(?) ESCAPE '\\' "
+            "OR lower(description) LIKE lower(?) ESCAPE '\\')"
+        ]
         params: list = [needle, needle]
         if category:
             where.append("category = ?")
@@ -965,8 +974,18 @@ def get_tool_details(tool_name: str) -> str:
         </div>
         """
 
-    params = json.loads(row["parameters"]) if row["parameters"] else {}
-    examples = json.loads(row["examples"]) if row["examples"] else []
+    # FE-SA-001: mirror get_all_tools — a malformed JSON blob from the index
+    # must degrade to empty defaults, not raise an uncaught JSONDecodeError out
+    # of the Gradio callback (which would dump a raw traceback under
+    # show_error=True instead of the styled format_error card).
+    try:
+        params = json.loads(row["parameters"]) if row["parameters"] else {}
+    except json.JSONDecodeError:
+        params = {}
+    try:
+        examples = json.loads(row["examples"]) if row["examples"] else []
+    except json.JSONDecodeError:
+        examples = []
 
     # Build parameters table — all untrusted strings run through html.escape to
     # block HTML/script injection from malicious tool metadata. SD-V-004:

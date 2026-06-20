@@ -311,7 +311,43 @@ class CompassConfig:
         Silent acceptance of out-of-range values was causing debugging pain
         (e.g. negative polling intervals, hot_cache_size=0). Clamp here so
         the surface is always sane even with a hand-edited config file.
+
+        CFG-A-002: COERCE numeric fields BEFORE the range comparisons. A
+        hand-edited config can carry a string/null where a number is expected
+        (e.g. ``"min_confidence": "high"``); comparing before coercing raised
+        TypeError, and from_file's recovery except only catches JSON/OS errors,
+        so startup crashed with a raw traceback. We coerce-or-reset each
+        numeric field up front: if the value can't become the right numeric
+        type, reset it to the class default and warn.
         """
+        # CFG-A-002: coerce-or-reset every numeric field first, so the range
+        # checks below always operate on numbers. (field, caster, default)
+        _defaults = CompassConfig
+        for fname, caster in (
+            ("min_confidence", float),
+            ("default_top_k", int),
+            ("sync_polling_interval", int),
+            ("hot_cache_size", int),
+            ("chain_detection_min_occurrences", int),
+            ("ollama_breaker_failure_threshold", int),
+            ("ollama_breaker_open_seconds", float),
+            ("ollama_retry_attempts", int),
+            ("hnsw_m", int),
+            ("hnsw_ef_construction", int),
+            ("hnsw_ef_search", int),
+        ):
+            value = getattr(self, fname)
+            try:
+                # bool is an int subclass; treat it as the numeric it casts to.
+                setattr(self, fname, caster(value))
+            except (TypeError, ValueError):
+                default_value = getattr(_defaults, fname)
+                logger.warning(
+                    f"Config value {fname}={value!r} is not numeric; "
+                    f"resetting to default {default_value!r}"
+                )
+                setattr(self, fname, default_value)
+
         # min_confidence: [0.0, 1.0]
         if not 0.0 <= self.min_confidence <= 1.0:
             original = self.min_confidence
@@ -673,8 +709,34 @@ def load_config() -> CompassConfig:
 _SECRET_FIELD_HINTS = ("_token", "_key", "_secret", "_password")
 
 
+# CFG-A-001: backend sub-fields that carry ${VAR}-resolved secrets. Their KEY
+# names ('Authorization', 'GITHUB_TOKEN', '--password=...') don't all match
+# _SECRET_FIELD_HINTS, so name-based redaction misses them. Redact these
+# STRUCTURALLY — every value (dict) or entry (list) — while keeping the keys
+# visible so the doctor() dump stays diagnosable.
+_SECRET_STRUCT_FIELDS = ("env", "headers", "args")
+
+
+def _redact_structural(value):
+    """Redact a backend env/headers (dict values) or args (list entries),
+    preserving keys/structure so the dump shows e.g. 'Authorization:
+    [REDACTED]' rather than dropping the field entirely."""
+    if isinstance(value, dict):
+        return {k: "[REDACTED]" for k in value}
+    if isinstance(value, list):
+        return ["[REDACTED]" for _ in value]
+    return "[REDACTED]"
+
+
 def _redact_config(cfg_dict: dict) -> dict:
-    """Walk the config dict and redact any field whose name hints at a secret."""
+    """Walk the config dict and redact secrets.
+
+    Two layers:
+    1. Name-based — any field whose key hints at a secret (_SECRET_FIELD_HINTS).
+    2. Structural (CFG-A-001) — under each backend, the 'env'/'headers'/'args'
+       fields carry ${VAR}-resolved secrets whose keys don't match the name
+       hints, so their values/entries are redacted structurally with keys kept.
+    """
 
     def walk(obj):
         if isinstance(obj, dict):
@@ -684,6 +746,8 @@ def _redact_config(cfg_dict: dict) -> dict:
                     hint in k.lower() for hint in _SECRET_FIELD_HINTS
                 ):
                     redacted[k] = "[REDACTED]"
+                elif isinstance(k, str) and k in _SECRET_STRUCT_FIELDS:
+                    redacted[k] = _redact_structural(v)
                 else:
                     redacted[k] = walk(v)
             return redacted

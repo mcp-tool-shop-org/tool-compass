@@ -15,11 +15,8 @@ globals.
 
 from __future__ import annotations
 
-import asyncio
-import json
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict
 from unittest.mock import Mock, AsyncMock, patch
 
 import pytest
@@ -1752,3 +1749,261 @@ class TestEnvelopeContract:
         assert env["code"] in _ERROR_CODES
         assert env["category"] in _ERROR_CATEGORIES
         assert env["retryable"] is False
+
+
+# =============================================================================
+# GW-A-001 — cold-start get_index() RuntimeError -> structured envelope
+# =============================================================================
+
+
+class TestColdStartIndexEnvelope:
+    """get_index() raises RuntimeError when there's no baked index AND Ollama
+    is unreachable. compass() / describe() / compass_categories() must surface
+    that as the structured service_unavailable envelope, never a raw raise."""
+
+    @staticmethod
+    def _assert_cold_start_envelope(result):
+        from gateway import _ERROR_CODES, _ERROR_CATEGORIES
+
+        assert isinstance(result, dict), "handler must return a dict, not raise"
+        assert "error_envelope" in result, (
+            f"cold-start must return the structured envelope, got: {result!r}"
+        )
+        env = result["error_envelope"]
+        assert env["code"] in {"ollama_unavailable", "index_unhealthy"}
+        assert env["code"] in _ERROR_CODES
+        assert env["category"] == "service_unavailable"
+        assert env["category"] in _ERROR_CATEGORIES
+        assert env["retryable"] is True
+        # Operator-actionable suggestions are required by the finding.
+        suggestions = " ".join(env.get("suggestions", [])).lower()
+        assert "ollama serve" in suggestions
+        assert "--sync" in suggestions
+
+    @pytest.mark.asyncio
+    async def test_compass_cold_start_returns_envelope(self, test_config):
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError(
+                "Ollama not available and no cached index found"
+            )
+
+        # No index, sync disabled (test_config.auto_sync is False).
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass
+
+            result = await compass(intent="read a file")
+
+        self._assert_cold_start_envelope(result)
+
+    @pytest.mark.asyncio
+    async def test_describe_cold_start_returns_envelope(self, test_config):
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError(
+                "Ollama not available and no cached index found"
+            )
+
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import describe
+
+            result = await describe(tool_name="bridge:read_file")
+
+        self._assert_cold_start_envelope(result)
+
+    @pytest.mark.asyncio
+    async def test_compass_categories_cold_start_returns_envelope(self, test_config):
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError(
+                "Ollama not available and no cached index found"
+            )
+
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass_categories
+
+            result = await compass_categories()
+
+        self._assert_cold_start_envelope(result)
+
+    @pytest.mark.asyncio
+    async def test_cold_start_code_tracks_ollama_health(self, test_config):
+        """When Ollama is known-down the code is ollama_unavailable; otherwise
+        the index itself is the blocker (index_unhealthy)."""
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError("cold start")
+
+        # Ollama explicitly down -> ollama_unavailable.
+        gateway._health_state["ollama_available"] = False
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass_categories
+
+            result = await compass_categories()
+        assert result["error_envelope"]["code"] == "ollama_unavailable"
+
+        # Ollama nominally up but index won't load -> index_unhealthy.
+        gateway._health_state["ollama_available"] = True
+        with patch("gateway.get_index", side_effect=cold_start):
+            result = await compass_categories()
+        assert result["error_envelope"]["code"] == "index_unhealthy"
+
+
+# =============================================================================
+# GW-A-002 — describe() malformed-JSON index row degrades, never raises
+# =============================================================================
+
+
+class TestDescribeMalformedJson:
+    """A corrupt parameters/examples JSON blob in the index row must degrade
+    to {}/[] and flag the index unhealthy rather than raising
+    JSONDecodeError."""
+
+    @pytest.mark.asyncio
+    async def test_describe_invalid_parameters_json_degrades(
+        self, test_index, test_config
+    ):
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        gateway._health_state["index_available"] = True
+        # Backend has no fallback schema — force the index row path.
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        # Corrupt the parameters blob for an existing tool. The describe()
+        # SELECT reads parameters + examples columns; a non-JSON string there
+        # is what a partially-written / truncated index produces.
+        test_index.db.execute(
+            "UPDATE tools SET parameters = ? WHERE name = ?",
+            ("{not valid json", "test:read_file"),
+        )
+        test_index.db.commit()
+
+        from gateway import describe
+
+        # Must NOT raise — returns the tool with empty params instead.
+        result = await describe(tool_name="test:read_file")
+
+        assert result["tool"] == "test:read_file"
+        assert result["parameters"] == {}, (
+            "malformed parameters JSON must fall back to {}"
+        )
+        # The malformed blob flags the index unhealthy + the augmenter stamps
+        # the degraded reason.
+        assert gateway._health_state["index_available"] is False
+        assert result.get("degraded") is True
+        assert "index_unhealthy" in result.get("degraded_reasons", [])
+
+    @pytest.mark.asyncio
+    async def test_describe_invalid_examples_json_degrades(
+        self, test_index, test_config
+    ):
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        gateway._health_state["index_available"] = True
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        test_index.db.execute(
+            "UPDATE tools SET examples = ? WHERE name = ?",
+            ("[broken", "test:write_file"),
+        )
+        test_index.db.commit()
+
+        from gateway import describe
+
+        result = await describe(tool_name="test:write_file")
+
+        assert result["tool"] == "test:write_file"
+        assert result["examples"] == [], (
+            "malformed examples JSON must fall back to []"
+        )
+        assert gateway._health_state["index_available"] is False
+
+
+# =============================================================================
+# GW-A-003 — multi-word lexical fallback matches per-token (0.3 branch live)
+# =============================================================================
+
+
+class TestLexicalFallbackPerToken:
+    """_lexical_search_fallback tokenizes the query so multi-word degraded-mode
+    intents still match, and the previously-dead 0.3 confidence tier is now
+    reachable."""
+
+    def test_multi_word_intent_matches_via_token(self, test_index):
+        from gateway import _lexical_search_fallback
+
+        # "missing file" is NOT a substring of any tool name/description, but
+        # the token "file" matches test:read_file / test:write_file. With the
+        # old single-whole-query needle this returned []; per-token matching
+        # now finds the *_file tools.
+        matches = _lexical_search_fallback(
+            test_index, "missing file", top_k=5, category=None, server=None
+        )
+        names = {m["tool"] for m in matches}
+        assert "test:read_file" in names or "test:write_file" in names, (
+            f"per-token fallback should match a *_file tool, got: {names}"
+        )
+
+    def test_token_only_match_takes_0_3_confidence(self, test_index):
+        """The else-branch (0.3) is reachable: a row matched on a token but the
+        whole query is not a substring of its name or description."""
+        from gateway import _lexical_search_fallback
+
+        matches = _lexical_search_fallback(
+            test_index, "missing file", top_k=5, category=None, server=None
+        )
+        assert matches, "expected at least one token match"
+        # Every match here is token-only (whole 'missing file' never appears),
+        # so all confidences are the 0.3 tier.
+        assert all(m["confidence"] == 0.3 for m in matches), (
+            f"token-only matches must score 0.3, got: "
+            f"{[(m['tool'], m['confidence']) for m in matches]}"
+        )
+
+    def test_whole_query_name_substring_still_0_6(self, test_index):
+        """Regression guard: a whole-query substring of a name keeps 0.6."""
+        from gateway import _lexical_search_fallback
+
+        matches = _lexical_search_fallback(
+            test_index, "read_file", top_k=5, category=None, server=None
+        )
+        read_file = next(
+            (m for m in matches if m["tool"] == "test:read_file"), None
+        )
+        assert read_file is not None
+        assert read_file["confidence"] == 0.6
+
+    def test_escaping_preserved_for_wildcard_tokens(self, test_index):
+        """A token containing a LIKE wildcard must be escaped, not treated as a
+        wildcard (BE-A-007 must survive the per-token rewrite)."""
+        from gateway import _lexical_search_fallback
+
+        # '%' would match everything if unescaped; escaped, it matches only
+        # tools whose name/description literally contain '%' (none here).
+        matches = _lexical_search_fallback(
+            test_index, "%", top_k=5, category=None, server=None
+        )
+        assert matches == [], (
+            f"escaped '%' token must not wildcard-match the catalog, got: "
+            f"{[m['tool'] for m in matches]}"
+        )

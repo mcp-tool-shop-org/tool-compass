@@ -452,7 +452,14 @@ class SimpleBackendConnection:
                     if self._shutting_down:
                         break
                     continue
-                except asyncio.LimitOverrunError as e:
+                except (ValueError, asyncio.LimitOverrunError) as e:
+                    # StreamReader.readline() raises a plain ValueError on
+                    # limit overrun ("Separator is found, but chunk is longer
+                    # than limit") — LimitOverrunError is NOT a subclass of
+                    # ValueError, so catching only the latter left this branch
+                    # dead and let oversize lines fall through to the generic
+                    # handler that kills the reader. Catch both: the
+                    # drain-and-abort recovery is the safe response to either.
                     logger.error(
                         f"Backend {self.name} emitted a line exceeding "
                         f"{STDOUT_LINE_LIMIT} bytes: {e}"
@@ -828,7 +835,12 @@ class SimpleBackendConnection:
             while True:
                 try:
                     line = await stderr.readline()
-                except asyncio.LimitOverrunError:
+                except (ValueError, asyncio.LimitOverrunError):
+                    # StreamReader.readline() raises a plain ValueError on
+                    # limit overrun (LimitOverrunError is NOT a ValueError
+                    # subclass), so catching only the latter left this drain
+                    # branch dead. Catch both: draining and continuing is the
+                    # safe recovery for either.
                     # Drain consumed bytes up to the configured limit and log
                     # the head with a truncation marker.
                     try:
@@ -1419,7 +1431,6 @@ class SimpleBackendManager:
                 asyncio.gather(*tasks, return_exceptions=True),
                 timeout=budget,
             )
-            timed_out = False
         except asyncio.TimeoutError:
             logger.error(
                 f"disconnect_all hit total budget {budget}s — proceeding "
