@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from unittest.mock import Mock, AsyncMock, patch
 
 import pytest
@@ -846,7 +845,6 @@ class TestRunHttpHostEnvVarWarning:
     @pytest.mark.asyncio
     async def test_run_http_warns_when_non_loopback_host(self, caplog):
         """A HOST set to a public IP should log a warning."""
-        import gateway
 
         old_host = os.environ.get("HOST")
         os.environ["HOST"] = "0.0.0.0"
@@ -870,7 +868,6 @@ class TestRunHttpHostEnvVarWarning:
     @pytest.mark.asyncio
     async def test_run_http_no_warning_for_loopback_host(self, caplog):
         """A HOST=127.0.0.1 should NOT warn."""
-        import gateway
 
         old_host = os.environ.get("HOST")
         os.environ["HOST"] = "127.0.0.1"

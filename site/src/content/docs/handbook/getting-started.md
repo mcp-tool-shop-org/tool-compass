@@ -25,12 +25,22 @@ ollama pull nomic-embed-text
 # Install the CLI + gateway
 pip install tool-compass
 
-# Build the search index from your configured backends
+# Scaffold a config + print MCP-client setup (first-run onboarding)
+tool-compass init
+
+# Edit backends in the printed config path, then build the index
 tool-compass sync
 
 # Start the MCP server (or `tool-compass serve`)
 tool-compass
 ```
+
+`tool-compass init` writes a `compass_config.json` to your platform config
+directory (see [Configuration](/tool-compass/handbook/configuration/) for the
+exact path), refuses to clobber an existing one unless you pass `--force`, and
+prints a ready-to-paste Claude Desktop snippet. Jump to
+[Register with your MCP client](#register-with-your-mcp-client) for Cursor and
+Cline recipes too.
 
 `tool-compass` with no arguments starts the MCP server — same as the
 pre-2.2 `python gateway.py` entry point. New subcommands are available:
@@ -85,6 +95,7 @@ docker-compose --profile with-ollama up
 
 | Subcommand | Purpose |
 |------------|---------|
+| `tool-compass init [--force] [--json]` | Scaffold `compass_config.json` + print MCP-client setup |
 | `tool-compass` (no args) | Start the MCP server — same as `serve` |
 | `tool-compass serve [--http]` | Start the MCP server explicitly |
 | `tool-compass search <intent> [--top N] [--json]` | One-shot semantic search |
@@ -100,6 +111,124 @@ The underlying `gateway.py` also accepts admin flags for backward compat:
 | `--test` | Run semantic search tests to verify index quality |
 | `--config` | Display current configuration |
 | `--verbose` / `-v` | Enable DEBUG-level output |
+
+## Register with your MCP client
+
+Tool Compass speaks MCP over stdio, so any MCP-capable client can launch it.
+Each recipe below registers a server named `tool-compass` that runs
+`tool-compass serve`. `tool-compass init` prints the Claude Desktop block for
+you; the Cursor and Cline forms are the same shape.
+
+Two invocation styles work everywhere:
+
+- **npx** (`npx -y @mcptoolshop/tool-compass serve`) — zero-prerequisite, no
+  Python toolchain needed. Binaries are SHA256-verified and cached on first run.
+- **pip / CLI** (`tool-compass serve`) — if you installed via `pip install
+  tool-compass`, the `tool-compass` console script is already on your `PATH`.
+
+Keep secrets out of these blocks — backends and any tokens belong in
+`compass_config.json`, never in your client config.
+
+### Claude Desktop
+
+Edit `claude_desktop_config.json` (macOS:
+`~/Library/Application Support/Claude/claude_desktop_config.json`; Windows:
+`%APPDATA%\Claude\claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "tool-compass": {
+      "command": "npx",
+      "args": ["-y", "@mcptoolshop/tool-compass", "serve"]
+    }
+  }
+}
+```
+
+pip / CLI form (after `pip install tool-compass`):
+
+```json
+{
+  "mcpServers": {
+    "tool-compass": {
+      "command": "tool-compass",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop, then look for the tools icon — `compass` and its
+sibling tools should be listed.
+
+### Cursor
+
+Cursor reads `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project).
+The schema is the same `mcpServers` map:
+
+```json
+{
+  "mcpServers": {
+    "tool-compass": {
+      "command": "npx",
+      "args": ["-y", "@mcptoolshop/tool-compass", "serve"]
+    }
+  }
+}
+```
+
+pip / CLI form:
+
+```json
+{
+  "mcpServers": {
+    "tool-compass": {
+      "command": "tool-compass",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+Open **Cursor Settings → MCP** to confirm the server connected.
+
+### Cline (VS Code)
+
+Cline stores its MCP servers in `cline_mcp_settings.json` (open it via the
+Cline panel → **MCP Servers → Configure**). Same `mcpServers` shape, with
+Cline's optional `disabled` / `autoApprove` fields:
+
+```json
+{
+  "mcpServers": {
+    "tool-compass": {
+      "command": "npx",
+      "args": ["-y", "@mcptoolshop/tool-compass", "serve"],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+pip / CLI form:
+
+```json
+{
+  "mcpServers": {
+    "tool-compass": {
+      "command": "tool-compass",
+      "args": ["serve"],
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
+```
+
+Before connecting from any client, run `tool-compass sync` once so the search
+index exists — otherwise `compass` queries return a "run sync first" hint.
 
 ## HTTP mode
 

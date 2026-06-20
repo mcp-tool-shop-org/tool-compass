@@ -6,7 +6,7 @@
 
 <p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
 
-**Navegador semântico para ferramentas MCP - Encontre a ferramenta certa pela intenção, não pela memória**
+**Navegador semântico para ferramentas MCP – Encontre a ferramenta certa com base na intenção, não na memória.**
 
 <a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
@@ -16,7 +16,7 @@
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
 
 
-*95% menos tokens. Encontre ferramentas descrevendo o que você quer fazer.*
+*95% menos tokens. Encontre ferramentas descrevendo o que você deseja fazer.*
 
 [Instalação](#quick-start) • [Uso](#usage) • [Docker](#option-2-docker) • [Manual](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [Desempenho](#performance) • [Contribuições](#contributing)
 
@@ -39,19 +39,11 @@ Savings: 95%
 
 O Tool Compass usa **busca semântica** para encontrar ferramentas relevantes a partir de uma descrição em linguagem natural. Em vez de carregar todas as ferramentas, o Claude chama `compass()` com uma intenção e recebe apenas as ferramentas relevantes.
 
-<!--
-## Demonstração
-
-<p align="center">
-  <img src="docs/assets/demo.gif" alt="Tool Compass Demo" width="600">
-</p>
--->
-
 ## Início Rápido
 
-📖 **Documentação completa:** Consulte o [Manual do Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) para instalação, configuração e informações detalhadas sobre a arquitetura.
+📖 **Documentação completa:** Consulte o [Manual do Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) para obter informações detalhadas sobre instalação, configuração e arquitetura.
 
-### Opção 1: npm (sem pré-requisitos, sem instalação do Python)
+### Opção 1: npm (sem pré-requisitos, sem necessidade de instalar o Python)
 
 ```bash
 npx @mcptoolshop/tool-compass --help
@@ -60,7 +52,7 @@ npx @mcptoolshop/tool-compass ui        # Gradio UI
 npx @mcptoolshop/tool-compass doctor    # Diagnose setup
 ```
 
-Baixa um binário da plataforma verificado na primeira execução (verificado com o hash SHA256 em relação à versão do GitHub). Armazenado localmente — as execuções subsequentes são instantâneas. Veja o [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) no npm.
+Baixa um binário de plataforma verificado na primeira execução (SHA256 verificado em relação ao lançamento do GitHub). Armazenado localmente – invocações subsequentes são iniciadas instantaneamente. Consulte [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) no npm.
 
 ### Opção 2: PyPI
 
@@ -69,7 +61,7 @@ pip install tool-compass
 tool-compass --help
 ```
 
-### Opção 3: Clonagem local
+### Opção 3: Clone local
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -112,38 +104,38 @@ docker-compose --profile with-ollama up
 # Access the UI at http://localhost:7860
 ```
 
-> A imagem do GHCR (`ghcr.io/mcp-tool-shop-org/tool-compass`) suporta
-> `linux/amd64` e `linux/arm64`, então a mesma tag funciona em servidores x86_64
-> e em estações de trabalho Apple Silicon / ARM.
+> A imagem GHCR (`ghcr.io/mcp-tool-shop-org/tool-compass`) oferece suporte a
+> `linux/amd64` e `linux/arm64`, portanto, a mesma tag funciona em servidores x86_64
+> e estações de trabalho Apple Silicon / ARM.
 
 ## Recursos
 
-- **Busca Semântica** - Encontre ferramentas descrevendo o que você quer fazer
-- **Divulgação Progressiva** - `compass()` → `describe()` → `execute()`
-- **Cache Rápido** - Ferramentas frequentemente usadas são pré-carregadas
-- **Detecção de Cadeia** - Descobre automaticamente fluxos de trabalho comuns de ferramentas
-- **Análise** - Acompanhe padrões de uso e desempenho das ferramentas
-- **Compatível com Diversas Plataformas** - Windows, macOS, Linux
-- **Pronto para Docker** - Implantação com um único comando
+- **Busca Semântica** – Encontre ferramentas descrevendo o que você deseja fazer.
+- **Divulgação Progressiva** – `compass()` → `describe()` → `execute()`
+- **Cache Dinâmico** – Ferramentas frequentemente usadas são pré-carregadas.
+- **Detecção de Cadeia** – Descobre automaticamente fluxos de trabalho comuns de ferramentas.
+- **Análise** – Rastreie padrões de uso e desempenho das ferramentas.
+- **Multiplataforma** – Windows, macOS, Linux
+- **Pronto para Docker** – Implantação com um único comando.
 
 ## Arquitetura
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     TOOL COMPASS                            │
+│                       TOOL COMPASS                          │
 │                                                             │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │   Ollama     │    │   hnswlib    │    │   SQLite     │  │
-│  │   Embedder   │───▶│    HNSW      │◀───│   Metadata   │  │
-│  │  (nomic)     │    │   Index      │    │   Store      │  │
-│  └──────────────┘    └──────────────┘    └──────────────┘  │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
+│  │   Ollama     │    │   hnswlib    │    │   SQLite     │   │
+│  │   Embedder   │───▶│    HNSW      │◀───│   Metadata   │   │
+│  │  (nomic)     │    │   Index      │    │   Store      │   │
+│  └──────────────┘    └──────────────┘    └──────────────┘   │
 │                              │                              │
 │                              ▼                              │
-│                    ┌──────────────────┐                    │
-│                    │  Gateway (9 tools)│                   │
-│                    │  compass, describe│                   │
-│                    │  execute, etc.    │                   │
-│                    └──────────────────┘                    │
+│                    ┌───────────────────┐                    │
+│                    │ Gateway (9 tools)  │                   │
+│                    │ compass, describe  │                   │
+│                    │ execute, etc.      │                   │
+│                    └───────────────────┘                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -181,14 +173,14 @@ Retorna:
 
 | Ferramenta | Descrição |
 |------|-------------|
-| `compass(intent)` | Busca semântica para ferramentas |
-| `describe(tool_name)` | Obtém o esquema completo de uma ferramenta |
-| `execute(tool_name, args)` | Executa uma ferramenta em seu backend |
-| `compass_categories()` | Lista categorias e servidores |
-| `compass_status()` | Estado e configuração do sistema |
+| `compass(intent)` | Busca semântica de ferramentas |
+| `describe(tool_name)` | Obtenha o esquema completo de uma ferramenta |
+| `execute(tool_name, args)` | Execute uma ferramenta em seu backend |
+| `compass_categories()` | Liste categorias e servidores |
+| `compass_status()` | Saúde do sistema e configuração |
 | `compass_analytics(timeframe)` | Estatísticas de uso |
-| `compass_chains(action)` | Gerencia fluxos de trabalho de ferramentas |
-| `compass_sync(force)` | Reconstrói o índice a partir dos backends |
+| `compass_chains(action)` | Gerencie fluxos de trabalho de ferramentas |
+| `compass_sync(force)` | Reconstrua o índice a partir dos backends |
 | `compass_audit()` | Relatório completo do sistema |
 
 ### Padrão de Divulgação Progressiva
@@ -204,7 +196,7 @@ O Tool Compass usa um padrão de divulgação progressiva em três etapas para m
 **Por que isso é importante:**
 - Carregar 77 ferramentas inicialmente = ~38.500 tokens
 - Divulgação progressiva = ~600 tokens por ferramenta usada
-- Economia: **95%+ para fluxos de trabalho típicos**
+- Economia: **95% ou mais para fluxos de trabalho típicos**
 
 **Exemplo de fluxo de trabalho:**
 
@@ -221,14 +213,14 @@ describe("comfy:comfy_generate")
 execute("comfy:comfy_generate", {"prompt": "a sunset over mountains"})
 ```
 
-O campo `hint` nos resultados do `compass` guia esse fluxo, sugerindo quando usar `describe()`.
+O campo `hint` nos resultados do compass guia esse fluxo, sugerindo quando usar `describe()`.
 
 ## Configuração
 
 | Variável | Descrição | Padrão |
 |----------|-------------|---------|
 | `TOOL_COMPASS_BASE_PATH` | Diretório do projeto | Detectado automaticamente |
-| `TOOL_COMPASS_PYTHON` | Executável do Python | Detectado automaticamente |
+| `TOOL_COMPASS_PYTHON` | Executável Python | Detectado automaticamente |
 | `TOOL_COMPASS_CONFIG` | Caminho do arquivo de configuração | `~/.config/tool-compass/compass_config.json` |
 | `TOOL_COMPASS_DATA_DIR` | Diretório de dados | Específico da plataforma (veja abaixo) |
 | `OLLAMA_URL` | URL do servidor Ollama | `http://localhost:11434` |
@@ -240,15 +232,15 @@ O campo `hint` nos resultados do `compass` guia esse fluxo, sugerindo quando usa
 - **macOS:** `~/Library/Application Support/tool-compass/`
 - **Linux:** `~/.config/tool-compass/` (ou `$XDG_CONFIG_HOME/tool-compass/`)
 
-Consulte o arquivo [`.env.example`](.env.example) para todas as opções.
+Consulte [`.env.example`](.env.example) para todas as opções.
 
 ## Desempenho
 
 | Métrica | Valor |
 |--------|-------|
-| Tempo de construção do índice | ~5s para 44 ferramentas |
-| Latência da consulta | ~15ms (incluindo incorporação) |
-| Economia de tokens | ~95% (38K → 2K) |
+| Tempo de construção do índice | ~5 segundos para 44 ferramentas |
+| Latência da consulta | ~15 ms (incluindo a incorporação) |
+| Economia de tokens | ~95% (38 mil → 2 mil) |
 | Precisão@3 | ~95% (ferramenta correta no top 3) |
 
 ## Testes
@@ -275,13 +267,13 @@ Unexpected token 'S', "Starting T"... is not valid JSON
 
 **Causa:** As instruções `print()` corrompem o protocolo JSON-RPC.
 
-**Solução:** Use logging ou `file=sys.stderr`:
+**Correção:** Use registro ou `file=sys.stderr`:
 ```python
 import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Conexão Ollama falhou
+### Falha na conexão com o Ollama
 
 ```bash
 # Check Ollama is running
@@ -294,47 +286,44 @@ ollama pull nomic-embed-text
 ### Índice não encontrado
 
 ```bash
-python gateway.py --sync
+tool-compass sync
 ```
 
 ## Projetos relacionados
 
-Parte da **Suite Compass** para desenvolvimento com inteligência artificial:
+Faz parte do **Pacote Compass** para desenvolvimento baseado em IA:
 
-- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Busca semântica de arquivos
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Componentes Gradio com incorporação vetorial
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de LLM sem servidor
-- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sem a complexidade
+- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) – Busca semântica de arquivos
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) – Componentes Gradio incorporados em vetores
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) – Ajuste fino de LLM sem interface gráfica
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) – ComfyUI sem a complexidade
 
 ## Contribuições
 
-Aceitamos contribuições! Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para obter as diretrizes.
+Agradecemos as contribuições! Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para obter diretrizes.
 
 ## Segurança e Escopo de Dados
 
-Tool Compass é uma ferramenta de desenvolvimento **local-first**. Consulte [SECURITY.md](SECURITY.md) para obter a política completa.
+O Tool Compass é uma ferramenta de desenvolvimento **local-first**. Consulte [SECURITY.md](SECURITY.md) para obter a política completa.
 
-- **Dados acessados:** Descrições de ferramentas indexadas em um banco de dados vetorial HNSW local, consultas de pesquisa registradas em um arquivo SQLite local (`compass_analytics.db`), incorporações geradas via Ollama local.
-- **Dados NÃO acessados:** nenhum código do usuário, nenhum conteúdo de arquivo, nenhuma credencial. Os argumentos de chamada da ferramenta são armazenados em hash, não em texto simples.
-- **Rede:** Conecta-se ao Ollama local para incorporações. A interface do usuário Gradio opcional é vinculada ao localhost. Sem telemetria externa.
-- **Sem telemetria:** Não coleta nada externamente. A análise é apenas local.
+- **Dados acessados:** descrições de ferramentas indexadas no banco de dados vetorial HNSW local, consultas de pesquisa registradas no SQLite local (`compass_analytics.db`), incorporações geradas por meio do Ollama local.
+- **Dados NÃO acessados:** nenhum código de usuário, nenhum conteúdo de arquivo, nenhuma credencial. Os argumentos das chamadas de ferramentas são criptografados, não armazenados em texto simples.
+- **Rede:** conecta-se ao Ollama local para gerar incorporações. Interface Gradio opcional vinculada ao localhost. Sem telemetria externa.
+- **Sem telemetria:** não coleta nada externamente. A análise é apenas local.
 
-## Scorecard
+## Tabela de avaliação
 
-As pontuações por categoria são regeneradas após a análise via
-`bash scripts/regenerate-scorecard.sh` (que envolve `npx
-@mcptoolshop/shipcheck audit`). Consulte [SCORECARD.md](SCORECARD.md) para obter a
-análise detalhada atual — a tabela abaixo a replica e não é escrita manualmente. As seções cuidadosamente selecionadas (Lacunas Conhecidas,
-Histórico de Correção) estão localizadas fora dos marcadores `<!-- SHIPCHECK-AUTO-START/END -->` em SCORECARD.md e sobrevivem às regenerações.
+As pontuações por categoria são regeneradas após a execução em lote por meio do comando:
+`bash scripts/regenerate-scorecard.sh` (que envolve `npx @mcptoolshop/shipcheck audit`). Consulte [SCORECARD.md](SCORECARD.md) para obter a análise detalhada mais recente — a tabela abaixo é um espelho e não foi criada manualmente. As seções selecionadas manualmente (Lacunas Conhecidas, Histórico de Correção) estão fora das tags `<!-- SHIPCHECK-AUTO-START/END -->` no arquivo SCORECARD.md e permanecem após as regenerações.
 
 | Categoria | Pontuação | Observações |
 |----------|-------|-------|
-| A. Segurança | A ser definido | Ações com hash fixo; imagem base com hash fixo; rastreabilidade SLSA + SBOM no PyPI + GHCR; verificação de segredos no pre-commit |
-| B. Tratamento de Erros | A ser definido | Resultados estruturados, degradação graciosa, códigos de saída |
-| C. Documentação para Operadores | A ser definido | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
-| D. Higiene de Distribuição | A ser definido | CI consolidado; tempo limite em minutos + retenção em dias para cada tarefa; configuração pytest em pyproject.toml |
-| E. Identidade (suave) | A ser definido | Logo, página inicial, metadados do GitHub; mantenedores explícitos em pyproject.toml |
-| **Total** | **TBD** | Regenerar via `make scorecard` |
+| A. Segurança | A definir | Ações com hash SHA; imagem base com hash de digestão; rastreabilidade SLSA + SBOM no PyPI + GHCR; verificação de segredos pré-commit |
+| B. Tratamento de erros | A definir | Resultados estruturados, degradação gradual, códigos de saída |
+| C. Documentação para operadores | A definir | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Boas práticas de distribuição | A definir | CI consolidado; tempo limite em minutos + dias de retenção em cada tarefa; configuração pytest em pyproject.toml |
+| E. Identidade (suave) | A definir | Logotipo, página inicial, metadados do GitHub; mantenedores explícitos em pyproject.toml |
+| **Total** | **TBD** | Regenerar com `make scorecard` |
 
 ## Licença
 

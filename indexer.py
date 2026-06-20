@@ -109,14 +109,26 @@ class CompassIndex:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _compute_text_hash(self, text: str) -> str:
-        """Compute stable cache key from (text, provider, model).
+        """Compute stable cache key from (text, provider, base_url, model).
 
-        Combining text+provider+model avoids cross-model contamination when
-        the embedding backend swaps (e.g., nomic-embed-text → different dim).
+        BE-FT-PE-001: with a pluggable embedding backend the same text+model
+        can produce DIFFERENT vectors across providers (e.g. ollama
+        nomic-embed-text vs an OpenAI-compatible server), and even across
+        endpoints of the same provider. Folding the provider NAME and the
+        base_url into the key — in addition to the model — guarantees a cache
+        entry written by one provider can never be served to another, so
+        switching ``embedding_provider`` / ``embedding_base_url`` can't return
+        a stale cross-provider vector. The dim self-heal in ``_cache_get`` is
+        unaffected (it keys on EMBEDDING_DIM + BLOB byte length, not this hash).
+
+        ``provider_name`` is read defensively: test mocks and any embedder
+        predating the seam expose only ``base_url`` / ``model``, so a missing
+        attribute degrades to "unknown" rather than raising.
         """
-        provider = getattr(self.embedder, "base_url", "unknown")
+        provider_name = getattr(self.embedder, "provider_name", "unknown")
+        base_url = getattr(self.embedder, "base_url", "unknown")
         model = getattr(self.embedder, "model", "unknown")
-        payload = f"{text}||{provider}||{model}".encode("utf-8")
+        payload = f"{text}||{provider_name}||{base_url}||{model}".encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
     def _cache_get(self, text_hash: str) -> Optional[np.ndarray]:
@@ -146,7 +158,24 @@ class CompassIndex:
                 )
                 self.db.commit()
             return None
-        vector = np.frombuffer(row["vector"], dtype=np.float32).reshape(dim)
+        # SC-002: the column-dim check above is NOT sufficient. A row whose
+        # dim==EMBEDDING_DIM but whose BLOB byte length is inconsistent
+        # (truncated / corrupt write) makes reshape(dim) raise ValueError.
+        # Because _cache_get runs inside build_index's BEGIN IMMEDIATE txn,
+        # an uncaught ValueError there rolls back and re-raises EVERY rebuild
+        # forever, defeating the documented self-heal. Validate the actual
+        # byte length (float32 == 4 bytes/element) before reshape; on
+        # mismatch, treat as a miss and delete the bad row (mirroring the
+        # column-dim-mismatch branch above) so the next pass re-populates it.
+        blob = row["vector"]
+        if blob is None or len(blob) != dim * 4:
+            with self._db_write_lock:
+                self.db.execute(
+                    "DELETE FROM embedding_cache WHERE text_hash = ?", (text_hash,)
+                )
+                self.db.commit()
+            return None
+        vector = np.frombuffer(blob, dtype=np.float32).reshape(dim)
         # frombuffer returns a read-only view; copy so hnswlib can use it.
         return vector.copy()
 
@@ -586,13 +615,28 @@ class CompassIndex:
         if row is None:
             return None
 
+        # GW-A-002 sibling: guard json.loads on possibly-corrupt tools-table
+        # rows. _get_tool_by_id runs per-result inside search(); without this a
+        # single malformed row raised JSONDecodeError and poisoned the ENTIRE
+        # result set (everything degraded to lexical) instead of dropping the
+        # one bad field. Fall back to empty defaults for the corrupt column.
+        try:
+            parameters = json.loads(row["parameters"]) if row["parameters"] else {}
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("tool %r: malformed parameters JSON; using {}", row["name"])
+            parameters = {}
+        try:
+            examples = json.loads(row["examples"]) if row["examples"] else []
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("tool %r: malformed examples JSON; using []", row["name"])
+            examples = []
         return ToolDefinition(
             name=row["name"],
             description=row["description"],
             category=row["category"],
             server=row["server"],
-            parameters=json.loads(row["parameters"]) if row["parameters"] else {},
-            examples=json.loads(row["examples"]) if row["examples"] else [],
+            parameters=parameters,
+            examples=examples,
             is_core=bool(row["is_core"]),
         )
 

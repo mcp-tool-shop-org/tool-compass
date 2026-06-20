@@ -4,6 +4,7 @@ Tests for Tool Compass configuration module.
 Tests cross-platform path handling and environment variable support.
 """
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -19,6 +20,9 @@ from config import (
     get_config_path,
     get_default_config,
     load_config,
+    doctor,
+    _redact_config,
+    apply_env_overrides,
 )
 
 
@@ -242,3 +246,565 @@ class TestLoadConfig:
             config = load_config()
             assert config.embedding_model == "custom-model"
             assert config.auto_sync is False
+
+
+class TestRedactConfig:
+    """CFG-A-001: structural redaction of resolved secrets in doctor() dumps.
+
+    Name-based redaction only catches keys that *look* secret
+    (_token/_key/_secret/_password). But the ${VAR} substitution feature
+    resolves env secrets INTO backend headers/env/args, where the KEY names
+    (e.g. 'Authorization', 'GITHUB_TOKEN') don't all match those hints —
+    so resolved secret VALUES used to leak verbatim from doctor()'s dump.
+    Redact STRUCTURALLY: for every backend's 'env'/'headers' (dicts) redact
+    all VALUES, and for 'args' (list) redact all entries, while KEEPING THE
+    KEYS visible so the dump stays diagnosable.
+    """
+
+    SECRET_HEADER = "Bearer SEKRET_HEADER_TOKEN_abc123"
+    SECRET_ENV = "ghp_SEKRET_ENV_TOKEN_xyz789"
+    SECRET_ARG = "--password=SEKRET_ARG_VALUE_qwe456"
+
+    def _secret_values(self):
+        return [self.SECRET_HEADER, self.SECRET_ENV, self.SECRET_ARG]
+
+    def _build_config(self):
+        return CompassConfig(
+            backends={
+                "remote": HttpBackend(
+                    url="http://localhost:9000/mcp",
+                    headers={"Authorization": self.SECRET_HEADER},
+                ),
+                "local": StdioBackend(
+                    command="python",
+                    args=["-m", "server", self.SECRET_ARG],
+                    env={"GITHUB_TOKEN": self.SECRET_ENV},
+                ),
+            }
+        )
+
+    def test_redact_config_hides_resolved_secret_values(self):
+        """Resolved secret VALUES must not appear; KEYS must remain visible."""
+        cfg = self._build_config()
+        redacted = _redact_config(cfg.to_dict())
+
+        blob = json.dumps(redacted)
+        for secret in self._secret_values():
+            assert secret not in blob, (
+                f"secret value leaked into redacted dump: {secret!r}"
+            )
+
+        backends = redacted["backends"]
+        # Header value redacted, but the 'Authorization' key still visible.
+        assert "Authorization" in backends["remote"]["headers"]
+        assert backends["remote"]["headers"]["Authorization"] == "[REDACTED]"
+        # Env value redacted, key 'GITHUB_TOKEN' still visible.
+        assert "GITHUB_TOKEN" in backends["local"]["env"]
+        assert backends["local"]["env"]["GITHUB_TOKEN"] == "[REDACTED]"
+        # Args entries redacted (the secret-bearing entry at minimum).
+        assert self.SECRET_ARG not in backends["local"]["args"]
+        assert all(a == "[REDACTED]" for a in backends["local"]["args"])
+        # Non-secret structural fields stay intact for diagnosability.
+        assert backends["remote"]["url"] == "http://localhost:9000/mcp"
+        assert backends["remote"]["type"] == "http"
+        assert backends["local"]["command"] == "python"
+
+    def test_doctor_does_not_leak_resolved_secrets(self, tmp_path):
+        """End-to-end: a config file with resolved ${VAR} secrets in a
+        header + env must not surface those secret values from doctor()."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {
+                "remote": {
+                    "type": "http",
+                    "url": "http://localhost:9000/mcp",
+                    "headers": {"Authorization": "Bearer ${MY_API_TOKEN}"},
+                },
+                "local": {
+                    "type": "stdio",
+                    "command": "python",
+                    "args": ["-m", "server", "${MY_CLI_ARG}"],
+                    "env": {"GITHUB_TOKEN": "${MY_GH_TOKEN}"},
+                },
+            }
+        }))
+
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "MY_API_TOKEN": "live_header_secret_111",
+            "MY_GH_TOKEN": "ghp_live_env_secret_222",
+            "MY_CLI_ARG": "--password=live_arg_secret_333",
+        }
+        with patch.dict(os.environ, env):
+            report = doctor()
+
+        blob = json.dumps(report, default=str)
+        for secret in (
+            "live_header_secret_111",
+            "ghp_live_env_secret_222",
+            "live_arg_secret_333",
+        ):
+            assert secret not in blob, f"doctor() leaked secret {secret!r}"
+
+        # Keys remain visible in the redacted config so the dump is usable.
+        backends = report["config"]["backends"]
+        assert "Authorization" in backends["remote"]["headers"]
+        assert backends["remote"]["headers"]["Authorization"] == "[REDACTED]"
+        assert "GITHUB_TOKEN" in backends["local"]["env"]
+        assert backends["local"]["env"]["GITHUB_TOKEN"] == "[REDACTED]"
+
+
+class TestRedactUrlCredentials:
+    """CFG-A-001 (sibling): a credentialed ollama_url like
+    ``http://user:${TOKEN}@host:11434`` must have its userinfo stripped to
+    ``http://[REDACTED]@host:11434`` in doctor() output and in _redact_config,
+    while host:port stays visible for diagnosability.
+
+    The ${VAR} substitution feature resolves env secrets INTO ollama_url
+    userinfo at load time; without this the raw user:secret@ landed verbatim
+    in a pasteable bug-report dump.
+    """
+
+    def test_redact_url_credentials_strips_userinfo(self):
+        from config import redact_url_credentials
+
+        out = redact_url_credentials("http://u:livesecret@h:11434")
+        assert "livesecret" not in out
+        assert out == "http://[REDACTED]@h:11434"
+
+    def test_redact_url_credentials_passthrough_when_no_userinfo(self):
+        from config import redact_url_credentials
+
+        # No credentials -> unchanged, host:port intact.
+        assert (
+            redact_url_credentials("http://localhost:11434")
+            == "http://localhost:11434"
+        )
+
+    def test_redact_config_scrubs_ollama_url_userinfo(self):
+        """_redact_config must scrub embedded userinfo from ollama_url (a leaf
+        scalar) while keeping the host visible."""
+        cfg = CompassConfig(ollama_url="http://u:livesecret@h:11434")
+        redacted = _redact_config(cfg.to_dict())
+        blob = json.dumps(redacted)
+        assert "livesecret" not in blob, "ollama_url secret leaked"
+        assert redacted["ollama_url"] == "http://[REDACTED]@h:11434"
+        assert "h:11434" in redacted["ollama_url"]
+
+    def test_doctor_redacts_ollama_url_credentials(self, tmp_path):
+        """End-to-end: doctor() must not surface the ollama_url userinfo secret
+        but must keep host:port for diagnosability."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "ollama_url": "http://u:${OLLAMA_PW}@h:11434",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "OLLAMA_PW": "livesecret",
+        }
+        with patch.dict(os.environ, env):
+            report = doctor()
+
+        blob = json.dumps(report, default=str)
+        assert "livesecret" not in blob, "doctor() leaked ollama_url secret"
+        # Host:port survives in both the top-level field and the config dump.
+        assert "h:11434" in report["ollama_url"]
+        assert report["ollama_url"] == "http://[REDACTED]@h:11434"
+        assert "h:11434" in report["config"]["ollama_url"]
+        assert "livesecret" not in report["config"]["ollama_url"]
+
+
+class TestValidateAndClampCoercion:
+    """CFG-A-002: validate_and_clamp must survive non-numeric hand-edited
+    values. The compare-before-coerce ordering raised TypeError on a string
+    or null numeric BEFORE the int()/float() cast, and from_file's recovery
+    except only catches (json.JSONDecodeError, OSError) — so a hand-edited
+    config crashed startup with a raw traceback, contradicting the docstring's
+    'safe even with a hand-edited config file.'"""
+
+    def test_from_dict_bad_numeric_types_do_not_crash(self):
+        """A config dict with string/null numeric fields must coerce-or-reset
+        to defaults instead of raising TypeError."""
+        defaults = CompassConfig()
+        data = {
+            "backends": {},
+            "min_confidence": "high",          # non-numeric string
+            "default_top_k": None,             # null
+            "sync_polling_interval": "soon",   # non-numeric string
+            "hot_cache_size": None,            # null
+            "chain_detection_min_occurrences": "lots",
+            "ollama_breaker_failure_threshold": None,
+            "ollama_breaker_open_seconds": "forever",
+            "ollama_retry_attempts": None,
+            "hnsw_m": "big",
+            "hnsw_ef_construction": None,
+            "hnsw_ef_search": "fast",
+        }
+        # Must NOT raise.
+        config = CompassConfig.from_dict(data)
+
+        # Each bad field reset to its in-range default (or a clamped default).
+        assert config.min_confidence == defaults.min_confidence
+        assert config.default_top_k == defaults.default_top_k
+        assert config.sync_polling_interval == defaults.sync_polling_interval
+        assert config.hot_cache_size == defaults.hot_cache_size
+        assert (
+            config.chain_detection_min_occurrences
+            == defaults.chain_detection_min_occurrences
+        )
+        assert (
+            config.ollama_breaker_failure_threshold
+            == defaults.ollama_breaker_failure_threshold
+        )
+        assert (
+            config.ollama_breaker_open_seconds
+            == defaults.ollama_breaker_open_seconds
+        )
+        assert config.ollama_retry_attempts == defaults.ollama_retry_attempts
+        assert config.hnsw_m == defaults.hnsw_m
+        assert config.hnsw_ef_construction == defaults.hnsw_ef_construction
+        assert config.hnsw_ef_search == defaults.hnsw_ef_search
+
+    def test_from_file_with_hand_edited_bad_values_recovers(self, tmp_path):
+        """from_file on a syntactically-valid JSON with bad numeric types
+        must load without crashing (the docstring's stated guarantee)."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "min_confidence": "high",
+            "default_top_k": None,
+            "embedding_model": "custom-model",
+        }))
+        with patch.dict(os.environ, {"TOOL_COMPASS_CONFIG": str(config_file)}):
+            config = load_config()  # must not raise
+        # Non-numeric fields untouched, numeric fields reset to defaults.
+        assert config.embedding_model == "custom-model"
+        assert config.min_confidence == CompassConfig().min_confidence
+        assert config.default_top_k == CompassConfig().default_top_k
+
+
+class TestEnvOverrides:
+    """CFGDOC-01: TOOL_COMPASS_ANALYTICS_DISABLED and TOOL_COMPASS_HOT_CACHE_SIZE
+    are advertised in .env.example but were never read — the app only honored
+    the analytics_enabled / hot_cache_size config-JSON keys, so a user who set
+    the documented env var saw no effect. These tests prove the env vars now
+    take effect (and would fail on the old, ignore-everything behavior)."""
+
+    def test_analytics_disabled_env_turns_off_analytics(self, tmp_path):
+        """Truthy TOOL_COMPASS_ANALYTICS_DISABLED -> analytics_enabled False.
+
+        Old behavior: get_default_config ignored the env var, so
+        analytics_enabled stayed True. This asserts False, so it fails pre-fix.
+        """
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_ANALYTICS_DISABLED": "true",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.analytics_enabled is False
+
+    def test_analytics_disabled_env_falsey_leaves_analytics_on(self, tmp_path):
+        """A non-truthy value (e.g. 'false'/'0'/'') must NOT disable analytics."""
+        for raw in ("false", "0", "no", ""):
+            env = {
+                "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+                "TOOL_COMPASS_ANALYTICS_DISABLED": raw,
+            }
+            with patch.dict(os.environ, env):
+                config = load_config()
+            assert config.analytics_enabled is True, f"raw={raw!r} disabled analytics"
+
+    def test_hot_cache_size_env_overrides_default(self, tmp_path):
+        """TOOL_COMPASS_HOT_CACHE_SIZE sets hot_cache_size.
+
+        Old behavior: env var ignored, hot_cache_size stayed at default 10.
+        This sets 25 and asserts 25, so it fails pre-fix.
+        """
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "25",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.hot_cache_size == 25
+
+    def test_hot_cache_size_env_overrides_file_value(self, tmp_path):
+        """The env var wins over a value set in the config file (more specific
+        operator signal)."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({"backends": {}, "hot_cache_size": 7}))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "42",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.hot_cache_size == 42
+
+    def test_hot_cache_size_env_is_clamped(self, tmp_path):
+        """An out-of-range env value flows through validate_and_clamp (0 -> 1)
+        rather than silently disabling the cache."""
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "0",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.hot_cache_size == 1  # clamped from 0
+
+    def test_hot_cache_size_env_non_numeric_is_ignored(self, tmp_path):
+        """A non-integer env value is ignored (default kept), not a crash."""
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "lots",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()  # must not raise
+        assert config.hot_cache_size == CompassConfig().hot_cache_size
+
+    def test_apply_env_overrides_no_vars_is_noop(self):
+        """With neither env var set, the config is unchanged."""
+        cfg = CompassConfig()
+        with patch.dict(os.environ, {}, clear=True):
+            out = apply_env_overrides(cfg)
+        assert out.analytics_enabled is True
+        assert out.hot_cache_size == CompassConfig().hot_cache_size
+
+
+class TestTopChainsCacheSizeClamp:
+    """CFGDOC-03: top_chains_cache_size feeds a slice bound
+    (chain_indexer.py: chains[:n]). It escaped validate_and_clamp's
+    coerce/clamp loop, so a hand-edited 0/negative silently emptied or
+    truncated the chain cache with no warning."""
+
+    def test_negative_top_chains_cache_size_clamped_to_zero(self):
+        """A negative value is clamped to 0 (with a warning).
+
+        Old behavior: -3 passed straight through to chains[:-3], silently
+        dropping the last three chains. This asserts the clamp, failing pre-fix.
+        """
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": -3}
+        )
+        assert config.top_chains_cache_size == 0
+
+    def test_zero_top_chains_cache_size_preserved(self):
+        """0 is allowed (disables the cache) and not bumped up."""
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": 0}
+        )
+        assert config.top_chains_cache_size == 0
+
+    def test_string_top_chains_cache_size_coerced(self):
+        """A numeric string is coerced through the coerce loop."""
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": "8"}
+        )
+        assert config.top_chains_cache_size == 8
+
+    def test_non_numeric_top_chains_cache_size_resets_to_default(self):
+        """A non-numeric value resets to the class default instead of crashing.
+
+        Old behavior: top_chains_cache_size was absent from the coerce tuple,
+        so a string like 'many' survived into chains[:'many'] and raised
+        TypeError at slice time. This asserts the reset, failing pre-fix.
+        """
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": "many"}
+        )
+        assert config.top_chains_cache_size == CompassConfig().top_chains_cache_size
+
+
+class TestEmbeddingProviderConfig:
+    """BE-FT-PE-001: the pluggable-embedding config fields round-trip through
+    to_dict/from_dict, validate against the known providers (unknown -> warn +
+    fall back to ollama), redact the api_key in doctor() dumps, and honor the
+    TOOL_COMPASS_EMBEDDING_API_KEY env override."""
+
+    def test_defaults_preserve_ollama_behavior(self):
+        config = CompassConfig()
+        assert config.embedding_provider == "ollama"
+        assert config.embedding_base_url is None
+        assert config.embedding_api_key is None
+        assert config.embedding_query_prefix is None
+        assert config.embedding_document_prefix is None
+
+    def test_new_fields_roundtrip(self):
+        original = CompassConfig(
+            embedding_provider="openai",
+            embedding_base_url="http://lmstudio:1234",
+            embedding_api_key="sk-secret-abc",
+            embedding_query_prefix="",
+            embedding_document_prefix="passage: ",
+        )
+        data = original.to_dict()
+        # All new fields are serialized.
+        assert data["embedding_provider"] == "openai"
+        assert data["embedding_base_url"] == "http://lmstudio:1234"
+        assert data["embedding_api_key"] == "sk-secret-abc"
+        assert data["embedding_query_prefix"] == ""
+        assert data["embedding_document_prefix"] == "passage: "
+
+        restored = CompassConfig.from_dict(data)
+        assert restored.embedding_provider == "openai"
+        assert restored.embedding_base_url == "http://lmstudio:1234"
+        assert restored.embedding_api_key == "sk-secret-abc"
+        assert restored.embedding_query_prefix == ""
+        assert restored.embedding_document_prefix == "passage: "
+
+    def test_openai_compatible_alias_normalizes(self):
+        config = CompassConfig.from_dict(
+            {"backends": {}, "embedding_provider": "openai-compatible"}
+        )
+        # 'openai-compatible' is a known provider (registry alias) and is
+        # stored normalized (lower-cased, stripped) but NOT rewritten.
+        assert config.embedding_provider == "openai-compatible"
+
+    def test_unknown_provider_falls_back_to_ollama(self):
+        config = CompassConfig.from_dict(
+            {"backends": {}, "embedding_provider": "made-up-backend"}
+        )
+        assert config.embedding_provider == "ollama"
+
+    def test_provider_case_insensitive(self):
+        config = CompassConfig.from_dict(
+            {"backends": {}, "embedding_provider": "OpenAI"}
+        )
+        assert config.embedding_provider == "openai"
+
+    def test_api_key_is_redacted_in_redact_config(self):
+        cfg = CompassConfig(
+            embedding_provider="openai",
+            embedding_base_url="http://x:1",
+            embedding_api_key="sk-super-secret-999",
+        )
+        redacted = _redact_config(cfg.to_dict())
+        blob = json.dumps(redacted)
+        assert "sk-super-secret-999" not in blob
+        # Field name (containing _key) triggers name-based redaction.
+        assert redacted["embedding_api_key"] == "[REDACTED]"
+        # Non-secret sibling fields stay visible for diagnosability.
+        assert redacted["embedding_provider"] == "openai"
+        assert redacted["embedding_base_url"] == "http://x:1"
+
+    def test_doctor_does_not_leak_embedding_api_key(self, tmp_path):
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "embedding_provider": "openai",
+            "embedding_base_url": "http://x:1",
+            "embedding_api_key": "${MY_EMBED_KEY}",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "MY_EMBED_KEY": "live_embed_secret_777",
+        }
+        with patch.dict(os.environ, env):
+            report = doctor()
+        blob = json.dumps(report, default=str)
+        assert "live_embed_secret_777" not in blob
+        assert report["config"]["embedding_api_key"] == "[REDACTED]"
+
+    def test_env_var_overrides_api_key(self, tmp_path):
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "embedding_provider": "openai",
+            "embedding_base_url": "http://x:1",
+            "embedding_api_key": "file-key",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "TOOL_COMPASS_EMBEDDING_API_KEY": "env-wins-key",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        # Env override wins over the file value (operator-intent signal).
+        assert config.embedding_api_key == "env-wins-key"
+
+    def test_empty_env_api_key_does_not_blank_file_value(self, tmp_path):
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "embedding_api_key": "file-key",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "TOOL_COMPASS_EMBEDDING_API_KEY": "",  # exported but empty
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.embedding_api_key == "file-key"
+
+    def test_resolved_base_url_ollama_uses_ollama_url(self):
+        cfg = CompassConfig(ollama_url="http://oll:11434")
+        assert cfg.resolved_embedding_base_url() == "http://oll:11434"
+
+    def test_resolved_base_url_prefers_override(self):
+        cfg = CompassConfig(
+            embedding_provider="openai",
+            ollama_url="http://oll:11434",
+            embedding_base_url="http://lmstudio:1234",
+        )
+        assert cfg.resolved_embedding_base_url() == "http://lmstudio:1234"
+
+    def test_example_config_file_roundtrips(self):
+        """compass_config.example.json must parse and round-trip cleanly
+        (including the new embedding_* fields)."""
+        example_path = (
+            Path(__file__).resolve().parent.parent / "compass_config.example.json"
+        )
+        data = json.loads(example_path.read_text())
+        config = CompassConfig.from_dict(data)
+        assert config.embedding_provider == "ollama"
+        # Round-trips back out.
+        restored = CompassConfig.from_dict(config.to_dict())
+        assert restored.embedding_provider == "ollama"
+
+
+class TestDoctorAnalyticsHealth:
+    """CFGDOC-04: doctor() now reports the analytics degraded state via
+    analytics.get_health() — but only if a live singleton already exists, and
+    it must never force-create one (which would open + initialize the DB as a
+    side effect of running diagnostics)."""
+
+    def test_doctor_analytics_health_none_when_no_singleton(self, tmp_path):
+        """No live analytics singleton -> analytics_health is None, and doctor()
+        does NOT create one."""
+        import analytics as analytics_mod
+
+        # Ensure no singleton exists.
+        original = analytics_mod._analytics_instance
+        analytics_mod._analytics_instance = None
+        try:
+            env = {"TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json")}
+            with patch.dict(os.environ, env):
+                report = doctor()
+            assert report["analytics_health"] is None
+            # doctor() must not have constructed a singleton.
+            assert analytics_mod._analytics_instance is None
+        finally:
+            analytics_mod._analytics_instance = original
+
+    def test_doctor_includes_health_when_singleton_exists(self, tmp_path):
+        """A live singleton's degraded state is surfaced under analytics_health."""
+        import analytics as analytics_mod
+
+        original = analytics_mod._analytics_instance
+        inst = analytics_mod.CompassAnalytics(
+            db_path=tmp_path / "db" / "compass_analytics.db"
+        )
+        # Simulate the 'sqlite broke' degraded mode without touching the DB.
+        inst._degraded = True
+        analytics_mod._analytics_instance = inst
+        try:
+            env = {"TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json")}
+            with patch.dict(os.environ, env):
+                report = doctor()
+            assert report["analytics_health"] is not None
+            assert report["analytics_health"]["degraded"] is True
+            assert report["analytics_health"]["reason"] is not None
+        finally:
+            analytics_mod._analytics_instance = original

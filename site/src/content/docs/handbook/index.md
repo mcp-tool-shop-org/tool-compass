@@ -14,6 +14,7 @@ The handbook is organized by what you need to do, following the [Diátaxis](http
 ### Tutorials — learn by doing
 - **[Beginners](/tool-compass/handbook/beginners/)** — First-time setup walkthrough and core concepts
 - **[Getting Started](/tool-compass/handbook/getting-started/)** — Install, build the index, run the gateway (plus the new `tool-compass` CLI subcommands)
+  - **[Register with your MCP client](/tool-compass/handbook/getting-started/#register-with-your-mcp-client)** — copy-paste config recipes for Claude Desktop, Cursor, and Cline
 
 ### How-To Guides — accomplish a specific task
 - **[Operations](/tool-compass/handbook/operations/)** — `/ready`, `/metrics`, trace IDs, graceful Ollama-offline behavior in production
@@ -27,6 +28,7 @@ The handbook is organized by what you need to do, following the [Diátaxis](http
 
 ## What's new in v2.3
 
+- **`tool-compass init`** — first-run onboarding. Scaffolds a `compass_config.json` at your platform config path (refuses to clobber without `--force`), then prints next steps and a ready-to-paste Claude Desktop MCP snippet. See [Register with your MCP client](/tool-compass/handbook/getting-started/#register-with-your-mcp-client) for Cursor + Cline recipes.
 - **`npx @mcptoolshop/tool-compass`** — zero-prerequisite install. SHA256-verified binaries downloaded on first run, cached locally. No Python toolchain required.
 - **6 new CLI subcommands** — `tool-compass ui`, `status`, `categories`, `audit`, `analytics`, `chains` mirror the MCP surface for terminal users. All support `--json`.
 - **RFC 9457 error envelope** — every error includes `code`, `category`, `retryable`, and (where applicable) `nearest_tools[]` suggestions. Backward-compatible: the legacy `error: <str>` field stays alongside.

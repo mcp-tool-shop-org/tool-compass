@@ -4,9 +4,11 @@ Tests for Tool Compass indexer module.
 Tests HNSW index building, searching, and metadata management.
 """
 
+import numpy as np
 import pytest
 
 from indexer import CompassIndex, SearchResult
+from embedder import EMBEDDING_DIM
 from tool_manifest import ToolDefinition
 
 
@@ -132,6 +134,188 @@ class TestCompassIndex:
         assert results == []
 
 
+class TestEmbeddingCacheSelfHeal:
+    """SC-002 regression: a corrupt/truncated embedding_cache BLOB whose
+    `dim` column still equals EMBEDDING_DIM must be treated as a cache MISS
+    (and deleted), not crash the rebuild.
+
+    _cache_get guarded reshape() only on the column-dim value, never the
+    actual BLOB byte length. A row with dim==EMBEDDING_DIM but a
+    truncated/corrupt BLOB made np.frombuffer(...).reshape(dim) raise
+    ValueError. Because _cache_get runs inside build_index's BEGIN IMMEDIATE
+    transaction, that uncaught ValueError rolled back and re-raised EVERY
+    rebuild forever — defeating the documented self-heal. The fix validates
+    len(blob) == dim * 4 and, on mismatch, deletes the bad row + reports a
+    miss so the next pass re-populates it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_cache_get_truncated_blob_is_a_miss(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """Directly probe _cache_get: a dim-OK but wrong-length BLOB returns
+        None (miss) and the bad row is deleted (self-heal).
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        await index.build_index(sample_tools)
+
+        text = sample_tools[0].embedding_text()
+        text_hash = index._compute_text_hash(text)
+
+        # Corrupt the stored BLOB to a truncated length while leaving the
+        # `dim` column at the valid EMBEDDING_DIM — this is the exact shape
+        # the column-dim check fails to catch.
+        bad_blob = np.zeros(EMBEDDING_DIM - 5, dtype=np.float32).tobytes()
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE embedding_cache SET vector = ? WHERE text_hash = ?",
+                (bad_blob, text_hash),
+            )
+            index.db.commit()
+
+        # Must NOT raise ValueError; must report a miss (None).
+        result = index._cache_get(text_hash)
+        assert result is None, "corrupt-length BLOB must be treated as a miss"
+
+        # The bad row must have been deleted (self-heal).
+        row = index.db.execute(
+            "SELECT COUNT(*) AS c FROM embedding_cache WHERE text_hash = ?",
+            (text_hash,),
+        ).fetchone()
+        assert row["c"] == 0, "corrupt cache row should be deleted on miss"
+
+        await index.close()
+
+    @pytest.mark.asyncio
+    async def test_rebuild_self_heals_corrupt_cache_row(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """End-to-end: a corrupt cache row must not crash build_index — the
+        rebuild treats it as a miss, re-embeds, and completes successfully.
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        # First build populates the cache legitimately.
+        await index.build_index(sample_tools)
+
+        # Corrupt ONE cache row: keep dim == EMBEDDING_DIM, truncate the BLOB.
+        text = sample_tools[1].embedding_text()
+        text_hash = index._compute_text_hash(text)
+        bad_blob = np.zeros(EMBEDDING_DIM - 3, dtype=np.float32).tobytes()
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE embedding_cache SET vector = ? WHERE text_hash = ?",
+                (bad_blob, text_hash),
+            )
+            index.db.commit()
+
+        # On the OLD code, _cache_get's reshape() raised ValueError inside the
+        # BEGIN IMMEDIATE txn and this rebuild crashed (and would crash
+        # forever). The fix must let the rebuild succeed.
+        result = await index.build_index(sample_tools)
+        assert result["tools_indexed"] == len(sample_tools)
+
+        # And search still works after the self-heal.
+        results = await index.search("read a file", top_k=3)
+        assert len(results) > 0
+
+        await index.close()
+
+
+class TestGetToolByIdMalformedJson:
+    """GW-A-002 sibling: a tools-table row with malformed JSON in the
+    `parameters`/`examples` columns must be skipped-with-defaults inside
+    _get_tool_by_id, not raise JSONDecodeError.
+
+    _get_tool_by_id runs per-result inside search(); without the guard a
+    single corrupt row raised and poisoned the ENTIRE result set (every
+    result silently degraded to lexical) instead of dropping the one bad
+    field. The fix falls back to {}/[] for the corrupt column and keeps the
+    rest of the catalog searchable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_tool_by_id_bad_parameters_json_returns_defaults(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """A row with invalid JSON in `parameters` returns a ToolDefinition
+        with parameters={} (and examples=[] when also corrupt), never a raise.
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        await index.build_index(sample_tools)
+
+        # Corrupt the parameters column for one existing tool while leaving at
+        # least one VALID row untouched. Capture its row id for direct probing.
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE tools SET parameters = ?, examples = ? WHERE name = ?",
+                ("{not json", "[also broken", "test:read_file"),
+            )
+            index.db.commit()
+        row = index.db.execute(
+            "SELECT id FROM tools WHERE name = ?", ("test:read_file",)
+        ).fetchone()
+        bad_id = row["id"]
+
+        # Direct probe: must NOT raise JSONDecodeError; degrades to {} / [].
+        tool = index._get_tool_by_id(bad_id)
+        assert tool is not None
+        assert tool.name == "test:read_file"
+        assert tool.parameters == {}, (
+            "malformed parameters JSON must fall back to {}"
+        )
+        assert tool.examples == [], (
+            "malformed examples JSON must fall back to []"
+        )
+
+        await index.close()
+
+    @pytest.mark.asyncio
+    async def test_search_survives_one_corrupt_row(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """End-to-end: with one corrupt row present, a search that surfaces a
+        DIFFERENT (valid) row still returns normally — the corrupt row does
+        not poison the whole search.
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        await index.build_index(sample_tools)
+
+        # Corrupt git_status's parameters; read_file stays valid.
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE tools SET parameters = ? WHERE name = ?",
+                ("{not json", "test:git_status"),
+            )
+            index.db.commit()
+
+        # A search must not raise, even if the corrupt row is among candidates.
+        results = await index.search("read a file", top_k=5)
+        assert len(results) > 0
+        # Any surfaced result is a well-formed ToolDefinition (the corrupt row,
+        # if surfaced, degrades to {} rather than raising).
+        for r in results:
+            assert isinstance(r.tool, ToolDefinition)
+            assert isinstance(r.tool.parameters, dict)
+
+        await index.close()
+
+
 class TestIndexStats:
     """Test index statistics and metadata."""
 
@@ -222,3 +406,98 @@ class TestToolDefinition:
 
         for param in tool.parameters.keys():
             assert param in text
+
+
+class TestCacheKeyIncorporatesProvider:
+    """BE-FT-PE-001: the embedding cache key must fold in the PROVIDER name and
+    base_url (in addition to the model) so switching embedding_provider /
+    embedding_base_url can't return a stale cross-provider vector for the same
+    text. The dim self-heal is unaffected — it keys on EMBEDDING_DIM + BLOB
+    byte length, not this hash.
+    """
+
+    def _index_with_embedder(self, embedder, temp_index_path, temp_db_path):
+        return CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=embedder,
+        )
+
+    def test_hash_differs_across_provider_names(
+        self, temp_index_path, temp_db_path
+    ):
+        """Same text + same base_url + same model but DIFFERENT provider name
+        -> different cache key."""
+        from unittest.mock import Mock
+
+        e1 = Mock()
+        e1.provider_name = "ollama"
+        e1.base_url = "http://localhost:11434"
+        e1.model = "nomic-embed-text"
+
+        e2 = Mock()
+        e2.provider_name = "openai"
+        e2.base_url = "http://localhost:11434"
+        e2.model = "nomic-embed-text"
+
+        idx1 = self._index_with_embedder(e1, temp_index_path, temp_db_path)
+        idx2 = self._index_with_embedder(
+            e2, temp_index_path.with_suffix(".2.hnsw"),
+            temp_db_path.with_suffix(".2.db"),
+        )
+
+        text = "read a file from disk"
+        assert idx1._compute_text_hash(text) != idx2._compute_text_hash(text)
+
+    def test_hash_differs_across_base_urls(
+        self, temp_index_path, temp_db_path
+    ):
+        """Same provider + model but DIFFERENT base_url -> different key
+        (two OpenAI-compatible endpoints can return different vectors)."""
+        from unittest.mock import Mock
+
+        e1 = Mock()
+        e1.provider_name = "openai"
+        e1.base_url = "http://server-a:1234"
+        e1.model = "text-embedding-3-small"
+
+        e2 = Mock()
+        e2.provider_name = "openai"
+        e2.base_url = "http://server-b:1234"
+        e2.model = "text-embedding-3-small"
+
+        idx1 = self._index_with_embedder(e1, temp_index_path, temp_db_path)
+        idx2 = self._index_with_embedder(
+            e2, temp_index_path.with_suffix(".2.hnsw"),
+            temp_db_path.with_suffix(".2.db"),
+        )
+
+        text = "read a file from disk"
+        assert idx1._compute_text_hash(text) != idx2._compute_text_hash(text)
+
+    def test_hash_stable_for_same_provider(
+        self, temp_index_path, temp_db_path, mock_embedder
+    ):
+        """Identical embedder identity -> identical key (cache hits still
+        work)."""
+        idx = self._index_with_embedder(
+            mock_embedder, temp_index_path, temp_db_path
+        )
+        text = "read a file from disk"
+        assert idx._compute_text_hash(text) == idx._compute_text_hash(text)
+
+    def test_hash_degrades_gracefully_without_provider_name(
+        self, temp_index_path, temp_db_path
+    ):
+        """A pre-seam / mock embedder exposing only base_url + model must not
+        crash _compute_text_hash (provider_name missing -> 'unknown')."""
+        from unittest.mock import Mock
+
+        e = Mock(spec=["base_url", "model"])
+        e.base_url = "http://localhost:11434"
+        e.model = "nomic-embed-text"
+        idx = self._index_with_embedder(e, temp_index_path, temp_db_path)
+        # Must produce a stable hex digest, not raise.
+        h = idx._compute_text_hash("some text")
+        assert isinstance(h, str)
+        assert len(h) == 64

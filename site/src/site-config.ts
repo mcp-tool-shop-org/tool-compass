@@ -9,7 +9,7 @@ export const config: SiteConfig = {
   footerText: 'MIT Licensed — built by <a href="https://github.com/mcp-tool-shop-org" style="color:var(--color-muted);text-decoration:underline">mcp-tool-shop-org</a>',
 
   hero: {
-    badge: 'MCP Gateway — v2.2',
+    badge: 'MCP Gateway — v2.4',
     headline: 'Find tools by',
     headlineAccent: 'intent, not memory.',
     description: 'Semantic search for MCP tools. 95% fewer tokens, ~15ms latency, graceful Ollama-offline fallback, trace IDs you can paste into a bug report.',
@@ -71,8 +71,8 @@ export const config: SiteConfig = {
     {
       kind: 'features',
       id: 'whats-new',
-      title: "What's new in v2.2",
-      subtitle: 'Stage A bug/security pass (23 HIGH), Stage B/C humanization (15 HIGH), plus 12 shipped features.',
+      title: "What's new in v2.4",
+      subtitle: 'tool-compass init + Claude Desktop snippet, a pluggable embedding backend (OpenAI / LM Studio, not just Ollama), honest sync feedback, and a fully dark UI.',
       features: [
         {
           title: 'tool-compass CLI',
@@ -145,12 +145,12 @@ export const config: SiteConfig = {
       kind: 'data-table',
       id: 'operations',
       title: 'HTTP Endpoints',
-      subtitle: 'Start the gateway in HTTP mode with `PORT=8000 tool-compass` for operator-grade endpoints.',
+      subtitle: 'Start the gateway in HTTP mode with PORT=8000 tool-compass for operator-grade endpoints.',
       columns: ['Endpoint', 'Purpose'],
       rows: [
         ['/health', 'Liveness probe — always 200 if the process is up.'],
-        ['/ready', 'Readiness probe — 200 only when index loaded + Ollama reachable + ≥1 backend connected. 503 otherwise with a JSON breakdown of which check failed. Cached 30s.'],
-        ['/metrics', 'Prometheus text format. search_total, ollama_available, backend_up{name}, backend_call_total{name,status}, embed_latency_p95_ms, embed_failures_total, index_age_seconds, orphaned_vectors.'],
+        ['/ready', 'Deep readiness probe; 503 with a JSON breakdown when a check fails.'],
+        ['/metrics', 'Prometheus text — search, backend, and embed latency metrics.'],
         ['MCP JSON-RPC', 'Standard MCP streamable-http transport at the root. HOST env var defaults to 127.0.0.1 — set HOST=0.0.0.0 only behind an auth reverse proxy.'],
       ],
     },

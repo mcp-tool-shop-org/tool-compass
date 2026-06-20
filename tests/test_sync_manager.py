@@ -494,13 +494,25 @@ class TestFullSync:
 
     @pytest.mark.asyncio
     async def test_full_sync_no_backends(self, sync_manager):
-        """Should handle no connected backends."""
+        """Should handle no connected backends.
+
+        MSYNC-A-001 (masking-test repair): the empty branch must STILL call
+        build_index([]) so the prior index is genuinely cleared. Previously
+        this test only asserted status/tools_indexed — both of which were
+        already correct while the index was left live — so it never failed on
+        the bug. Now we assert build_index was actually invoked with an empty
+        tool list.
+        """
         sync_manager.backends.connect_all = AsyncMock(return_value={})
 
         result = await sync_manager.full_sync()
 
         assert result["status"] == "no_tools"
         assert result["tools_indexed"] == 0
+        # The index must be emptied — build_index([]) clears tools + HNSW.
+        sync_manager.index.build_index.assert_called_once()
+        called_arg = sync_manager.index.build_index.call_args.args[0]
+        assert called_arg == [], "empty full_sync must rebuild with []"
 
     @pytest.mark.asyncio
     async def test_full_sync_with_tools(self, sync_manager):
@@ -524,6 +536,68 @@ class TestFullSync:
         assert result["status"] == "complete"
         assert result["tools_indexed"] == 2
         sync_manager.index.build_index.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_full_sync_all_backends_gone_empties_index(
+        self, mock_config, mock_backends, temp_sync_db, tmp_path
+    ):
+        """MSYNC-A-001 (full-mechanism regression): when every backend is gone,
+        the index must be GENUINELY emptied — not just reported as no_tools.
+
+        This drives a REAL CompassIndex (build_index([]) needs no embedder for
+        the empty branch) so we observe the actual side effect: the SQLite
+        tools table is truncated. Pre-fix, full_sync returned no_tools WITHOUT
+        calling build_index([]), leaving stale rows live — compass kept routing
+        to dead tools. This test fails against that bug.
+        """
+        from indexer import CompassIndex
+
+        # Real index pointed at temp files; backends report ZERO tools (all
+        # disconnected/empty) but connect_all says they connected.
+        index = CompassIndex(
+            index_path=tmp_path / "compass.hnsw",
+            db_path=tmp_path / "tools.db",
+        )
+        index._init_db()
+
+        # Seed two stale tool rows as if a prior sync had populated them.
+        with index._db_write_lock:
+            index.db.execute(
+                "INSERT INTO tools (name, description, category, server, "
+                "parameters, examples, is_core, embedding_text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("backend1:dead", "stale", "other", "backend1", "{}", "[]", 0, "x"),
+            )
+            index.db.execute(
+                "INSERT INTO tools (name, description, category, server, "
+                "parameters, examples, is_core, embedding_text) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                ("backend2:dead", "stale", "other", "backend2", "{}", "[]", 0, "x"),
+            )
+            index.db.commit()
+
+        pre = index.db.execute("SELECT COUNT(*) AS c FROM tools").fetchone()["c"]
+        assert pre == 2, "precondition: stale rows present"
+
+        mock_backends.connect_all = AsyncMock(
+            return_value={"backend1": True, "backend2": True}
+        )
+        mock_backends.get_backend_tools = Mock(return_value=[])  # all gone
+
+        with patch("sync_manager.ANALYTICS_DB_PATH", temp_sync_db):
+            manager = SyncManager(mock_config, index, mock_backends)
+            try:
+                result = await manager.full_sync()
+            finally:
+                manager.close()
+
+        assert result["status"] == "no_tools"
+        assert result["tools_indexed"] == 0
+
+        # The actual fix: the tools table is genuinely empty now.
+        post = index.db.execute("SELECT COUNT(*) AS c FROM tools").fetchone()["c"]
+        assert post == 0, "all-backends-gone full_sync must empty the index"
+        await index.close()
 
 
 # =============================================================================
@@ -749,6 +823,167 @@ class TestRebuildForBackends:
         sync_manager.index.add_single_tool.assert_called_once()
 
 
+class TestOrphanVectorCompaction:
+    """MSYNC-A-002: periodic full rebuild to reclaim orphaned HNSW vectors.
+
+    The incremental diff path removes vanished tools via index.remove_tool,
+    which only deletes the SQLite row — the HNSW vector is orphaned and keeps
+    consuming the fixed search candidate window. After enough removal-bearing
+    cycles, _rebuild_for_backends must force a real build_index() rebuild to
+    compact the index, rather than only ever calling add_single_tool.
+    """
+
+    def _set_old_names(self, sync_manager, names):
+        """Make _get_backend_tool_names report these as currently-indexed."""
+        rows = [{"name": n} for n in names]
+        sync_manager.index.db.execute.return_value.fetchall.return_value = rows
+
+    @pytest.mark.asyncio
+    async def test_no_rebuild_below_threshold(self, sync_manager):
+        """A single removal cycle must stay incremental (no full rebuild)."""
+        # Old index had a tool that has now vanished -> one removal this cycle.
+        self._set_old_names(sync_manager, ["backend1:gone"])
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("kept", "backend1:kept", "Kept", "backend1", {}),
+            ]
+        )
+        sync_manager.index.remove_tool = AsyncMock(return_value=True)
+        sync_manager.index.add_single_tool = AsyncMock(return_value=True)
+        sync_manager.index.build_index = AsyncMock(return_value={"tools_indexed": 1})
+
+        await sync_manager._rebuild_for_backends(["backend1"])
+
+        # One removal happened, but threshold not reached -> incremental.
+        sync_manager.index.remove_tool.assert_awaited_once_with("backend1:gone")
+        sync_manager.index.add_single_tool.assert_awaited()
+        sync_manager.index.build_index.assert_not_called()
+        assert sync_manager._incremental_cycles_since_rebuild == 1
+
+    @pytest.mark.asyncio
+    async def test_full_rebuild_after_threshold_cycles(self, sync_manager):
+        """After K removal-bearing cycles, a real build_index rebuild fires.
+
+        This is the core MSYNC-A-002 regression: without the periodic rebuild,
+        orphan vectors accumulate forever and build_index is NEVER called from
+        the incremental path. Drive enough cycles to cross the threshold and
+        assert exactly one full rebuild happens, and the counter resets.
+        """
+        self._set_old_names(sync_manager, ["backend1:gone"])
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("kept", "backend1:kept", "Kept", "backend1", {}),
+            ]
+        )
+        sync_manager.index.remove_tool = AsyncMock(return_value=True)
+        sync_manager.index.add_single_tool = AsyncMock(return_value=True)
+        sync_manager.index.build_index = AsyncMock(return_value={"tools_indexed": 1})
+
+        threshold = sync_manager._rebuild_after_incremental_cycles
+
+        # Run threshold cycles, each removing the vanished tool.
+        for _ in range(threshold):
+            await sync_manager._rebuild_for_backends(["backend1"])
+
+        # Exactly one full rebuild on the cycle that crossed the threshold,
+        # and the counter reset afterward.
+        sync_manager.index.build_index.assert_called_once()
+        rebuilt_arg = sync_manager.index.build_index.call_args.args[0]
+        # Rebuild is over the full current tool set, not an empty list.
+        assert len(rebuilt_arg) == 1
+        assert sync_manager._incremental_cycles_since_rebuild == 0
+
+    @pytest.mark.asyncio
+    async def test_cycles_without_removals_do_not_count(self, sync_manager):
+        """Pure-add cycles (no removals) never trip the compaction counter."""
+        # Old names == new names -> nothing removed.
+        self._set_old_names(sync_manager, ["backend1:kept"])
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("kept", "backend1:kept", "Kept", "backend1", {}),
+            ]
+        )
+        sync_manager.index.remove_tool = AsyncMock(return_value=True)
+        sync_manager.index.add_single_tool = AsyncMock(return_value=True)
+        sync_manager.index.build_index = AsyncMock(return_value={"tools_indexed": 1})
+
+        for _ in range(sync_manager._rebuild_after_incremental_cycles + 5):
+            await sync_manager._rebuild_for_backends(["backend1"])
+
+        # No removals ever -> counter stays at 0, no forced rebuild.
+        sync_manager.index.remove_tool.assert_not_called()
+        sync_manager.index.build_index.assert_not_called()
+        assert sync_manager._incremental_cycles_since_rebuild == 0
+
+
+class TestCrossThreadReadLock:
+    """MSYNC-A-003: cross-thread reads of the indexer DB hold its write lock.
+
+    _get_backend_tool_names and full_sync's baseline read self.index.db on the
+    event-loop thread. Without holding the indexer's _db_write_lock, a
+    concurrent worker-thread write can raise sqlite3.ProgrammingError. The fix
+    acquires that same lock for the reads.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_backend_tool_names_holds_index_write_lock(self, sync_manager):
+        """The read must be performed while holding index._db_write_lock."""
+        import threading
+
+        real_lock = threading.Lock()
+        sync_manager.index._db_write_lock = real_lock
+
+        held_during_execute = {"value": False}
+        orig_fetchall = Mock(return_value=[{"name": "backend1:t"}])
+
+        def fake_execute(*args, **kwargs):
+            # When the read runs, the indexer write lock must be held so a
+            # concurrent worker write would block instead of racing.
+            held_during_execute["value"] = real_lock.locked()
+            result = Mock()
+            result.fetchall = orig_fetchall
+            return result
+
+        sync_manager.index.db.execute.side_effect = fake_execute
+
+        names = sync_manager._get_backend_tool_names("backend1")
+
+        assert names == {"backend1:t"}
+        assert held_during_execute["value"], (
+            "_get_backend_tool_names must hold index._db_write_lock during the read"
+        )
+        # Lock released afterward (no leak).
+        assert not real_lock.locked()
+
+    @pytest.mark.asyncio
+    async def test_full_sync_baseline_read_holds_index_write_lock(self, sync_manager):
+        """full_sync's baseline cross-thread read must hold the index lock."""
+        import threading
+
+        real_lock = threading.Lock()
+        sync_manager.index._db_write_lock = real_lock
+
+        lock_states = []
+
+        def fake_execute(query, *args, **kwargs):
+            if "SELECT name" in query and "tools" in query:
+                lock_states.append(real_lock.locked())
+            result = Mock()
+            result.fetchall = Mock(return_value=[])
+            return result
+
+        sync_manager.index.db.execute.side_effect = fake_execute
+        sync_manager.backends.connect_all = AsyncMock(return_value={})
+
+        await sync_manager.full_sync()
+
+        # At least one baseline SELECT ran with the index write lock held.
+        assert any(lock_states), (
+            "full_sync baseline read must hold index._db_write_lock"
+        )
+        assert not real_lock.locked()
+
+
 class TestSyncIfNeededErrors:
     """Test error handling in sync_if_needed."""
 
@@ -842,7 +1077,15 @@ class TestFullSyncEdgeCases:
 
     @pytest.mark.asyncio
     async def test_full_sync_partial_connection(self, sync_manager):
-        """Should handle partial backend connections."""
+        """Should handle partial backend connections AND surface the failure.
+
+        CONTRACT (masking-test repair): this test previously asserted only
+        tools_indexed/status, so it never exercised the partial-failure
+        contract the cli relies on. full_sync() must now return
+        connected_backends + failed_backends derived from connect_results so
+        _cmd_sync can warn on partial failure. A configured backend that
+        failed to connect MUST appear in failed_backends.
+        """
         sync_manager.backends.connect_all = AsyncMock(
             return_value={
                 "backend1": True,
@@ -860,6 +1103,11 @@ class TestFullSyncEdgeCases:
         # Should still sync available tools
         assert result["tools_indexed"] == 1
         assert result["status"] == "complete"
+        # CONTRACT: the partial failure is visible in the return shape.
+        assert result["connected_backends"] == ["backend1"]
+        assert result["failed_backends"] == ["backend2"]
+        # backends_synced still reflects every attempted backend.
+        assert set(result["backends_synced"]) == {"backend1", "backend2"}
 
     @pytest.mark.asyncio
     async def test_full_sync_clears_old_data(self, sync_manager):
@@ -875,3 +1123,192 @@ class TestFullSyncEdgeCases:
 
         # Should call build_index which clears and rebuilds
         sync_manager.index.build_index.assert_called_once()
+
+
+# =============================================================================
+# Stage-C Humanization: durable per-backend health + honest add-failure logging
+# =============================================================================
+
+
+class TestPersistedBackendHealthDEG02:
+    """DEG-02: backend_sync_state.sync_status is the only durable per-backend
+    health surface, but it was only ever written 'synced' — and that 'synced'
+    was written BEFORE the rebuild that can still fail. These tests prove the
+    'error' state is now persisted and that 'synced' lands only after the
+    index work actually succeeds.
+    """
+
+    async def _status(self, sync_manager, backend):
+        st = await sync_manager.get_sync_status()
+        return st["backends"][backend]["status"]
+
+    @pytest.mark.asyncio
+    async def test_sync_if_needed_persists_check_error(self, sync_manager):
+        """A failed change-check must write sync_status='error' (was: only
+        ever returned in-memory; the durable surface stayed stale)."""
+        with patch.object(
+            sync_manager, "check_backend_changes", new_callable=AsyncMock
+        ) as mock_check:
+            mock_check.side_effect = Exception("connection refused")
+
+            await sync_manager.sync_if_needed()
+
+        # The persisted, triage-visible surface now reflects the failure.
+        assert await self._status(sync_manager, "backend1") == "error"
+        st = await sync_manager.get_sync_status()
+        assert "connection refused" in (st["backends"]["backend1"]["last_error"] or "")
+
+    @pytest.mark.asyncio
+    async def test_sync_if_needed_persists_rebuild_error(self, sync_manager):
+        """A failed rebuild must write sync_status='error' for the changed
+        backend, not leave a stale 'synced'."""
+        with patch.object(
+            sync_manager, "check_backend_changes", new_callable=AsyncMock
+        ) as mock_check:
+            mock_check.side_effect = [True, False]
+            with patch.object(
+                sync_manager, "_rebuild_for_backends", new_callable=AsyncMock
+            ) as mock_rebuild:
+                mock_rebuild.side_effect = Exception("rebuild boom")
+
+                await sync_manager.sync_if_needed()
+
+        assert await self._status(sync_manager, "backend1") == "error"
+
+    @pytest.mark.asyncio
+    async def test_rebuild_marks_error_when_adds_fail(self, sync_manager):
+        """DEG-01 + DEG-02: when add_single_tool returns False (Ollama-down /
+        breaker-open), the backend must NOT be marked 'synced'."""
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("tool1", "backend1:tool1", "Tool 1", "backend1", {}),
+            ]
+        )
+        # Every add fails — embedder/index unavailable.
+        sync_manager.index.add_single_tool = AsyncMock(return_value=False)
+
+        await sync_manager._rebuild_for_backends(["backend1"])
+
+        # Pre-fix this row would read 'synced' (written before the loop).
+        assert await self._status(sync_manager, "backend1") == "error"
+
+    @pytest.mark.asyncio
+    async def test_rebuild_marks_synced_only_after_success(self, sync_manager):
+        """The terminal 'synced' write lands only after a clean add loop."""
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("tool1", "backend1:tool1", "Tool 1", "backend1", {}),
+            ]
+        )
+        sync_manager.index.add_single_tool = AsyncMock(return_value=True)
+
+        await sync_manager._rebuild_for_backends(["backend1"])
+
+        assert await self._status(sync_manager, "backend1") == "synced"
+
+    @pytest.mark.asyncio
+    async def test_full_sync_connect_failure_persists_error(self, sync_manager):
+        """A configured backend that fails to connect during full_sync is
+        recorded as 'error' (durable), and a recovered backend is 'synced'."""
+        sync_manager.backends.connect_all = AsyncMock(
+            return_value={"backend1": True, "backend2": False}
+        )
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("tool1", "backend1:tool1", "Tool 1", "backend1", {}),
+            ]
+        )
+
+        await sync_manager.full_sync()
+
+        assert await self._status(sync_manager, "backend1") == "synced"
+        assert await self._status(sync_manager, "backend2") == "error"
+
+
+class TestAddFailureLoggingDEG01:
+    """DEG-01: _rebuild_for_backends discarded the add_single_tool bool and
+    logged an unconditional 'Added N' success even when adds failed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_add_failure_warns_not_success(self, sync_manager, caplog):
+        """A partial add must emit a WARNING and NOT the unconditional
+        'Added N tools' success line."""
+        import logging
+
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("tool1", "backend1:tool1", "Tool 1", "backend1", {}),
+                ToolInfo("tool2", "backend1:tool2", "Tool 2", "backend1", {}),
+            ]
+        )
+        # First add succeeds, second fails.
+        sync_manager.index.add_single_tool = AsyncMock(side_effect=[True, False])
+
+        with caplog.at_level(logging.WARNING, logger="sync_manager"):
+            await sync_manager._rebuild_for_backends(["backend1"])
+
+        text = caplog.text
+        assert "1/2 tool add(s) failed" in text
+        # The misleading happy-path line must be suppressed on partial failure.
+        assert "Added 2 tools" not in text
+
+    @pytest.mark.asyncio
+    async def test_clean_add_logs_success(self, sync_manager, caplog):
+        """A fully-successful add still logs the 'Added N tools' line."""
+        import logging
+
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
+        sync_manager.backends.get_backend_tools = Mock(
+            return_value=[
+                ToolInfo("tool1", "backend1:tool1", "Tool 1", "backend1", {}),
+            ]
+        )
+        sync_manager.index.add_single_tool = AsyncMock(return_value=True)
+
+        with caplog.at_level(logging.INFO, logger="sync_manager"):
+            await sync_manager._rebuild_for_backends(["backend1"])
+
+        assert "Added 1 tools" in caplog.text
+
+
+class TestUnreachableVsGoneDEG03:
+    """DEG-03: full_sync rebuilds from only the backends that connected, so a
+    transiently-unreachable backend's tools get dropped — and were logged via
+    'globally_removed' as if intentional. The fix distinguishes
+    'removed because gone' from 'removed because unreachable'.
+    """
+
+    @pytest.mark.asyncio
+    async def test_unreachable_drop_warns_not_removed(self, sync_manager, caplog):
+        """When a backend that previously had rows fails to connect, the drop
+        of its tools is WARNED as unreachable, not logged as a clean removal."""
+        import logging
+
+        # Baseline index has rows for both backends.
+        sync_manager.index.db.execute.return_value.fetchall.return_value = [
+            {"name": "backend1:t1", "server": "backend1"},
+            {"name": "backend2:t1", "server": "backend2"},
+        ]
+        # backend1 connects (and still reports its tool); backend2 unreachable.
+        sync_manager.backends.connect_all = AsyncMock(
+            return_value={"backend1": True, "backend2": False}
+        )
+
+        def tools_for(name):
+            if name == "backend1":
+                return [ToolInfo("t1", "backend1:t1", "T1", "backend1", {})]
+            return []
+
+        sync_manager.backends.get_backend_tools = Mock(side_effect=tools_for)
+
+        with caplog.at_level(logging.WARNING, logger="sync_manager"):
+            await sync_manager.full_sync()
+
+        # backend2:t1 is dropped because backend2 was UNREACHABLE — the log
+        # must say so (warning), and must NOT claim it as a clean removal.
+        assert "UNREACHABLE" in caplog.text
+        assert "backend2" in caplog.text

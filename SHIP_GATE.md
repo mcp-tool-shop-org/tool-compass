@@ -39,7 +39,7 @@
 - [x] `[cli]` `--help` output accurate for all commands and flags (2026-02-27)
 - [x] `[cli|mcp|desktop]` Logging levels defined: silent / normal / verbose / debug — secrets redacted at all levels (2026-02-27)
 - [x] `[mcp]` All tools documented with description + parameters (2026-02-27 — README API section)
-- [ ] `[complex]` SKIP: straightforward tool discovery gateway, not complex enough for HANDBOOK
+- [x] `[complex]` Starlight HANDBOOK published — 7 pages at the landing page `/handbook/` (2026-06-20)
 
 ## D. Shipping Hygiene
 
@@ -47,7 +47,7 @@
 - [x] `[all]` Version in manifest matches git tag (2026-02-27)
 - [x] `[all]` Dependency scanning runs in CI (ecosystem-appropriate) (2026-02-27 — pip-audit in CI)
 - [x] `[all]` Automated dependency update mechanism exists (2026-02-27 — pip-audit in CI)
-- [ ] `[npm]` SKIP: not an npm package
+- [x] `[npm]` `@mcptoolshop/tool-compass` wrapper published (zero-prerequisite `npx` launcher; `files`/`bin`/provenance set) (2026-06-20)
 - [x] `[pypi]` `python_requires` set (2026-02-27 — >=3.10)
 - [x] `[pypi]` Clean wheel + sdist build (2026-02-27 — hatchling, Docker build in CI)
 - [ ] `[vsix]` SKIP: not a VS Code extension

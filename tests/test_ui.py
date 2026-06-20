@@ -23,7 +23,6 @@ network call, real Ollama, or a real Gradio server.
 from __future__ import annotations
 
 import asyncio
-import html
 import json
 import sqlite3
 from types import SimpleNamespace
@@ -411,6 +410,47 @@ class TestLexicalFallback:
         with patch.dict("sys.modules", {"gateway": None}):
             assert ui._lexical_fallback_for_ui(idx, "q", 5, None, None) == []
 
+    def test_inline_fallback_underscore_is_not_a_wildcard(self):
+        """FE-SA-002: '_' in the query must be treated literally, not as a
+        single-char LIKE wildcard. The tool 'alpha' must NOT be returned for
+        the query 'a_pha' once % and _ are escaped with an ESCAPE clause.
+        Without the fix, '%a_pha%' matches 'alpha' (the '_' wildcard eats the
+        'l'), producing over-broad results.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "alpha", "description": "a tool",
+             "category": "file", "server": "s1"},
+        ])
+        with patch.dict("sys.modules", {"gateway": None}):
+            results = ui._lexical_fallback_for_ui(idx, "a_pha", 5, None, None)
+        assert results == []
+
+    def test_inline_fallback_percent_is_not_a_wildcard(self):
+        """FE-SA-002: '%' must be literal, not a multi-char LIKE wildcard.
+        Querying 'a%a' must NOT match 'alpha' once escaping + ESCAPE land.
+        Without the fix, '%a%a%' matches 'alpha'.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "alpha", "description": "a tool",
+             "category": "file", "server": "s1"},
+        ])
+        with patch.dict("sys.modules", {"gateway": None}):
+            results = ui._lexical_fallback_for_ui(idx, "a%a", 5, None, None)
+        assert results == []
+
+    def test_inline_fallback_literal_underscore_still_matches(self):
+        """FE-SA-002: escaping must not break legitimate literal matches —
+        a query whose '_' really appears in the tool name still matches.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "read_file", "description": "reads a file",
+             "category": "file", "server": "s1"},
+        ])
+        with patch.dict("sys.modules", {"gateway": None}):
+            results = ui._lexical_fallback_for_ui(idx, "read_file", 5, None, None)
+        assert len(results) == 1
+        assert results[0]["tool"] == "read_file"
+
 
 class TestNearestMatches:
     def test_returns_empty_on_exception(self):
@@ -581,6 +621,22 @@ class TestCheckOllamaBanner:
         # Defensive default banner is emitted on any probe failure
         assert "Ollama unavailable" in out
 
+    def test_closes_embedder_when_health_check_raises(self):
+        """FE-SB-003: close() must run even when health_check() raises so the
+        aiohttp session does not leak on the common Ollama-down path.
+        """
+        ui._config = MagicMock(ollama_url="http://localhost:11434")
+        fake_embedder = MagicMock()
+        fake_embedder.health_check = AsyncMock(
+            side_effect=ConnectionError("ollama down")
+        )
+        fake_embedder.close = AsyncMock()
+        with patch("embedder.Embedder", return_value=fake_embedder):
+            out = ui._check_ollama_banner()
+        # Probe failed → defensive banner; close() still ran (try/finally).
+        assert "Ollama unavailable" in out
+        fake_embedder.close.assert_awaited()
+
 
 # =============================================================================
 # search_tools — the main handler
@@ -615,7 +671,13 @@ class TestSearchTools:
         assert json_out == "{}"
 
     def test_happy_path_renders_results(self):
-        idx = _make_mock_index(rows=[])
+        # Index is populated (total_tools > 0) — the precondition for the
+        # search path. An empty index now short-circuits to the sync card
+        # (FE-SB-002), so search-path tests must seed a non-empty index.
+        idx = _make_mock_index(rows=[
+            {"name": "seed:tool", "description": "seed", "category": "file",
+             "server": "seed"},
+        ])
 
         async def fake_search(query, top_k, category_filter, server_filter):
             return [_fake_result("test:read_file", "Read a file", 0.85)]
@@ -633,7 +695,10 @@ class TestSearchTools:
         assert data[0]["confidence"] == 0.85
 
     def test_results_filtered_by_min_confidence(self):
-        idx = _make_mock_index(rows=[])
+        idx = _make_mock_index(rows=[
+            {"name": "seed:tool", "description": "seed", "category": "file",
+             "server": "seed"},
+        ])
 
         async def fake_search(**kwargs):
             return [
@@ -649,7 +714,10 @@ class TestSearchTools:
 
     def test_xss_in_tool_metadata_is_escaped(self):
         """FE-A2-001: tool names from MCP servers are untrusted."""
-        idx = _make_mock_index(rows=[])
+        idx = _make_mock_index(rows=[
+            {"name": "seed:tool", "description": "seed", "category": "file",
+             "server": "seed"},
+        ])
 
         async def fake_search(**kwargs):
             return [_fake_result(
@@ -668,7 +736,10 @@ class TestSearchTools:
 
     def test_query_is_escaped_in_count_heading(self):
         """The result count heading interpolates the query — escape it."""
-        idx = _make_mock_index(rows=[])
+        idx = _make_mock_index(rows=[
+            {"name": "seed:tool", "description": "seed", "category": "file",
+             "server": "seed"},
+        ])
 
         async def fake_search(**kwargs):
             return [_fake_result("a:b", "desc", 0.9)]
@@ -680,7 +751,10 @@ class TestSearchTools:
         assert "&lt;script&gt;" in html_out
 
     def test_deprecated_badge_rendered(self):
-        idx = _make_mock_index(rows=[])
+        idx = _make_mock_index(rows=[
+            {"name": "seed:tool", "description": "seed", "category": "file",
+             "server": "seed"},
+        ])
 
         async def fake_search(**kwargs):
             return [_fake_result("old:tool", "deprecated thing", 0.8,
@@ -709,6 +783,31 @@ class TestSearchTools:
         assert "test:read_file" in html_out
         assert json_out == "{}"
 
+    def test_empty_index_short_circuits_to_sync_card(self):
+        """FE-SB-002: a synced-but-empty index (0 rows) must surface the
+        actionable 'No tools indexed yet → tool-compass sync' card, NOT the
+        generic no-match page whose advice (reword / lower confidence /
+        remove filters) can never produce a tool from an empty index.
+        """
+        idx = _make_mock_index(rows=[])  # get_stats → total_tools == 0
+        search_called = {"n": 0}
+
+        async def fake_search(**kwargs):
+            search_called["n"] += 1
+            return []
+
+        idx.search = lambda **kw: fake_search(**kw)
+        with patch.object(ui, "get_index", return_value=idx):
+            html_out, json_out = ui.search_tools("read", top_k=5)
+        # Shows the empty-index next-step, matching the Browser tab.
+        assert "No tools indexed yet" in html_out
+        assert "tool-compass sync" in html_out
+        # Must NOT fall through to the generic no-match advice.
+        assert "No tools found" not in html_out
+        assert json_out == "{}"
+        # Short-circuited before ever running the search.
+        assert search_called["n"] == 0
+
     def test_semantic_failure_triggers_lexical_fallback_banner(self):
         idx = _make_mock_index(rows=[
             {"name": "test:read_file", "description": "Read a file",
@@ -729,7 +828,10 @@ class TestSearchTools:
         assert data[0]["degraded"] is True
 
     def test_category_and_server_filters_passed_to_search(self):
-        idx = _make_mock_index(rows=[])
+        idx = _make_mock_index(rows=[
+            {"name": "seed:tool", "description": "seed", "category": "file",
+             "server": "seed"},
+        ])
         captured = {}
 
         async def fake_search(query, top_k, category_filter, server_filter):
@@ -744,7 +846,10 @@ class TestSearchTools:
         assert captured["server"] == "test"
 
     def test_all_filter_value_becomes_none(self):
-        idx = _make_mock_index(rows=[])
+        idx = _make_mock_index(rows=[
+            {"name": "seed:tool", "description": "seed", "category": "file",
+             "server": "seed"},
+        ])
         captured = {}
 
         async def fake_search(query, top_k, category_filter, server_filter):
@@ -1038,6 +1143,55 @@ class TestGetToolDetails:
         assert "<script>x</script>" not in out
         assert "&lt;script&gt;" in out
 
+    def test_corrupt_parameters_json_renders_gracefully(self):
+        """FE-SA-001: a malformed parameters blob must not raise out of the
+        callback. The json.loads on row['parameters'] sits outside the
+        try/except that closes before it; without a guard a JSONDecodeError
+        propagates and show_error=True dumps a raw traceback instead of the
+        styled card. The fix mirrors get_all_tools (defaults to {}/[]).
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "corrupt:tool", "description": "d",
+             "category": "file", "server": "s",
+             "parameters": {}, "examples": []},
+        ])
+        # Overwrite the row with a non-JSON parameters blob the helper can't
+        # produce on its own (it always json.dumps). This is the real on-disk
+        # corruption the finding describes.
+        idx.db.execute(
+            "UPDATE tools SET parameters = ? WHERE name = ?",
+            ("{not valid json", "corrupt:tool"),
+        )
+        idx.db.commit()
+        with patch.object(ui, "get_index", return_value=idx):
+            # Must not raise JSONDecodeError; renders the tool card.
+            out = ui.get_tool_details("corrupt:tool")
+        assert "corrupt:tool" in out
+        # Falls back to no-params view rather than crashing.
+        assert "No parameters required" in out
+
+    def test_corrupt_examples_json_renders_gracefully(self):
+        """FE-SA-001: the sibling json.loads on row['examples'] is equally
+        unguarded — a malformed examples blob must also degrade gracefully.
+        """
+        idx = _make_mock_index(rows=[
+            {"name": "badex:tool", "description": "d",
+             "category": "file", "server": "s",
+             "parameters": {"path": "str"}, "examples": []},
+        ])
+        idx.db.execute(
+            "UPDATE tools SET examples = ? WHERE name = ?",
+            ("[broken json", "badex:tool"),
+        )
+        idx.db.commit()
+        with patch.object(ui, "get_index", return_value=idx):
+            out = ui.get_tool_details("badex:tool")
+        assert "badex:tool" in out
+        # Parameters still render (only examples were corrupt).
+        assert "Parameters (1)" in out
+        # Corrupt examples default to [] → no Examples section.
+        assert "Examples (" not in out
+
 
 # =============================================================================
 # get_analytics_dashboard
@@ -1276,6 +1430,62 @@ class TestGetSystemStatus:
             out = ui.get_system_status()
         assert "Failed" in out
         assert "Unavailable" in out
+
+    def test_ollama_probe_uses_configured_url_and_model(self):
+        """FE-SB-001: the Status-tab probe must build the Embedder from the
+        loaded config (ollama_url + embedding_model), NOT a bare Embedder()
+        that uses the hardcoded module defaults — otherwise it reports the
+        wrong endpoint's health and contradicts _check_ollama_banner().
+        """
+        ui._config = self._make_config(
+            ollama_url="http://remote-host:9999",
+            embedding_model="custom-embed",
+        )
+        idx = _make_mock_index(rows=[])
+        fake_analytics = MagicMock()
+        fake_analytics._hot_cache = {}
+        fake_embedder = MagicMock()
+        fake_embedder.health_check = AsyncMock(return_value=True)
+        fake_embedder.close = AsyncMock()
+        captured = {}
+
+        def _capture(*args, **kwargs):
+            captured.update(kwargs)
+            return fake_embedder
+
+        with patch.object(ui, "get_index", return_value=idx), \
+             patch.object(ui, "get_analytics_instance",
+                          return_value=fake_analytics), \
+             patch("embedder.Embedder", side_effect=_capture):
+            out = ui.get_system_status()
+        # Probe constructed against the CONFIGURED endpoint + model.
+        assert captured.get("base_url") == "http://remote-host:9999"
+        assert captured.get("model") == "custom-embed"
+        assert "Connected" in out
+
+    def test_ollama_probe_closes_embedder_when_health_check_raises(self):
+        """FE-SB-003: close() must run even when health_check() raises (the
+        common Ollama-down path) so the aiohttp session never leaks.
+        """
+        ui._config = self._make_config()
+        idx = _make_mock_index(rows=[])
+        fake_analytics = MagicMock()
+        fake_analytics._hot_cache = {}
+        fake_embedder = MagicMock()
+        fake_embedder.health_check = AsyncMock(
+            side_effect=ConnectionError("ollama down")
+        )
+        fake_embedder.close = AsyncMock()
+        with patch.object(ui, "get_index", return_value=idx), \
+             patch.object(ui, "get_analytics_instance",
+                          return_value=fake_analytics), \
+             patch("embedder.Embedder", return_value=fake_embedder):
+            out = ui.get_system_status()
+        # The raised health_check still routes to the Failed branch...
+        assert "Failed" in out
+        assert "Unavailable" in out
+        # ...AND close() ran despite the raise (try/finally), so no leak.
+        fake_embedder.close.assert_awaited()
 
     def test_config_load_failure_returns_error(self):
         ui._config = None

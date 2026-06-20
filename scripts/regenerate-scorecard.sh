@@ -53,7 +53,13 @@ fi
 fresh="$(mktemp)"
 trap 'rm -f "$fresh" "${fresh}.merged" 2>/dev/null || true' EXIT
 
-if ! npx --yes @mcptoolshop/shipcheck audit --format markdown > "$fresh" 2>/dev/null; then
+# CIDOCS-01: shipcheck colorizes even when stdout is a file, so force NO_COLOR
+# and strip any residual ANSI escape sequences — otherwise the auto-block ships
+# literal `^[[1m...` garbage on GitHub and the --check gate can never diff-clean
+# in non-TTY CI (which emits ANSI-free output). pipefail (set -o above) makes
+# this `if !` reflect a shipcheck failure, not just the sed.
+if ! NO_COLOR=1 FORCE_COLOR=0 npx --yes @mcptoolshop/shipcheck audit --format markdown 2>/dev/null \
+     | sed -E 's/\x1b\[[0-9;]*m//g' > "$fresh"; then
   echo "ERROR: 'npx @mcptoolshop/shipcheck audit' failed — is shipcheck installed and the repo audit-ready?" >&2
   exit 1
 fi

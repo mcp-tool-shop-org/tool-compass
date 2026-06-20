@@ -46,7 +46,6 @@ import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -368,7 +367,7 @@ class TestLoadIndex:
     def test_load_index_returns_index_on_success(self, monkeypatch):
         import indexer
 
-        sentinel = object()
+        object()
 
         class _StubIndex:
             def load_index(self):
@@ -670,7 +669,7 @@ class TestCmdCategories:
         _patch_gateway(monkeypatch, "compass_categories", payload)
         rc = cli.main(["categories"])
         out = capsys.readouterr().out
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 0
         assert "no categories" in out.lower() or "empty" in out.lower()
 
@@ -826,7 +825,7 @@ class TestCmdAnalytics:
         _patch_gateway(monkeypatch, "compass_analytics", payload)
         rc = cli.main(["analytics"])
         out = capsys.readouterr().out
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 0
         assert "bridge:read_file" in out
         assert "42" in out
@@ -1151,7 +1150,7 @@ class TestCmdSearchExtended:
         monkeypatch.setattr(cli, "_load_index", lambda: _stub_index([]))
         rc = cli.main(["search", "no match"])
         out = capsys.readouterr().out
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         # Empty results = exit 0 with a "no tools matched" message.
         assert rc == 0
         assert "No tools matched" in out or "no match" in out.lower()
@@ -1444,6 +1443,50 @@ class TestCmdDoctorExtended:
         assert rc == 0
         assert "1 configured" in out
 
+    def test_doctor_text_shows_unresolved_vars(self, monkeypatch, capsys):
+        """cli-ux-005: text mode warns on config_unresolved_vars.
+
+        Before the fix, text mode silently dropped this field even though
+        doctor() returns it (only JSON mode surfaced it).
+        """
+        payload = {
+            "version": "2.3.0",
+            "config_path": "x",
+            "backends": {"a": {}},
+            "config_unresolved_vars": ["API_TOKEN", "OLLAMA_HOST"],
+            "ollama_url": "u",
+            "ollama_reachable": True,
+            "index_exists": True,
+        }
+        import config
+
+        monkeypatch.setattr(config, "doctor", lambda: payload)
+        rc = cli.main(["doctor", "--text"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "unresolved config vars" in out
+        assert "API_TOKEN" in out
+        assert "OLLAMA_HOST" in out
+
+    def test_doctor_text_no_unresolved_vars_no_warning(self, monkeypatch, capsys):
+        """Empty/absent config_unresolved_vars prints no unresolved-var line."""
+        payload = {
+            "version": "2.3.0",
+            "config_path": "x",
+            "backends": {"a": {}},
+            "config_unresolved_vars": [],
+            "ollama_url": "u",
+            "ollama_reachable": True,
+            "index_exists": True,
+        }
+        import config
+
+        monkeypatch.setattr(config, "doctor", lambda: payload)
+        rc = cli.main(["doctor", "--text"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "unresolved config vars" not in out
+
 
 # =============================================================================
 # cmd_sync — text-mode success, error envelope, no-backends, FileNotFoundError
@@ -1491,56 +1534,66 @@ def _patch_sync(monkeypatch, *, config_obj=None, sync_result=None, sync_raises=N
 
 
 class TestCmdSyncExtended:
+    # full_sync's real return shape (the shared contract): status,
+    # tools_indexed, backends_synced, connected_backends, failed_backends,
+    # build_result. The old mocks here fabricated tools_added/updated/removed/
+    # duration_seconds/errors — keys full_sync never emits — which masked the
+    # fact that _cmd_sync always printed "+0 ~0 -0" and never warned on a
+    # partial failure (cli-ux-001 / cli-ux-002).
     def test_sync_text_success(self, monkeypatch, capsys):
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 3,
-                "tools_updated": 2,
-                "tools_removed": 1,
-                "duration_seconds": 4.5,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 6,
+                "backends_synced": ["a", "b"],
+                "connected_backends": ["a", "b"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync"])
         out = capsys.readouterr().out
         assert rc == 0
-        assert "+3" in out
-        assert "~2" in out
-        assert "-1" in out
-        assert "4.5" in out
+        # Honest count from tools_indexed — no more fabricated "+0 ~0 -0".
+        assert "6 tools indexed" in out
 
-    def test_sync_text_with_errors(self, monkeypatch, capsys):
+    def test_sync_text_with_failed_backends(self, monkeypatch, capsys):
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 0,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration": 1.0,
-                "errors": ["backend foo timed out"],
+                "status": "complete",
+                "tools_indexed": 4,
+                "backends_synced": ["foo", "bar"],
+                "connected_backends": ["bar"],
+                "failed_backends": ["foo"],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync"])
-        err = capsys.readouterr().err
+        captured = capsys.readouterr()
+        # Warning rides on stderr; sync still succeeds (partial, not fatal).
         assert rc == 0
-        assert "backend error" in err
+        assert "failed to connect" in captured.err
+        assert "foo" in captured.err
+        assert "4 tools indexed" in captured.out
 
     def test_sync_json_mode(self, monkeypatch, capsys):
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 1,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration_seconds": 0.1,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 1,
+                "backends_synced": ["a"],
+                "connected_backends": ["a"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync", "--json"])
         out = capsys.readouterr().out.strip()
         parsed = json.loads(out)
-        assert parsed["tools_added"] == 1
+        assert parsed["tools_indexed"] == 1
         assert rc == 0
 
     def test_sync_no_backends_configured(self, monkeypatch, capsys):
@@ -1557,11 +1610,12 @@ class TestCmdSyncExtended:
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 0,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration_seconds": 0,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 0,
+                "backends_synced": ["a"],
+                "connected_backends": ["a"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync", "--force"])
@@ -1585,11 +1639,12 @@ class TestCmdSyncExtended:
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 0,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration_seconds": 0,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 0,
+                "backends_synced": ["a"],
+                "connected_backends": ["a"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["--no-color", "sync"])
@@ -1614,7 +1669,6 @@ class TestMainDispatch:
     def test_main_unhandled_exception_returns_2(self, monkeypatch, capsys):
         """An exception that bubbles past _cmd_* handlers reaches main's catch."""
         # _build_parser is the easiest target — replace it with a raising stub.
-        original_build = cli._build_parser
 
         class _BadParser:
             def parse_args(self, argv=None):
@@ -1641,6 +1695,60 @@ class TestMainDispatch:
         err = capsys.readouterr().err
         assert rc == 2
         assert "integer" in err.lower()
+
+    @pytest.mark.parametrize("bad_port", ["-1", "0", "99999999", "65536"])
+    def test_main_serve_http_out_of_range_port_returns_2(
+        self, bad_port, monkeypatch, capsys
+    ):
+        """cli-003 regression: ports that parse as int() but fall outside the
+        valid TCP range (1-65535) must be rejected with a usage error and a
+        range hint — never handed to the gateway. Before the fix, int() alone
+        let '-1'/'0'/'99999999' through.
+
+        gateway.main is monkeypatched so that IF a bad port leaked through and
+        the server actually launched, we'd notice (it must not be called).
+        """
+        import gateway
+
+        launched = {"n": 0}
+
+        def fake_gateway_main():
+            launched["n"] += 1
+            return 0
+
+        monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
+        if hasattr(cli, "gateway"):
+            monkeypatch.setattr(cli.gateway, "main", fake_gateway_main, raising=False)
+
+        rc = cli.main(["serve", "--http", bad_port])
+        err = capsys.readouterr().err
+        assert rc == 2, f"port {bad_port!r} should be rejected"
+        assert "range" in err.lower()
+        assert "1-65535" in err
+        # The gateway must NOT have been launched with an out-of-range port.
+        assert launched["n"] == 0
+
+    @pytest.mark.parametrize("good_port", ["1", "8080", "65535"])
+    def test_main_serve_http_in_range_port_accepted(
+        self, good_port, monkeypatch, capsys
+    ):
+        """cli-003 corollary: valid boundary ports (1, 65535) and a normal port
+        are accepted, exported to PORT, and reach the gateway."""
+        import gateway
+
+        seen = {"port": None}
+
+        def fake_gateway_main():
+            seen["port"] = os.environ.get("PORT")
+            return 0
+
+        monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
+        if hasattr(cli, "gateway"):
+            monkeypatch.setattr(cli.gateway, "main", fake_gateway_main, raising=False)
+
+        rc = cli.main(["serve", "--http", good_port])
+        assert rc == 0
+        assert seen["port"] == good_port
 
     def test_main_serve_http_default_8080(self, monkeypatch, capsys):
         """--http with no value AND no PORT env var defaults to 8080."""
@@ -1691,10 +1799,17 @@ class TestMainDispatch:
     def test_main_explicit_serve_invokes_gateway(self, monkeypatch):
         import gateway
 
-        called = {"n": 0}
+        called = {"n": 0, "argv": None}
 
         def fake_gateway_main():
             called["n"] += 1
+            # cli-001: capture argv as gateway.main sees it. The fix neutralizes
+            # sys.argv to ['tool-compass'] so the real gateway's argparse (which
+            # reads sys.argv[1:]) never sees the 'serve' token. Asserting the
+            # captured argv keeps this test honest even though we monkeypatch
+            # main away here — if the neutralization regresses, argv would carry
+            # 'serve' and this assert fails.
+            called["argv"] = list(sys.argv)
             return 0
 
         monkeypatch.setattr(gateway, "main", fake_gateway_main, raising=False)
@@ -1703,6 +1818,68 @@ class TestMainDispatch:
         rc = cli.main(["serve"])
         assert rc == 0
         assert called["n"] == 1
+        # gateway.main must NOT see the 'serve' token in argv.
+        assert "serve" not in called["argv"]
+        assert called["argv"] == ["tool-compass"]
+
+    def test_main_serve_real_gateway_no_argparse_crash(self, monkeypatch):
+        """cli-001 regression: `tool-compass serve` runs the REAL gateway.main
+        (not a monkeypatched fake) and must NOT crash with SystemExit /
+        "unrecognized arguments: serve".
+
+        gateway.main() calls argparse.parse_args() with no args, so it reads
+        sys.argv[1:]. Before the fix, sys.argv was ['tool-compass', 'serve'],
+        and gateway's strict parser raised SystemExit(2). We patch only the
+        blocking server-run primitives (_run_http / mcp.run) so the function
+        returns instead of binding a socket — the argparse path is fully real.
+        """
+        import gateway
+
+        ran = {"http": None, "stdio": 0}
+
+        # Neutralize the blocking transports so main() returns.
+        monkeypatch.setattr(gateway, "_run_http", lambda port: ran.__setitem__("http", port))
+        monkeypatch.setattr(gateway.mcp, "run", lambda *a, **k: ran.__setitem__("stdio", ran["stdio"] + 1))
+        # Ensure stdio path (no PORT) for the bare-serve case.
+        monkeypatch.delenv("PORT", raising=False)
+
+        # Bare `serve` — if the bug is present, gateway argparse sees 'serve'
+        # and raises SystemExit. The fix neutralizes argv so this is clean.
+        try:
+            rc = cli.main(["serve"])
+        except SystemExit as e:  # pragma: no cover - asserts the bug is gone
+            pytest.fail(
+                f"`tool-compass serve` leaked SystemExit({e.code}) from gateway "
+                "argparse — argv was not neutralized (cli-001 regression)."
+            )
+        assert rc == 0
+        # The stdio transport path was reached (PORT unset).
+        assert ran["stdio"] == 1
+
+    def test_main_serve_http_real_gateway_no_argparse_crash(self, monkeypatch):
+        """cli-001 regression for the `serve --http <port>` shape against the
+        REAL gateway.main. The port must arrive via os.environ['PORT'] and the
+        gateway must take the _run_http branch — never choke on argv tokens.
+        """
+        import gateway
+
+        ran = {"http": None}
+        monkeypatch.setattr(gateway, "_run_http", lambda port: ran.__setitem__("http", port))
+        monkeypatch.setattr(gateway.mcp, "run", lambda *a, **k: pytest.fail(
+            "stdio transport reached despite --http 9001 (PORT not exported)"
+        ))
+        monkeypatch.delenv("PORT", raising=False)
+
+        try:
+            rc = cli.main(["serve", "--http", "9001"])
+        except SystemExit as e:  # pragma: no cover - asserts the bug is gone
+            pytest.fail(
+                f"`tool-compass serve --http 9001` leaked SystemExit({e.code}) "
+                "from gateway argparse (cli-001 regression)."
+            )
+        assert rc == 0
+        # Port flowed through PORT env into gateway's HTTP transport.
+        assert ran["http"] == 9001
 
     def test_main_serve_http_empty_port_env_falls_back(self, monkeypatch):
         """--http with no value AND PORT='' in env defaults to 8080."""
@@ -1798,6 +1975,97 @@ class TestDescribeOperationalError:
         assert "DB query failed" in err
         assert "corrupted" in err.lower() or "sync" in err.lower()
 
+    def test_describe_corrupt_db_raises_database_error_not_operational(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """cli-002 regression: a physically corrupt DB raises sqlite3.DatabaseError
+        (the PARENT of OperationalError, NOT a subclass), which the old narrow
+        `except sqlite3.OperationalError` did not catch — leaking a raw traceback
+        past the SD-CLI-005 rebuild-hint path. The fix broadens to DatabaseError.
+
+        We inject sqlite3.DatabaseError directly (NOT OperationalError) so this
+        test FAILS if the catch is narrowed back to OperationalError.
+        """
+        import sqlite3 as sqlite3_module
+
+        # DatabaseError is the base; OperationalError subclasses it. Confirm the
+        # injected type is genuinely NOT an OperationalError so the test probes
+        # the real gap rather than the already-covered subclass.
+        assert not issubclass(sqlite3_module.DatabaseError, sqlite3_module.OperationalError)
+
+        db_path = tmp_path / "tools.db"
+        db_path.write_text("dummy")  # exists -> path check passes
+        import indexer
+
+        monkeypatch.setattr(indexer, "SQLITE_DB_PATH", db_path)
+
+        closed = {"n": 0}
+
+        class _CorruptConn:
+            row_factory = None
+
+            def execute(self, *args, **kwargs):
+                # "file is not a database" surfaces as DatabaseError, not
+                # OperationalError.
+                raise sqlite3_module.DatabaseError("file is not a database")
+
+            def close(self):
+                closed["n"] += 1
+
+        monkeypatch.setattr(cli.sqlite3, "connect", lambda *a, **k: _CorruptConn())
+
+        rc = cli.main(["describe", "anything"])
+        err = capsys.readouterr().err
+        assert rc == 2
+        assert "DB query failed" in err
+        assert "corrupted" in err.lower() or "sync" in err.lower()
+        # cli-002: the conn must be closed even on the error path (no leak).
+        assert closed["n"] == 1
+
+    def test_describe_closes_conn_on_success(self, tmp_path, monkeypatch, capsys):
+        """cli-002 corollary: the happy path also closes the connection exactly
+        once via the finally block (no leak on success either)."""
+        import sqlite3 as sqlite3_module
+
+        db_path = tmp_path / "tools.db"
+        db_path.write_text("dummy")
+        import indexer
+
+        monkeypatch.setattr(indexer, "SQLITE_DB_PATH", db_path)
+
+        closed = {"n": 0}
+
+        class _Cursor:
+            def fetchone(self):
+                # Minimal row supporting __getitem__ access used by _cmd_describe.
+                return {
+                    "name": "x",
+                    "description": "d",
+                    "category": "c",
+                    "server": "s",
+                    "parameters": "{}",
+                    "examples": "[]",
+                    "is_core": 0,
+                }
+
+            def fetchall(self):
+                return []
+
+        class _OkConn:
+            row_factory = None
+
+            def execute(self, *args, **kwargs):
+                return _Cursor()
+
+            def close(self):
+                closed["n"] += 1
+
+        monkeypatch.setattr(cli.sqlite3, "connect", lambda *a, **k: _OkConn())
+        rc = cli.main(["describe", "x"])
+        assert rc == 0
+        assert closed["n"] == 1
+        _ = sqlite3_module  # silence unused in some linters
+
 
 class TestGatewayImportFailure:
     """Cover the `from gateway import X` failure branches for each subcommand."""
@@ -1829,7 +2097,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["categories"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
     def test_audit_gateway_import_fail(self, monkeypatch, capsys):
@@ -1843,7 +2111,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["audit"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
     def test_analytics_gateway_import_fail(self, monkeypatch, capsys):
@@ -1857,7 +2125,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["analytics"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
     def test_chains_gateway_import_fail(self, monkeypatch, capsys):
@@ -1871,7 +2139,7 @@ class TestGatewayImportFailure:
 
         monkeypatch.setattr(builtins, "__import__", fake_import)
         rc = cli.main(["chains"])
-        err = capsys.readouterr().err
+        capsys.readouterr().err
         assert rc == 2
 
 
@@ -1906,3 +2174,307 @@ class TestMainHelpFallback:
         # happens after parsing.
         rc = cli.main(["doctor"])
         assert rc == 2
+
+
+# =============================================================================
+# bootstrap._ollama_has_model — cli-ux-003: respects OLLAMA_URL + no curl
+# dependency (reuses config._ollama_reachable, probes /api/tags via httpx).
+# =============================================================================
+
+
+class TestBootstrapOllamaProbe:
+    def test_returns_false_when_unreachable(self, monkeypatch):
+        import bootstrap
+        import config
+
+        # Reachability gate fails -> short-circuit False, never touches httpx.
+        monkeypatch.setattr(config, "_ollama_reachable", lambda u, t=2.0: False)
+        assert bootstrap._ollama_has_model("http://x:11434", "nomic-embed-text") is False
+
+    def test_true_when_reachable_and_model_present(self, monkeypatch):
+        import bootstrap
+        import config
+        import httpx
+
+        monkeypatch.setattr(config, "_ollama_reachable", lambda u, t=2.0: True)
+
+        class _Resp:
+            status_code = 200
+            text = '{"models":[{"name":"nomic-embed-text:latest"}]}'
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url):
+                # cli-ux-003: must hit the OLLAMA_URL-derived endpoint.
+                assert url == "http://x:11434/api/tags"
+                return _Resp()
+
+        monkeypatch.setattr(httpx, "Client", _Client)
+        assert bootstrap._ollama_has_model("http://x:11434", "nomic-embed-text") is True
+
+    def test_false_when_model_missing(self, monkeypatch):
+        import bootstrap
+        import config
+        import httpx
+
+        monkeypatch.setattr(config, "_ollama_reachable", lambda u, t=2.0: True)
+
+        class _Resp:
+            status_code = 200
+            text = '{"models":[{"name":"llama3:latest"}]}'
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url):
+                return _Resp()
+
+        monkeypatch.setattr(httpx, "Client", _Client)
+        assert (
+            bootstrap._ollama_has_model("http://x:11434", "nomic-embed-text") is False
+        )
+
+
+# =============================================================================
+# cmd_init — onboarding scaffold + MCP-client registration snippet
+# =============================================================================
+#
+# Feature: `tool-compass init`. Resolves the user config path via
+# config.get_config_path() (which honors TOOL_COMPASS_CONFIG), writes a
+# config there (parent dirs created as needed), refuses to clobber an
+# existing config without --force, and prints a Claude Desktop mcpServers
+# snippet. --json emits {created, source, force, overwrote,
+# claude_desktop_config}. We isolate every test by pointing
+# TOOL_COMPASS_CONFIG at a fresh tmp path so the developer's real config is
+# never touched.
+
+
+@pytest.fixture
+def init_config_path(tmp_path, monkeypatch):
+    """Point get_config_path() at a fresh tmp file via TOOL_COMPASS_CONFIG.
+
+    Uses a NESTED dir that does not exist yet so the parent-dir-creation
+    path in _cmd_init is exercised on the happy path.
+    """
+    target = tmp_path / "nested" / "cfg" / "compass_config.json"
+    monkeypatch.setenv("TOOL_COMPASS_CONFIG", str(target))
+    # get_config_path resolves the env var, so the returned path is .resolve()d.
+    return Path(str(target)).resolve()
+
+
+class TestCmdInit:
+    def test_init_creates_file_at_resolved_path(self, init_config_path, capsys):
+        """init writes a config at the TOOL_COMPASS_CONFIG path, creating
+        parent dirs, and exits 0."""
+        assert not init_config_path.exists()
+        rc = cli.main(["init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert init_config_path.exists()
+        # The written file is valid JSON with a backends key (example or
+        # minimal fallback both carry it).
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        assert "backends" in written
+        # The resolved path is echoed to the user.
+        assert str(init_config_path) in out
+
+    def test_init_prints_claude_desktop_snippet(self, init_config_path, capsys):
+        """The pasteable Claude Desktop mcpServers block appears in output."""
+        rc = cli.main(["init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "mcpServers" in out
+        assert "tool-compass" in out
+        # The npx serve form must be present and copyable.
+        assert "@mcptoolshop/tool-compass" in out
+        assert "serve" in out
+
+    def test_init_prints_next_steps(self, init_config_path, capsys):
+        """Next-steps guidance references sync + serve."""
+        rc = cli.main(["init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "sync" in out
+        assert "serve" in out
+        assert "backends" in out.lower()
+
+    def test_init_refuses_overwrite_without_force(self, init_config_path, capsys):
+        """An existing config is NOT clobbered without --force; exit 1 + hint."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {"keep": "me"}}', encoding="utf-8")
+        rc = cli.main(["init"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "already exists" in err.lower()
+        assert "--force" in err
+        # The original content must be untouched.
+        preserved = json.loads(init_config_path.read_text(encoding="utf-8"))
+        assert preserved == {"backends": {"keep": "me"}}
+
+    def test_init_force_overwrites(self, init_config_path, capsys):
+        """--force replaces an existing config and reports the overwrite."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {"old": "value"}}', encoding="utf-8")
+        rc = cli.main(["init", "--force"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        # The file was rewritten — the sentinel "old" key is gone (the scaffold
+        # writes the example/minimal config, neither of which has an "old" key).
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        assert "old" not in written.get("backends", {})
+        assert "verwr" in out.lower() or "overwrote" in out.lower()  # "Overwrote"
+
+    def test_init_json_shape(self, init_config_path, capsys):
+        """--json emits a stable {created, source, force, overwrote, ...} shape."""
+        rc = cli.main(["init", "--json"])
+        out = capsys.readouterr().out.strip()
+        assert rc == 0
+        parsed = json.loads(out)
+        assert parsed["created"] == str(init_config_path)
+        assert parsed["force"] is False
+        assert parsed["overwrote"] is False
+        # The Claude Desktop config is embedded as a structured object.
+        cd = parsed["claude_desktop_config"]
+        assert cd["mcpServers"]["tool-compass"]["command"] == "npx"
+        assert "serve" in cd["mcpServers"]["tool-compass"]["args"]
+
+    def test_init_json_overwrote_flag(self, init_config_path, capsys):
+        """--json with --force over an existing file reports overwrote=True."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {}}', encoding="utf-8")
+        rc = cli.main(["init", "--force", "--json"])
+        out = capsys.readouterr().out.strip()
+        assert rc == 0
+        parsed = json.loads(out)
+        assert parsed["overwrote"] is True
+        assert parsed["force"] is True
+
+    def test_init_json_refuse_no_stdout_json(self, init_config_path, capsys):
+        """Refuse-without-force in --json mode still exits 1 (no created JSON)."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {}}', encoding="utf-8")
+        rc = cli.main(["init", "--json"])
+        captured = capsys.readouterr()
+        assert rc == 1
+        # Error rides on stderr; stdout must not carry a success JSON payload.
+        assert "already exists" in captured.err.lower()
+        assert captured.out.strip() == ""
+
+    def test_init_no_secrets_in_snippet(self, init_config_path, capsys):
+        """The pasteable snippet must NOT embed any token/secret material.
+
+        Asserts against the snippet helper directly (not full stdout) so a
+        tmp-dir name that happens to contain a marker word can't false-positive.
+        """
+        rc = cli.main(["init"])
+        assert rc == 0
+        snippet = cli._claude_desktop_snippet().lower()
+        for marker in ("token", "password", "secret", "api_key", "apikey"):
+            assert marker not in snippet
+
+    def test_init_no_color(self, init_config_path, capsys):
+        """--no-color path emits no ANSI escapes."""
+        rc = cli.main(["--no-color", "init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "\x1b[" not in out
+
+    def test_init_copies_example_when_present(self, init_config_path, monkeypatch, capsys):
+        """When the repo example is locatable, its bytes are copied verbatim —
+        so a field a sibling agent adds to the example is picked up for free."""
+        # Force _locate_example_config to return a temp example carrying a
+        # sentinel field (mimics a future embedding_provider addition).
+        sentinel_example = init_config_path.parent.parent / "example.json"
+        sentinel_example.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_example.write_text(
+            json.dumps({"backends": {}, "embedding_provider": "future_field"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cli, "_locate_example_config", lambda: sentinel_example)
+        rc = cli.main(["init"])
+        assert rc == 0
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        # The sentinel field flowed through untouched (we copy, never reparse).
+        assert written["embedding_provider"] == "future_field"
+
+    def test_init_minimal_fallback_when_no_example(self, init_config_path, monkeypatch, capsys):
+        """When no example is locatable, a minimal valid config is written from
+        the live dataclass defaults (round-trips through to_dict)."""
+        monkeypatch.setattr(cli, "_locate_example_config", lambda: None)
+        rc = cli.main(["init"])
+        assert rc == 0
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        # Minimal config: empty backends skeleton + documented defaults present.
+        assert written["backends"] == {}
+        assert "ollama_url" in written
+        assert "default_top_k" in written
+
+    def test_init_write_failure_returns_1(self, init_config_path, monkeypatch, capsys):
+        """An OSError while writing the config surfaces a clean error + exit 1."""
+        import pathlib
+
+        original_write = pathlib.Path.write_text
+
+        def boom(self, *args, **kwargs):
+            if self == init_config_path:
+                raise OSError("disk full")
+            return original_write(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "write_text", boom)
+        rc = cli.main(["init"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "could not write" in err.lower()
+
+
+class TestInitHelpers:
+    """Direct unit coverage for the init helper functions."""
+
+    def test_claude_desktop_snippet_is_valid_json(self):
+        snippet = cli._claude_desktop_snippet()
+        parsed = json.loads(snippet)
+        server = parsed["mcpServers"]["tool-compass"]
+        assert server["command"] == "npx"
+        assert server["args"] == ["-y", "@mcptoolshop/tool-compass", "serve"]
+
+    def test_claude_desktop_snippet_obj_matches_text(self):
+        obj = cli._claude_desktop_snippet_obj()
+        assert obj == json.loads(cli._claude_desktop_snippet())
+
+    def test_minimal_config_json_round_trips(self):
+        """The minimal-config fallback is valid JSON that load-parses into a
+        CompassConfig via from_dict (defaults round-trip)."""
+        import config
+
+        raw = cli._minimal_config_json()
+        data = json.loads(raw)
+        # from_dict must accept it without raising — it's a real config shape.
+        cfg = config.CompassConfig.from_dict(data)
+        assert cfg.backends == {}
+        # to_dict/from_dict round-trip stability: the parsed config re-serializes
+        # to the same documented-default values.
+        assert cfg.to_dict()["default_top_k"] == data["default_top_k"]
+
+    def test_locate_example_config_finds_repo_example(self):
+        """In a source checkout the repo example sits next to cli.py."""
+        located = cli._locate_example_config()
+        # The repo ships compass_config.example.json next to cli.py, so this
+        # resolves in the test environment.
+        assert located is not None
+        assert located.name == "compass_config.example.json"
+        assert located.is_file()

@@ -26,6 +26,7 @@ import shutil
 import sys
 import re
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,24 @@ class CompassConfig:
     # Embedding settings
     embedding_model: str = "nomic-embed-text"
     ollama_url: str = "http://localhost:11434"
+
+    # Pluggable embedding backend (BE-FT-PE-001). Defaults preserve the
+    # current Ollama behavior exactly.
+    #   embedding_provider: "ollama" (default) | "openai" | "openai-compatible".
+    #     Unknown values warn + fall back to "ollama" (validate_and_clamp).
+    #   embedding_base_url: override the embed endpoint base. None -> use
+    #     ollama_url for the ollama provider; REQUIRED for openai-compatible.
+    #   embedding_api_key: secret for OpenAI-compatible auth (Bearer token).
+    #     Redacted in doctor() dumps; an env override
+    #     (TOOL_COMPASS_EMBEDDING_API_KEY) wins over the file value.
+    #   embedding_query_prefix / embedding_document_prefix: override the
+    #     retrieval-prefix convention. None -> provider default (nomic
+    #     search_* for ollama, empty for openai-compatible).
+    embedding_provider: str = "ollama"
+    embedding_base_url: Optional[str] = None
+    embedding_api_key: Optional[str] = None
+    embedding_query_prefix: Optional[str] = None
+    embedding_document_prefix: Optional[str] = None
 
     # Index settings
     index_dir: str = "./db"
@@ -239,6 +258,24 @@ class CompassConfig:
         # Other settings
         config.embedding_model = data.get("embedding_model", config.embedding_model)
         config.ollama_url = data.get("ollama_url", config.ollama_url)
+
+        # Pluggable embedding backend (BE-FT-PE-001).
+        config.embedding_provider = data.get(
+            "embedding_provider", config.embedding_provider
+        )
+        config.embedding_base_url = data.get(
+            "embedding_base_url", config.embedding_base_url
+        )
+        config.embedding_api_key = data.get(
+            "embedding_api_key", config.embedding_api_key
+        )
+        config.embedding_query_prefix = data.get(
+            "embedding_query_prefix", config.embedding_query_prefix
+        )
+        config.embedding_document_prefix = data.get(
+            "embedding_document_prefix", config.embedding_document_prefix
+        )
+
         config.index_dir = data.get("index_dir", config.index_dir)
         config.auto_sync = data.get("auto_sync", config.auto_sync)
         config.default_top_k = data.get("default_top_k", config.default_top_k)
@@ -311,7 +348,44 @@ class CompassConfig:
         Silent acceptance of out-of-range values was causing debugging pain
         (e.g. negative polling intervals, hot_cache_size=0). Clamp here so
         the surface is always sane even with a hand-edited config file.
+
+        CFG-A-002: COERCE numeric fields BEFORE the range comparisons. A
+        hand-edited config can carry a string/null where a number is expected
+        (e.g. ``"min_confidence": "high"``); comparing before coercing raised
+        TypeError, and from_file's recovery except only catches JSON/OS errors,
+        so startup crashed with a raw traceback. We coerce-or-reset each
+        numeric field up front: if the value can't become the right numeric
+        type, reset it to the class default and warn.
         """
+        # CFG-A-002: coerce-or-reset every numeric field first, so the range
+        # checks below always operate on numbers. (field, caster, default)
+        _defaults = CompassConfig
+        for fname, caster in (
+            ("min_confidence", float),
+            ("default_top_k", int),
+            ("sync_polling_interval", int),
+            ("hot_cache_size", int),
+            ("top_chains_cache_size", int),
+            ("chain_detection_min_occurrences", int),
+            ("ollama_breaker_failure_threshold", int),
+            ("ollama_breaker_open_seconds", float),
+            ("ollama_retry_attempts", int),
+            ("hnsw_m", int),
+            ("hnsw_ef_construction", int),
+            ("hnsw_ef_search", int),
+        ):
+            value = getattr(self, fname)
+            try:
+                # bool is an int subclass; treat it as the numeric it casts to.
+                setattr(self, fname, caster(value))
+            except (TypeError, ValueError):
+                default_value = getattr(_defaults, fname)
+                logger.warning(
+                    f"Config value {fname}={value!r} is not numeric; "
+                    f"resetting to default {default_value!r}"
+                )
+                setattr(self, fname, default_value)
+
         # min_confidence: [0.0, 1.0]
         if not 0.0 <= self.min_confidence <= 1.0:
             original = self.min_confidence
@@ -347,6 +421,18 @@ class CompassConfig:
                 f"Config value hot_cache_size clamped from {original} to {clamped}"
             )
             self.hot_cache_size = clamped
+
+        # top_chains_cache_size: max(0, value). It is used as a slice bound
+        # (chain_indexer.py: chains[:n]); a hand-edited 0/negative would
+        # silently empty/truncate the chain cache with no warning. 0 is allowed
+        # by design — it disables the in-memory chain cache.
+        if self.top_chains_cache_size < 0:
+            original = self.top_chains_cache_size
+            clamped = max(0, int(self.top_chains_cache_size))
+            logger.warning(
+                f"Config value top_chains_cache_size clamped from {original} to {clamped}"
+            )
+            self.top_chains_cache_size = clamped
 
         # chain_detection_min_occurrences: max(2, value). Below 2, every pair
         # of tools becomes a "chain" and the detector drowns in noise.
@@ -419,6 +505,53 @@ class CompassConfig:
                 f"{original} to {self.hnsw_ef_search}"
             )
 
+        # BE-FT-PE-001: validate embedding_provider against the known
+        # providers; an unknown value warns + falls back to "ollama" so a
+        # typo degrades to working behavior rather than breaking the embed
+        # path. Import locally to avoid a config<->embedder import cycle.
+        try:
+            from embedder import known_providers, DEFAULT_PROVIDER
+        except Exception:  # pragma: no cover - embedder import should not fail
+            known_providers = None
+            DEFAULT_PROVIDER = "ollama"
+        provider = self.embedding_provider
+        normalized = provider.strip().lower() if isinstance(provider, str) else None
+        valid = set(known_providers()) if known_providers is not None else None
+        if normalized is None or (valid is not None and normalized not in valid):
+            logger.warning(
+                "Config value embedding_provider=%r is not a known provider; "
+                "falling back to %r%s",
+                provider,
+                DEFAULT_PROVIDER,
+                f" (known: {', '.join(sorted(valid))})" if valid else "",
+            )
+            self.embedding_provider = DEFAULT_PROVIDER
+        else:
+            # Store the normalized (lower-cased, stripped) name.
+            self.embedding_provider = normalized
+
+    def resolved_embedding_base_url(self) -> str:
+        """Return the base URL the embedder should POST to (BE-FT-PE-001).
+
+        For the ollama provider, ``embedding_base_url`` is an optional
+        override of ``ollama_url`` (so the legacy single-URL config keeps
+        working). For openai-compatible, ``embedding_base_url`` is the
+        configured endpoint base; if an operator left it unset we fall back to
+        ``ollama_url`` and log a warning so the misconfiguration is visible
+        rather than silently hitting the Ollama port with the wrong contract.
+        """
+        if self.embedding_base_url:
+            return self.embedding_base_url
+        if self.embedding_provider != "ollama":
+            logger.warning(
+                "embedding_provider=%r but embedding_base_url is unset; "
+                "falling back to ollama_url=%r. Set embedding_base_url to the "
+                "provider endpoint.",
+                self.embedding_provider,
+                self.ollama_url,
+            )
+        return self.ollama_url
+
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
         backends = {}
@@ -449,6 +582,11 @@ class CompassConfig:
             "backends": backends,
             "embedding_model": self.embedding_model,
             "ollama_url": self.ollama_url,
+            "embedding_provider": self.embedding_provider,
+            "embedding_base_url": self.embedding_base_url,
+            "embedding_api_key": self.embedding_api_key,
+            "embedding_query_prefix": self.embedding_query_prefix,
+            "embedding_document_prefix": self.embedding_document_prefix,
             "index_dir": self.index_dir,
             "auto_sync": self.auto_sync,
             "default_top_k": self.default_top_k,
@@ -525,6 +663,72 @@ def get_python_executable() -> str:
     return sys.executable
 
 
+def _env_truthy(value: Optional[str]) -> bool:
+    """Interpret an env-var string as a boolean.
+
+    CFGDOC-01: ``.env.example`` advertises ``TOOL_COMPASS_ANALYTICS_DISABLED``
+    as a flag; users reasonably set it to ``true`` / ``1`` / ``yes``. Treat the
+    common truthy spellings as True and everything else (including the empty
+    string and ``false``/``0``/``no``) as False, so an exported-but-empty var
+    doesn't accidentally disable analytics.
+    """
+    if value is None:
+        return False
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def apply_env_overrides(config: CompassConfig) -> CompassConfig:
+    """Apply env-var overrides that ``.env.example`` documents, in place.
+
+    CFGDOC-01: two vars were advertised in ``.env.example`` but never read —
+    the app honored them only via config-JSON keys, so a user who set the
+    documented env var saw no effect. Wire them here so the documentation is
+    truthful:
+
+    - ``TOOL_COMPASS_ANALYTICS_DISABLED`` (truthy) -> ``analytics_enabled=False``
+    - ``TOOL_COMPASS_HOT_CACHE_SIZE`` (int) -> ``hot_cache_size``
+
+    The hot-cache value flows through ``validate_and_clamp()`` so an out-of-range
+    or non-numeric env value is clamped/reset with the same warning as a
+    hand-edited config file (rather than crashing or silently disabling the
+    cache). Env overrides win over file/default values by design — they are the
+    most specific signal of operator intent.
+    """
+    changed = False
+
+    if "TOOL_COMPASS_ANALYTICS_DISABLED" in os.environ:
+        if _env_truthy(os.environ.get("TOOL_COMPASS_ANALYTICS_DISABLED")):
+            config.analytics_enabled = False
+            changed = True
+
+    raw_cache = os.environ.get("TOOL_COMPASS_HOT_CACHE_SIZE")
+    if raw_cache is not None and raw_cache.strip() != "":
+        try:
+            config.hot_cache_size = int(raw_cache)
+            changed = True
+        except (TypeError, ValueError):
+            logger.warning(
+                f"TOOL_COMPASS_HOT_CACHE_SIZE={raw_cache!r} is not an integer; "
+                "ignoring env override."
+            )
+
+    # BE-FT-PE-001: the embedding API key is a secret — prefer the env var
+    # over a value baked into the config file so operators can keep the key out
+    # of the on-disk config entirely. An empty string is ignored (treated as
+    # "not set") so an exported-but-empty var doesn't blank out a file value.
+    raw_api_key = os.environ.get("TOOL_COMPASS_EMBEDDING_API_KEY")
+    if raw_api_key is not None and raw_api_key.strip() != "":
+        config.embedding_api_key = raw_api_key
+        changed = True
+
+    # Re-clamp so the hot_cache_size env value lands in the same safe range
+    # (and emits the same warning) as a config-file value would.
+    if changed:
+        config.validate_and_clamp()
+
+    return config
+
+
 def get_default_config() -> CompassConfig:
     """
     Get default config with no backends configured.
@@ -534,12 +738,13 @@ def get_default_config() -> CompassConfig:
 
     Uses environment variables for Ollama URL and other settings.
     """
-    return CompassConfig(
+    config = CompassConfig(
         backends={},  # No backends by default - user must configure
         ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
         auto_sync=True,
         progressive_disclosure=True,
     )
+    return apply_env_overrides(config)
 
 
 def get_example_config() -> CompassConfig:
@@ -660,10 +865,17 @@ CONFIG_PATH = get_config_path()
 
 
 def load_config() -> CompassConfig:
-    """Load config from file or return defaults."""
+    """Load config from file or return defaults.
+
+    CFGDOC-01: env overrides (TOOL_COMPASS_ANALYTICS_DISABLED /
+    TOOL_COMPASS_HOT_CACHE_SIZE) are applied on top of the file-loaded config
+    too, so the documented env vars work whether or not a config file exists.
+    They win over file values — the env var is the more specific operator
+    signal. (get_default_config already applies them on the no-file path.)
+    """
     config_path = get_config_path()
     if config_path.exists():
-        return CompassConfig.from_file(config_path)
+        return apply_env_overrides(CompassConfig.from_file(config_path))
     return get_default_config()
 
 
@@ -673,8 +885,56 @@ def load_config() -> CompassConfig:
 _SECRET_FIELD_HINTS = ("_token", "_key", "_secret", "_password")
 
 
+# CFG-A-001: backend sub-fields that carry ${VAR}-resolved secrets. Their KEY
+# names ('Authorization', 'GITHUB_TOKEN', '--password=...') don't all match
+# _SECRET_FIELD_HINTS, so name-based redaction misses them. Redact these
+# STRUCTURALLY — every value (dict) or entry (list) — while keeping the keys
+# visible so the doctor() dump stays diagnosable.
+_SECRET_STRUCT_FIELDS = ("env", "headers", "args")
+
+
+def _redact_structural(value):
+    """Redact a backend env/headers (dict values) or args (list entries),
+    preserving keys/structure so the dump shows e.g. 'Authorization:
+    [REDACTED]' rather than dropping the field entirely."""
+    if isinstance(value, dict):
+        return {k: "[REDACTED]" for k in value}
+    if isinstance(value, list):
+        return ["[REDACTED]" for _ in value]
+    return "[REDACTED]"
+
+
+def redact_url_credentials(value):
+    """CFG-A-001 (post-fix sibling): strip userinfo from an http(s) URL so a
+    credentialed endpoint like ``http://user:${TOKEN}@host:11434`` (ollama_url
+    or a backend ``url``, both ${VAR}-substituted at load) doesn't leak its
+    secret into the doctor()/show_config diagnostic dumps. Host:port is kept
+    for diagnosability. Non-URL / credential-free values pass through."""
+    if not isinstance(value, str) or "://" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+    if not (parts.username or parts.password):
+        return value
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit(
+        (parts.scheme, f"[REDACTED]@{host}", parts.path, parts.query, parts.fragment)
+    )
+
+
 def _redact_config(cfg_dict: dict) -> dict:
-    """Walk the config dict and redact any field whose name hints at a secret."""
+    """Walk the config dict and redact secrets.
+
+    Two layers:
+    1. Name-based — any field whose key hints at a secret (_SECRET_FIELD_HINTS).
+    2. Structural (CFG-A-001) — under each backend, the 'env'/'headers'/'args'
+       fields carry ${VAR}-resolved secrets whose keys don't match the name
+       hints, so their values/entries are redacted structurally with keys kept.
+    """
 
     def walk(obj):
         if isinstance(obj, dict):
@@ -684,12 +944,15 @@ def _redact_config(cfg_dict: dict) -> dict:
                     hint in k.lower() for hint in _SECRET_FIELD_HINTS
                 ):
                     redacted[k] = "[REDACTED]"
+                elif isinstance(k, str) and k in _SECRET_STRUCT_FIELDS:
+                    redacted[k] = _redact_structural(v)
                 else:
                     redacted[k] = walk(v)
             return redacted
         if isinstance(obj, list):
             return [walk(item) for item in obj]
-        return obj
+        # Leaf scalar: scrub embedded URL credentials (ollama_url, backend url).
+        return redact_url_credentials(obj)
 
     return walk(cfg_dict)
 
@@ -775,6 +1038,21 @@ def doctor() -> dict:
 
     unresolved_vars = list(getattr(cfg, "_unresolved_vars", []) or [])
 
+    # CFGDOC-04: surface the analytics degraded state ("sqlite broke, metrics
+    # silently stopped") in bug reports — but ONLY if a live analytics
+    # singleton already exists. We must NOT force-create one here: doctor() is
+    # a read-only snapshot, and instantiating CompassAnalytics would open the
+    # DB and write the schema as a side effect of running diagnostics. Import
+    # the module to read its singleton without constructing the class.
+    analytics_health: Optional[dict] = None
+    try:
+        import analytics as _analytics_mod
+
+        if _analytics_mod._analytics_instance is not None:
+            analytics_health = _analytics_mod._analytics_instance.get_health()
+    except Exception as e:
+        logger.debug(f"doctor(): could not read analytics health: {e}")
+
     return {
         "version": __version__,
         "python_version": sys.version,
@@ -794,7 +1072,14 @@ def doctor() -> dict:
         "analytics_exists": analytics_exists,
         "analytics_size_bytes": analytics_size,
         "analytics_schema_version": analytics_schema_version,
-        "ollama_url": cfg.ollama_url,
+        # CFGDOC-04: None when no live analytics singleton exists (e.g. a fresh
+        # `python config.py` run); otherwise the {'degraded', 'reason'} health
+        # dict so bug reports capture the "metrics silently stopped" mode.
+        "analytics_health": analytics_health,
+        # CFG-A-001 sibling: scrub any user:pass@ embedded in the URL before
+        # it lands in a pasteable bug-report dump. The reachability probe below
+        # still uses the raw cfg value (it returns only a bool, not the URL).
+        "ollama_url": redact_url_credentials(cfg.ollama_url),
         "ollama_reachable": _ollama_reachable(cfg.ollama_url),
         "deprecated_tools": deprecated_tools_count,
     }

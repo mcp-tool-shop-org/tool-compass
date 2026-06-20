@@ -86,12 +86,11 @@ jobs:
         continue-on-error: true
         uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
 
-      # CDS-FT-001: SCORECARD drift guard. Soft-fail for now — shipcheck
-      # markdown output is still settling. Flip continue-on-error to false
-      # once the format stabilizes.
-      # TODO(swarm): enforce once shipcheck JSON format stabilizes
+      # CDS-FT-001: SCORECARD drift guard — now BLOCKING. The dogfood-swarm v3
+      # pass fixed CIDOCS-01 (regenerate-scorecard.sh forces NO_COLOR + strips
+      # ANSI), so `--check` diff-cleans deterministically in non-TTY CI. The
+      # committed SCORECARD was verified in sync at flip time.
       - name: Verify SCORECARD is in sync
-        continue-on-error: true
         run: |
           if [ -f Makefile ] && grep -q "^verify-scorecard:" Makefile; then
             make verify-scorecard
@@ -202,12 +201,13 @@ jobs:
           # retention and is plenty of window for incident response.
           retention-days: 14
 
+      # Now BLOCKING. The dogfood-swarm v3 pass reviewed the CVE baseline:
+      # `pip-audit -r requirements.txt` reports no known vulnerabilities. The
+      # report-only artifact step above still runs for the full JSON snapshot.
       - name: Audit dependencies for vulnerabilities
         if: matrix.python-version == '3.11' && matrix.os == 'ubuntu-latest'
         run: |
           pip-audit -r requirements.txt
-        # TODO(swarm): enforce after CVE baseline reviewed — issue #TBD
-        continue-on-error: true  # Warn-only until clean baseline established
 
   # TST-FT-002: nightly Hypothesis fuzzing. Runs on schedule (Mon/Wed/Fri 09:00
   # UTC) or manually via workflow_dispatch. Never runs on push/PR — nightly-only.

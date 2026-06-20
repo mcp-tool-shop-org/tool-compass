@@ -34,6 +34,7 @@ import asyncio
 import argparse
 import logging
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -56,7 +57,13 @@ except ImportError:
 
 from indexer import CompassIndex, SearchResult
 from tool_manifest import ToolDefinition
-from config import load_config, CompassConfig, CONFIG_PATH
+from config import (
+    load_config,
+    CompassConfig,
+    CONFIG_PATH,
+    redact_url_credentials,
+    _redact_structural,
+)
 # Use simple backend client to avoid anyio conflicts when nested inside another MCP server
 from backend_client_simple import SimpleBackendManager as BackendManager
 from analytics import CompassAnalytics, get_analytics
@@ -64,8 +71,13 @@ from sync_manager import SyncManager, get_sync_manager
 from chain_indexer import ChainIndexer, get_chain_indexer
 
 # Configure logging
+# CFGDOC-01: honor the LOG_LEVEL env var that .env.example advertises and
+# docker-compose's dev profile sets to DEBUG. Previously hardcoded to INFO,
+# making the documented dev-debug workflow a silent no-op. Unknown values fall
+# back to INFO via getattr's default.
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -101,7 +113,7 @@ _health_state: Dict[str, Any] = {
 }
 
 
-# BE-B-011: registered by _run_http() so health-state changes invalidate
+# BE-B-011: registered by build_http_app() so health-state changes invalidate
 # the /ready cache immediately. Module-level so tests don't import HTTP code.
 _ready_cache_invalidators: List[Any] = []
 
@@ -287,6 +299,42 @@ def _augment_with_health(response: Dict[str, Any]) -> Dict[str, Any]:
     return response
 
 
+def _cold_start_envelope(
+    error: BaseException, *, trace_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Structured envelope for the get_index() cold-start RuntimeError.
+
+    GW-A-001: get_index() raises a RuntimeError when there is no baked index
+    on disk AND Ollama is unreachable — it cannot build the index without
+    embeddings. The handlers that call get_index() at the top of their body
+    (compass / describe / compass_categories) must surface that as the same
+    structured `service_unavailable` envelope that compass_status /
+    compass_audit already degrade into, never as a raw stack to the caller.
+
+    The code distinguishes the two halves of the precondition: if Ollama is
+    known-down we report `ollama_unavailable`; otherwise the index itself is
+    the blocker (`index_unhealthy`). Both are retryable — the operator can
+    bring Ollama up or run a sync and retry the same call.
+    """
+    ollama_down = not _health_state.get("ollama_available", True)
+    code = "ollama_unavailable" if ollama_down else "index_unhealthy"
+    title = "Ollama unavailable" if ollama_down else "Index unhealthy"
+    return _augment_with_health(
+        _error_envelope(
+            code=code,
+            title=title,
+            detail=f"Tool index unavailable on cold start: {error}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+            suggestions=[
+                "Start Ollama: ollama serve",
+                "Run python gateway.py --sync to build the index",
+            ],
+        )
+    )
+
+
 # Process-wide counters for /metrics (BE-B-002).
 # Kept here so all four signals live in one place. Locks unnecessary in MCP
 # stdio mode (single async event loop); in HTTP mode the GIL + atomic int
@@ -315,13 +363,27 @@ def _record_breaker_transition(from_state: str, to_state: str) -> None:
     _metric_counters["circuit_breaker_transitions_total"][key] += 1
 
 
-# Async locks to prevent race conditions during singleton initialization
-_index_lock = asyncio.Lock()
-_backend_lock = asyncio.Lock()
-_analytics_lock = asyncio.Lock()
-_sync_manager_lock = asyncio.Lock()
-_chain_indexer_lock = asyncio.Lock()
-_startup_sync_lock = asyncio.Lock()
+# SC-001 sibling: per-event-loop singleton-init locks. A module-global
+# asyncio.Lock binds its internal waiter Future to the first loop that awaits
+# it under contention, then raises "bound to a different event loop" when the
+# CLI (fresh asyncio.run per subcommand) or the Gradio UI (worker-thread
+# asyncio.run) awaits the same lock from another loop. Key locks on the running
+# loop id instead — mirrors embedder._get_global_embed_semaphore.
+_loop_init_locks: Dict[int, Dict[str, "asyncio.Lock"]] = {}
+
+
+def _loop_lock(name: str) -> "asyncio.Lock":
+    """Return the named singleton-init lock for the running event loop."""
+    loop = asyncio.get_running_loop()
+    locks = _loop_init_locks.get(id(loop))
+    if locks is None:
+        locks = {}
+        _loop_init_locks[id(loop)] = locks
+    lock = locks.get(name)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[name] = lock
+    return lock
 
 
 def get_config() -> CompassConfig:
@@ -351,7 +413,7 @@ async def get_index() -> CompassIndex:
         return _compass_index
 
     # Slow path: acquire lock and check again
-    async with _index_lock:
+    async with _loop_lock("index"):
         # Double-check after acquiring lock (another coroutine may have initialized)
         if _compass_index is not None:
             return _compass_index
@@ -425,7 +487,7 @@ async def get_backends() -> BackendManager:
         return _backend_manager
 
     # Slow path with lock
-    async with _backend_lock:
+    async with _loop_lock("backend"):
         if _backend_manager is not None:
             return _backend_manager
 
@@ -451,7 +513,7 @@ async def get_analytics_instance() -> Optional[CompassAnalytics]:
         return _analytics
 
     # Slow path with lock
-    async with _analytics_lock:
+    async with _loop_lock("analytics"):
         if _analytics is not None:
             return _analytics
 
@@ -478,11 +540,19 @@ async def get_sync_manager_instance() -> Optional[SyncManager]:
         return _sync_manager
 
     # Slow path with lock
-    async with _sync_manager_lock:
+    async with _loop_lock("sync_manager"):
         if _sync_manager is not None:
             return _sync_manager
 
-        index = await get_index()
+        # GW-A-001 sibling: get_index() raises RuntimeError on cold start (no
+        # baked index + Ollama down). Returning None here ("sync features
+        # unavailable until an index exists") keeps that from escaping callers
+        # like compass()'s maybe_startup_sync() as a raw stack.
+        try:
+            index = await get_index()
+        except RuntimeError as e:
+            logger.warning(f"sync manager unavailable on cold start: {e}")
+            return None
         backends = await get_backends()
         _sync_manager = get_sync_manager(config, index, backends)
 
@@ -506,11 +576,16 @@ async def get_chain_indexer_instance() -> Optional[ChainIndexer]:
         return _chain_indexer
 
     # Slow path with lock
-    async with _chain_indexer_lock:
+    async with _loop_lock("chain_indexer"):
         if _chain_indexer is not None:
             return _chain_indexer
 
-        index = await get_index()
+        # GW-A-001 sibling: same cold-start guard as get_sync_manager_instance.
+        try:
+            index = await get_index()
+        except RuntimeError as e:
+            logger.warning(f"chain indexer unavailable on cold start: {e}")
+            return None
         analytics = await get_analytics_instance()
         chain_indexer = get_chain_indexer(index.embedder, analytics)
 
@@ -542,18 +617,27 @@ async def maybe_startup_sync():
         return
 
     # Slow path with lock
-    async with _startup_sync_lock:
+    async with _loop_lock("startup_sync"):
         # Double-check after acquiring lock
         if _startup_sync_done:
             return
 
-        _startup_sync_done = True
+        # GW-A-001 sibling: do NOT latch _startup_sync_done before the work.
+        # get_sync_manager_instance() returns None on cold start (index not
+        # ready); leave the flag unset there so the next call retries once the
+        # index/Ollama is available. Only latch once a sync actually ran (or
+        # sync is disabled), so a cold-start deferral is not permanent.
         sync_manager = await get_sync_manager_instance()
-        if sync_manager:
-            try:
-                await sync_manager.sync_if_needed()
-            except Exception as e:
-                logger.warning(f"Startup sync failed: {e}")
+        if sync_manager is None:
+            if not get_config().auto_sync:
+                _startup_sync_done = True  # sync disabled: nothing to do, ever
+            # else cold start — leave unset to retry on a later call
+            return
+        try:
+            await sync_manager.sync_if_needed()
+        except Exception as e:
+            logger.warning(f"Startup sync failed: {e}")
+        _startup_sync_done = True
 
 
 # =============================================================================
@@ -605,13 +689,22 @@ def _lexical_search_fallback(
 
     Each match is already in the response-envelope shape (``tool``,
     ``description``, ``server``, ``category``, ``confidence``, ``degraded``).
-    Confidence is a coarse heuristic: 0.6 for name match, 0.4 for description
-    match — enough to produce a sensible ordering without pretending it's a
-    real similarity score.
+    Confidence is a coarse heuristic: 0.6 for a whole-query name substring,
+    0.4 for a whole-query description substring, 0.3 for a row that only
+    matched on an individual token — enough to produce a sensible ordering
+    without pretending it's a real similarity score.
+
+    GW-A-003: the query is tokenized on whitespace and each token contributes
+    its own ``(name LIKE ? OR description LIKE ?)`` clause OR'd together, so a
+    multi-word degraded-mode intent like "read file" still matches a tool
+    named ``read_file`` whose name never contains the literal "read file"
+    substring. A row that matched only via a token (not the whole query) takes
+    the 0.3 confidence tier — previously unreachable dead code because the SQL
+    used a single whole-query needle.
 
     BE-B-007: empty queries return [] immediately rather than '%%' matching
-    the whole catalog. BE-A-007: % and _ in user input are escaped so they
-    don't act as wildcards.
+    the whole catalog. BE-A-007: % and _ in each token are escaped so they
+    don't act as wildcards (the ESCAPE clause stays paired with every LIKE).
     """
     if not index or not getattr(index, "db", None):
         return []
@@ -620,12 +713,23 @@ def _lexical_search_fallback(
     if not q:
         return []
 
-    needle = f"%{_escape_like(q)}%"
-    where = [
-        "(lower(name) LIKE lower(?) ESCAPE '\\' "
-        "OR lower(description) LIKE lower(?) ESCAPE '\\')"
-    ]
-    params: List[Any] = [needle, needle]
+    # Per-token LIKE: split on whitespace, drop empties, and fall back to the
+    # whole query when tokenization yields nothing (e.g. punctuation-only).
+    tokens = [t for t in q.split() if t]
+    if not tokens:
+        tokens = [q]
+
+    token_clauses: List[str] = []
+    params: List[Any] = []
+    for tok in tokens:
+        needle = f"%{_escape_like(tok)}%"
+        token_clauses.append(
+            "lower(name) LIKE lower(?) ESCAPE '\\' "
+            "OR lower(description) LIKE lower(?) ESCAPE '\\'"
+        )
+        params.extend([needle, needle])
+
+    where = ["(" + " OR ".join(token_clauses) + ")"]
     if category:
         where.append("category = ?")
         params.append(category)
@@ -651,7 +755,7 @@ def _lexical_search_fallback(
         elif q_lower in desc_lower:
             confidence = 0.4
         else:
-            # Matched via per-token LIKE but not a direct substring — neutral score
+            # Matched via per-token LIKE but not a whole-query substring.
             confidence = 0.3
         scored.append({
             "tool": row["name"],
@@ -727,7 +831,15 @@ async def compass(
     # Check for sync on first call
     await maybe_startup_sync()
 
-    index = await get_index()
+    # GW-A-001: get_index() raises RuntimeError on cold start (no baked index
+    # AND Ollama unreachable). Surface that as the structured
+    # service_unavailable envelope instead of letting it bubble as a raw
+    # stack — mirrors compass_status / compass_audit.
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        logger.error(f"[compass] [{trace_id}] index unavailable on cold start: {e}")
+        return _cold_start_envelope(e, trace_id=trace_id)
 
     # Search tools — on embedder/Ollama failure fall back to lexical LIKE
     # over the existing tools table so users keep getting results.
@@ -896,7 +1008,13 @@ async def describe(tool_name: str) -> Dict[str, Any]:
     trace_id = uuid.uuid4().hex[:8]
     logger.info(f"[describe] [{trace_id}] tool_name={tool_name!r}")
 
-    index = await get_index()
+    # GW-A-001: surface the cold-start RuntimeError as a structured envelope
+    # rather than a raw stack (mirrors compass_status / compass_audit).
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        logger.error(f"[describe] [{trace_id}] index unavailable on cold start: {e}")
+        return _cold_start_envelope(e, trace_id=trace_id)
 
     # Try to find in index first (from manifest).
     # GW-B-009: trap sqlite errors so the user sees "index unhealthy" + a
@@ -919,8 +1037,22 @@ async def describe(tool_name: str) -> Dict[str, Any]:
             _health_state["index_available"] = True
 
         if row:
-            params = json.loads(row["parameters"]) if row["parameters"] else {}
-            examples = json.loads(row["examples"]) if row["examples"] else []
+            # GW-A-002: a malformed JSON blob in the index row must NOT raise
+            # an uncaught JSONDecodeError. Degrade the same way a sqlite error
+            # does — flag the index unhealthy and fall back to {}/[] so the
+            # caller still gets a usable (if partial) schema.
+            try:
+                params = json.loads(row["parameters"]) if row["parameters"] else {}
+                examples = json.loads(row["examples"]) if row["examples"] else []
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.error(
+                    f"[describe] [{trace_id}] malformed index JSON for "
+                    f"{tool_name!r}: {type(e).__name__}: {e}"
+                )
+                _health_state["index_available"] = False
+                _health_state["last_index_error"] = f"{type(e).__name__}: {e}"
+                params = {}
+                examples = []
 
             response = {
                 "trace_id": trace_id,
@@ -1148,7 +1280,16 @@ async def compass_categories() -> Dict[str, Any]:
 
     Use this to understand what kinds of tools are available before searching.
     """
-    index = await get_index()
+    trace_id = uuid.uuid4().hex[:8]
+    # GW-A-001: surface the cold-start RuntimeError as a structured envelope
+    # rather than a raw stack (mirrors compass_status / compass_audit).
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        logger.error(
+            f"[compass_categories] [{trace_id}] index unavailable on cold start: {e}"
+        )
+        return _cold_start_envelope(e, trace_id=trace_id)
     stats = index.get_stats()
 
     response = {
@@ -1673,8 +1814,14 @@ async def compass_audit(
 # =============================================================================
 
 
-async def sync_from_backends():
-    """Sync tool definitions from live backend servers and rebuild index."""
+async def sync_from_backends() -> bool:
+    """Sync tool definitions from live backend servers and rebuild index.
+
+    Returns True when the index was rebuilt, False when the sync indexed
+    nothing (no backends connected, no tools discovered, or Ollama
+    unavailable). GW-SB-001: the caller turns a False into a non-zero exit
+    so CI/deploy wrappers can't mistake an empty sync for success.
+    """
 
     print("\n" + "=" * 60)
     print("  TOOL COMPASS - INDEX SYNC")
@@ -1702,7 +1849,7 @@ async def sync_from_backends():
     if connected == 0:
         print("\n❌ No backends connected. Check that servers are running.")
         print("   Hint: Start MCP servers or check compass_config.json")
-        return
+        return False
 
     # Step 3: Discover tools
     print("\n[3/4] Discovering tools...")
@@ -1712,7 +1859,7 @@ async def sync_from_backends():
     if not tools:
         print("\n❌ No tools discovered. Backends may be misconfigured.")
         await manager.disconnect_all()
-        return
+        return False
 
     # Convert to ToolDefinition format for indexing
     print("      Converting to index format...", end=" ", flush=True)
@@ -1760,7 +1907,7 @@ async def sync_from_backends():
         print("   1. ollama serve")
         print("   2. ollama pull nomic-embed-text")
         await manager.disconnect_all()
-        return
+        return False
     print("OK")
 
     print("      Generating embeddings and building index...")
@@ -1778,6 +1925,8 @@ async def sync_from_backends():
     print(f"  Build time: {result['total_time']:.2f}s")
     print("  Index ready for queries")
     print("-" * 60 + "\n")
+
+    return True
 
 
 def categorize_tool(name: str, description: str) -> str:
@@ -1815,7 +1964,22 @@ async def run_tests():
     print("TOOL COMPASS GATEWAY - TEST SUITE")
     print("=" * 60)
 
-    index = await get_index()
+    # GW-SB-002: get_index() raises RuntimeError on cold start (no baked index
+    # AND Ollama unreachable) — the same error the MCP tools convert to a
+    # structured envelope. Surface the human remediation to stderr instead of a
+    # raw traceback, then exit non-zero so CLI callers see the failure.
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        import sys
+
+        print(
+            "❌ No index yet — run 'python gateway.py --sync' first, "
+            "ensure 'ollama serve' is running.",
+            file=sys.stderr,
+        )
+        print(f"   ({e})", file=sys.stderr)
+        sys.exit(1)
     stats = index.get_stats()
 
     print(f"\nIndex: {stats['total_tools']} tools")
@@ -1891,7 +2055,8 @@ def show_config():
     print(f"Progressive disclosure: {config.progressive_disclosure}")
     print(f"Auto sync: {config.auto_sync}")
     print(f"Embedding model: {config.embedding_model}")
-    print(f"Ollama URL: {config.ollama_url}")
+    # CFG-A-001 sibling: scrub credentials embedded in the URL before printing.
+    print(f"Ollama URL: {redact_url_credentials(config.ollama_url)}")
     print(f"Default top_k: {config.default_top_k}")
     print(f"Min confidence: {config.min_confidence}")
 
@@ -1901,30 +2066,39 @@ def show_config():
         print(f"  Type: {backend.type}")
         if hasattr(backend, "command"):
             print(f"  Command: {backend.command}")
+            # backend.args carries ${VAR}-resolved secrets (e.g.
+            # --password=...) exactly like env/headers, so redact each entry
+            # rather than printing it raw. (CFG-A-001 sibling.)
+            redacted_args = _redact_structural(backend.args)
             print(
-                f"  Args: {backend.args[:2]}..."
-                if len(backend.args) > 2
-                else f"  Args: {backend.args}"
+                f"  Args: {redacted_args[:2]}..."
+                if len(redacted_args) > 2
+                else f"  Args: {redacted_args}"
             )
 
 
-async def async_main(args):
-    """Handle async CLI operations."""
+async def async_main(args) -> bool:
+    """Handle async CLI operations.
+
+    Returns True on success, False when --sync indexed nothing (GW-SB-001).
+    """
     if args.sync:
-        await sync_from_backends()
+        return await sync_from_backends()
     elif args.test:
         await run_tests()
+    return True
 
 
-def _run_http(port: int) -> None:
-    """Run the MCP gateway in HTTP mode with /health, /ready, /metrics.
+def build_http_app():
+    """Construct the gateway's HTTP ASGI app with the ops endpoints attached.
 
-    SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
-    Binding to a non-loopback interface exposes RCE-class surface. The HOST env
-    var defaults to 127.0.0.1 (loopback). Only bind to public interfaces when
-    running behind an authenticated reverse proxy (Fly.io edge, etc.).
+    Registers /health, /ready and /metrics on FastMCP's custom Starlette route
+    list (idempotently) and returns ``mcp.streamable_http_app()`` — the very
+    app ``_run_http`` serves. Exposed at module scope (GW-FT-003) so tests and
+    operators can mount the app, e.g. via ``starlette.testclient.TestClient``,
+    without binding a socket. The route handlers below are byte-for-byte the
+    ones used in production; nothing about their runtime behavior changes.
     """
-    import os
     from starlette.routing import Route
     from starlette.responses import JSONResponse, PlainTextResponse
 
@@ -1942,9 +2116,9 @@ def _run_http(port: int) -> None:
         _ready_cache["at"] = 0.0
         _ready_cache["status_code"] = 0
 
-    # BE-B-011: register a hook so _mark_ollama_down() can drop the cache
-    # immediately rather than waiting for the next 2s TTL window.
-    _ready_cache_invalidators.append(_invalidate_local_ready_cache)
+    # BE-B-011: a hook so _mark_ollama_down() can drop the cache immediately
+    # rather than waiting for the next 2s TTL window — registered once, in the
+    # guarded block below alongside the routes.
 
     async def health(_request):
         return JSONResponse({
@@ -2174,7 +2348,7 @@ def _run_http(port: int) -> None:
         # for higher resolution).
         lines.append("# HELP tool_compass_embedder_queue_wait_seconds p95 wait time for embedder concurrency slot.")
         lines.append("# TYPE tool_compass_embedder_queue_wait_seconds gauge")
-        lines.append(f"# UNIT tool_compass_embedder_queue_wait_seconds seconds")
+        lines.append("# UNIT tool_compass_embedder_queue_wait_seconds seconds")
         lines.append(
             f"tool_compass_embedder_queue_wait_seconds {_float_fmt((embed_qw_p95_ms or 0.0) / 1000.0)}"
         )
@@ -2323,13 +2497,36 @@ def _run_http(port: int) -> None:
         )
 
     # Add health / ready / metrics routes to FastMCP's custom routes
-    # (included in streamable_http_app).
-    mcp._custom_starlette_routes.append(Route("/health", health, methods=["GET"]))
-    mcp._custom_starlette_routes.append(Route("/ready", ready, methods=["GET"]))
-    mcp._custom_starlette_routes.append(Route("/metrics", metrics, methods=["GET"]))
+    # (included in streamable_http_app). Guarded against the *current* route
+    # list so repeated build_http_app() calls don't stack duplicate routes —
+    # keyed on path rather than a module flag so a test that swaps in a fresh
+    # _custom_starlette_routes still gets its handlers registered.
+    handlers = {"/health": health, "/ready": ready, "/metrics": metrics}
+    existing = {getattr(r, "path", None) for r in mcp._custom_starlette_routes}
+    if "/ready" not in existing:
+        # First registration onto this list also wires the cache invalidator
+        # so _mark_ollama_down() can drop the cached /ready result immediately.
+        _ready_cache_invalidators.append(_invalidate_local_ready_cache)
+    for path, handler in handlers.items():
+        if path not in existing:
+            mcp._custom_starlette_routes.append(Route(path, handler, methods=["GET"]))
 
-    # Use FastMCP's built-in HTTP runner (handles lifespan + session manager init)
+    return mcp.streamable_http_app()
+
+
+def _run_http(port: int) -> None:
+    """Run the MCP gateway in HTTP mode with /health, /ready, /metrics.
+
+    SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
+    Binding to a non-loopback interface exposes RCE-class surface. The HOST env
+    var defaults to 127.0.0.1 (loopback). Only bind to public interfaces when
+    running behind an authenticated reverse proxy (Fly.io edge, etc.).
+    """
+    import os
     from mcp.server.transport_security import TransportSecuritySettings
+
+    # Build + register the ops routes (idempotent) before the server starts.
+    build_http_app()
 
     host = os.environ.get("HOST", "127.0.0.1")
     if host not in ("127.0.0.1", "localhost", "::1"):
@@ -2397,7 +2594,18 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
     if args.config:
         show_config()
     elif args.sync or args.test:
-        asyncio.run(async_main(args))
+        # GW-SB-001: a sync that connected no backends / discovered no tools /
+        # found Ollama down returns False — exit non-zero with a one-line hint
+        # so CI/deploy wrappers don't mistake an empty sync for success.
+        ok = asyncio.run(async_main(args))
+        if not ok:
+            import sys
+
+            print(
+                "Index NOT rebuilt: 0 backends connected (or no tools / Ollama down).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         # NOTE: Never print() to stdout in MCP mode - it corrupts JSON-RPC!
         # Use stderr for diagnostics if needed
@@ -2425,9 +2633,26 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         import os
         port = os.environ.get("PORT")
         if port:
+            # GW-SB-003: a malformed PORT used to raise a bare ValueError with
+            # no hint that PORT was the culprit. Catch it, name the variable and
+            # the expected range, and exit 2 (usage error).
+            try:
+                port_num = int(port)
+            except ValueError:
+                print(
+                    f"Invalid PORT={port!r}: must be an integer 1-65535",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if not 1 <= port_num <= 65535:
+                print(
+                    f"Invalid PORT={port!r}: must be an integer 1-65535",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             host = os.environ.get("HOST", "127.0.0.1")
             print(f"Transport: streamable-http on {host}:{port}", file=sys.stderr)
-            _run_http(int(port))
+            _run_http(port_num)
         else:
             print("Transport: stdio", file=sys.stderr)
             mcp.run()

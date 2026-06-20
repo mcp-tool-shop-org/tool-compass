@@ -7,7 +7,7 @@ Tests tool chain/workflow indexing, searching, and management.
 import pytest
 import json
 import numpy as np
-from unittest.mock import Mock, AsyncMock, patch
+from unittest.mock import patch
 import sqlite3
 
 from chain_indexer import (
@@ -494,13 +494,41 @@ class TestChainSearch:
     async def test_search_chains_filters_by_confidence(
         self, chain_indexer, sample_chains
     ):
-        """Should filter results below min_confidence."""
+        """Should filter results below min_confidence.
+
+        TESTS-003: the previous form was `for r in results: assert r.score
+        >= 0.99` with NO `len(results) > 0` guard, so an empty result set
+        passed vacuously — the confidence filter could have been completely
+        broken and this test would still be green. The conftest mock_embedder
+        is deterministic per text within a process: embed_query("search_query:
+        Q") == embed("search_query: Q"). We exploit that to seed ONE chain
+        whose stored embedding text is exactly the query embedding text, so a
+        cosine score of ~1.0 (>= 0.99) is GUARANTEED — and assert len >= 1
+        before the loop. We additionally assert monotonicity (a 0.0 floor
+        returns >= as many results as the 0.99 floor) so a regression that
+        stops filtering, or returns nothing when it should match, fails.
+        """
+        query = "selfmatch query"
+        # A chain whose embedding_text equals the query's embedding text:
+        # embed(embedding_text) == embed_query(query) == mock_embed(
+        # "search_query: selfmatch query") -> cosine 1.0.
+        self_match = ToolChain(
+            id=99,
+            name="self_match_chain",
+            tools=["bridge:read_file"],
+            description="self match",
+            use_count=1,
+            is_auto_detected=False,
+            embedding_text=f"search_query: {query}",
+        )
+        chains = sample_chains + [self_match]
+
         db = chain_indexer._get_db()
-        for chain in sample_chains:
+        for chain in chains:
             db.execute(
                 """
-                INSERT INTO tool_chains (id, chain_name, chain_tools, description, use_count, is_auto_detected)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO tool_chains (id, chain_name, chain_tools, description, use_count, is_auto_detected, embedding_text)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     chain.id,
@@ -509,17 +537,33 @@ class TestChainSearch:
                     chain.description,
                     chain.use_count,
                     chain.is_auto_detected,
+                    chain.embedding_text,
                 ),
             )
         db.commit()
 
-        await chain_indexer.build_chain_index(sample_chains)
+        await chain_indexer.build_chain_index(chains)
 
-        results = await chain_indexer.search_chains("random query", min_confidence=0.99)
+        high_floor = await chain_indexer.search_chains(
+            query, top_k=10, min_confidence=0.99
+        )
+        low_floor = await chain_indexer.search_chains(
+            query, top_k=10, min_confidence=0.0
+        )
 
-        # All results should be above threshold
-        for r in results:
+        # Non-vacuous: the self-match chain guarantees at least one >= 0.99 hit.
+        assert len(high_floor) >= 1, (
+            "TESTS-003 regression: a guaranteed self-match returned no "
+            "results above the 0.99 floor — the confidence filter or search "
+            "is broken (or vacuously empty)."
+        )
+        # Every returned result genuinely clears the threshold.
+        for r in high_floor:
             assert r.score >= 0.99
+        # Monotonicity: lowering the floor can only ADD results, never remove.
+        assert len(low_floor) >= len(high_floor), (
+            "lowering min_confidence must not reduce the result count"
+        )
 
 
 # =============================================================================
@@ -865,3 +909,132 @@ class TestSingleton:
                     assert indexer1 is indexer2
 
                     indexer1.close()
+
+
+# =============================================================================
+# SC-004: EMBEDDING_DIM single-source-of-truth + persisted-dim sanity check
+# =============================================================================
+
+
+class TestEmbeddingDimSanity:
+    """SC-004 regression: chain_indexer must NOT hardcode its own
+    EMBEDDING_DIM and must detect a model-dim change with an actionable
+    message instead of swallowing an opaque error in the bare except in
+    load_chain_index.
+    """
+
+    def test_embedding_dim_is_imported_from_embedder(self):
+        """chain_indexer.EMBEDDING_DIM must be the same object as
+        embedder.EMBEDDING_DIM (single source of truth), not a local literal.
+        """
+        import embedder as embedder_module
+        import chain_indexer as ci
+
+        assert ci.EMBEDDING_DIM == embedder_module.EMBEDDING_DIM
+        # If the embedder's dim ever changes, the chain indexer follows it.
+        assert ci.EMBEDDING_DIM is embedder_module.EMBEDDING_DIM
+
+    @staticmethod
+    def _seed_db(chain_indexer, sample_chains):
+        """Insert chains into the DB so load_chain_index has rows to map
+        (load returns False on an empty DB before reaching the dim check).
+        """
+        db = chain_indexer._get_db()
+        for chain in sample_chains:
+            db.execute(
+                """
+                INSERT INTO tool_chains (id, chain_name, chain_tools, description, use_count, is_auto_detected)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """,
+                (
+                    chain.id,
+                    chain.name,
+                    json.dumps(chain.tools),
+                    chain.description,
+                    chain.use_count,
+                    chain.is_auto_detected,
+                ),
+            )
+        db.commit()
+
+    @pytest.mark.asyncio
+    async def test_build_writes_dim_sidecar(self, chain_indexer, sample_chains):
+        """build_chain_index persists the build-time dim next to the index."""
+        import chain_indexer as ci
+
+        await chain_indexer.build_chain_index(sample_chains)
+
+        sidecar = ci._chain_index_dim_path()
+        assert sidecar.exists(), "dim sidecar must be written on build"
+        assert sidecar.read_text(encoding="utf-8").strip() == str(EMBEDDING_DIM)
+
+    @pytest.mark.asyncio
+    async def test_load_refuses_on_dim_mismatch(
+        self, chain_indexer, sample_chains, caplog
+    ):
+        """A chain index whose persisted dim != EMBEDDING_DIM must fail to
+        load (return False) with an actionable rebuild message — not load
+        silently with mismatched vectors, and not swallow an opaque error.
+        """
+        import logging
+        import chain_indexer as ci
+
+        self._seed_db(chain_indexer, sample_chains)
+        await chain_indexer.build_chain_index(sample_chains)
+
+        # Simulate a model-dim change: rewrite the sidecar to a different dim.
+        bad_dim = EMBEDDING_DIM + 128
+        ci._chain_index_dim_path().write_text(str(bad_dim), encoding="utf-8")
+
+        # Fresh indexer state so load_chain_index actually does the work.
+        chain_indexer.index = None
+        chain_indexer._id_to_chain = {}
+
+        with caplog.at_level(logging.ERROR):
+            result = await chain_indexer.load_chain_index()
+
+        assert result is False, (
+            "SC-004 regression: a dim-mismatched chain index loaded "
+            "silently instead of refusing with an actionable message"
+        )
+        # The index must NOT have been populated from the stale file.
+        assert chain_indexer.index is None
+        # Actionable message names the dims + tells the operator to rebuild.
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert str(bad_dim) in joined and str(EMBEDDING_DIM) in joined
+        assert "rebuild" in joined.lower()
+
+    @pytest.mark.asyncio
+    async def test_load_succeeds_when_dim_matches(
+        self, chain_indexer, sample_chains
+    ):
+        """The happy path still works: matching dim loads normally."""
+        self._seed_db(chain_indexer, sample_chains)
+        await chain_indexer.build_chain_index(sample_chains)
+
+        chain_indexer.index = None
+        chain_indexer._id_to_chain = {}
+
+        result = await chain_indexer.load_chain_index()
+        assert result is True
+        assert chain_indexer.index is not None
+
+    @pytest.mark.asyncio
+    async def test_load_tolerates_missing_sidecar(
+        self, chain_indexer, sample_chains
+    ):
+        """A legacy index built before the sidecar existed (no .dim file)
+        must still load — a MISSING sidecar is not a mismatch.
+        """
+        import chain_indexer as ci
+
+        self._seed_db(chain_indexer, sample_chains)
+        await chain_indexer.build_chain_index(sample_chains)
+        # Remove the sidecar to mimic a pre-SC-004 index.
+        ci._chain_index_dim_path().unlink(missing_ok=True)
+
+        chain_indexer.index = None
+        chain_indexer._id_to_chain = {}
+
+        result = await chain_indexer.load_chain_index()
+        assert result is True

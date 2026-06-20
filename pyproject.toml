@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tool-compass"
-version = "2.3.0"
+version = "2.4.0"
 description = "Semantic MCP tool discovery gateway - find tools by intent, not memory"
 readme = "README.md"
 license = "MIT"
@@ -139,6 +139,22 @@ exclude = [
     ".pytest_cache/",
     "*.egg-info/",
     "compass_config.json",
+    # Clean-packaging (gate D): keep the sdist lean. The README's logo loads
+    # from the brand repo URL, not a bundled file; the polyglot cache, the
+    # Astro site, and the translated READMEs are repo/site assets, not part of
+    # the Python distribution.
+    "logo.png",
+    ".polyglot-cache.json",
+    "assets/",
+    "site/",
+    "npm/",
+    "README.ja.md",
+    "README.zh.md",
+    "README.es.md",
+    "README.fr.md",
+    "README.hi.md",
+    "README.it.md",
+    "README.pt-BR.md",
 ]
 
 [tool.ruff]

@@ -38,14 +38,12 @@ Findings covered:
 
 from __future__ import annotations
 
-import asyncio
 import re
 import sqlite3
 import threading
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
-import numpy as np
 import pytest
 
 

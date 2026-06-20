@@ -45,6 +45,14 @@
   },
   "embedding_model": "nomic-embed-text",
   "ollama_url": "http://localhost:11434",
+
+  "_comment_embedding_provider": "Pluggable embedding backend. 'ollama' (default) uses ollama_url + nomic search_query/search_document prefixes. 'openai' / 'openai-compatible' POST {embedding_base_url}/v1/embeddings (OpenAI, LM Studio, any OpenAI-compatible server) and read the vector from data[0].embedding. Set embedding_base_url + embedding_model to your server's values. Prefer the TOOL_COMPASS_EMBEDDING_API_KEY env var over embedding_api_key in this file (the key is a secret). embedding_query_prefix/embedding_document_prefix default to nomic search_* for ollama and empty for openai; override only if your model expects prefixes. Example OpenAI-compatible block: { \"embedding_provider\": \"openai-compatible\", \"embedding_base_url\": \"http://localhost:1234\", \"embedding_model\": \"text-embedding-3-small\", \"embedding_api_key\": \"sk-...\" }",
+  "embedding_provider": "ollama",
+  "embedding_base_url": null,
+  "embedding_api_key": null,
+  "embedding_query_prefix": null,
+  "embedding_document_prefix": null,
+
   "index_dir": "./db",
   "auto_sync": true,
   "default_top_k": 5,
@@ -54,5 +62,12 @@
   "hot_cache_size": 10,
   "chain_indexing_enabled": true,
   "chain_detection_min_occurrences": 3,
-  "top_chains_cache_size": 5
+  "top_chains_cache_size": 5,
+  "ollama_breaker_failure_threshold": 3,
+  "ollama_breaker_open_seconds": 30.0,
+  "ollama_retry_attempts": 3,
+  "ollama_retry_backoffs": [0.5, 1.0, 2.0],
+  "hnsw_m": 16,
+  "hnsw_ef_construction": 200,
+  "hnsw_ef_search": 50
 }

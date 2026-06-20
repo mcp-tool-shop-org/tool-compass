@@ -12,8 +12,17 @@ from typing import Optional, List, Dict, TYPE_CHECKING
 from dataclasses import dataclass
 
 if TYPE_CHECKING:
-    from embedder import Embedder
     from analytics import CompassAnalytics
+
+# SC-004: import EMBEDDING_DIM from embedder as the single source of truth.
+# Previously chain_indexer hardcoded its own `EMBEDDING_DIM = 768`; if the
+# embedding model changed (different dim), the chain index silently diverged
+# from the main index and the only symptom was an opaque error swallowed by
+# the bare `except Exception` in load_chain_index. Importing keeps the two
+# indexes in lockstep and lets us emit an actionable rebuild message on a
+# persisted-dim mismatch (see _chain_index_dim_path below). Embedder is also
+# imported here so the runtime type annotations resolve without TYPE_CHECKING.
+from embedder import Embedder, EMBEDDING_DIM  # noqa: F401
 
 try:
     import hnswlib
@@ -31,7 +40,19 @@ ANALYTICS_DB_PATH = DB_DIR / "compass_analytics.db"
 CHAIN_HNSW_M = 12
 CHAIN_HNSW_EF_CONSTRUCTION = 100
 CHAIN_HNSW_EF_SEARCH = 30
-EMBEDDING_DIM = 768
+
+
+def _chain_index_dim_path() -> Path:
+    """Sidecar file recording the dim the chain HNSW index was built with.
+
+    Derived from the *current* module-level CHAIN_INDEX_PATH at call time so
+    tests that monkeypatch CHAIN_INDEX_PATH point the sidecar at the temp
+    index too. hnswlib's load_index silently reinterprets on-disk vectors at
+    the constructor dim (it does NOT raise on a dim mismatch), so .index.dim
+    is useless for post-load detection — we persist the build-time dim here
+    and compare it to EMBEDDING_DIM on load.
+    """
+    return Path(CHAIN_INDEX_PATH).with_suffix(".dim")
 
 
 @dataclass
@@ -207,10 +228,31 @@ class ChainIndexer:
 
         # Save index
         self.index.save_index(str(CHAIN_INDEX_PATH))
+        # SC-004: persist the build-time embedding dim so a later load can
+        # detect a model-dim change with an actionable message.
+        try:
+            _chain_index_dim_path().write_text(str(EMBEDDING_DIM), encoding="utf-8")
+        except OSError as e:
+            logger.debug(f"failed to write chain index dim sidecar: {e}")
         logger.info(f"Chain index saved to {CHAIN_INDEX_PATH}")
 
         # Update cache
         await self.refresh_chain_cache()
+
+    def _read_persisted_index_dim(self) -> Optional[int]:
+        """Read the dim the chain index was built with, or None.
+
+        SC-004: returns None when the sidecar is absent (legacy index built
+        before this check existed) or unparseable, so a missing sidecar
+        never blocks load — only a *known* mismatch does.
+        """
+        dim_path = _chain_index_dim_path()
+        try:
+            if not dim_path.exists():
+                return None
+            return int(dim_path.read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            return None
 
     async def load_chain_index(self) -> bool:
         """Load existing chain index from disk."""
@@ -223,6 +265,26 @@ class ChainIndexer:
         try:
             chains = await self.load_chains_from_db()
             if not chains:
+                return False
+
+            # SC-004: persisted-dim sanity check. If the chain index was
+            # built with a different embedding dim (model changed), loading
+            # it would either crash opaquely later (add_chain's add_items) or
+            # silently return wrong neighbors. Detect it here and fail the
+            # load with an actionable rebuild message instead of swallowing
+            # an opaque error in the bare except below.
+            persisted_dim = self._read_persisted_index_dim()
+            if persisted_dim is not None and persisted_dim != EMBEDDING_DIM:
+                logger.error(
+                    "Chain index was built with %d-dim vectors but the "
+                    "embedder now produces %d-dim vectors. The embedding "
+                    "model likely changed. Delete %s (and %s) and rebuild "
+                    "the chain index via build_chain_index().",
+                    persisted_dim,
+                    EMBEDDING_DIM,
+                    CHAIN_INDEX_PATH,
+                    _chain_index_dim_path(),
+                )
                 return False
 
             self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)

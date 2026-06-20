@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
+import threading
 from pathlib import Path
-from typing import Any, Dict
 from unittest.mock import Mock, AsyncMock, patch
 
 import pytest
@@ -1691,6 +1692,200 @@ class TestMainEntrypoint:
 
 
 # =============================================================================
+# Stage-C CLI humanization — exit codes + actionable hints for the CLI paths
+# (GW-SB-001 sync exit, GW-SB-002 cold-start --test, GW-SB-003 PORT guard,
+#  CFGDOC-01 LOG_LEVEL honored).
+# =============================================================================
+
+
+class TestSyncExitStatus:
+    """GW-SB-001: a sync that indexed nothing must NOT exit 0."""
+
+    @pytest.mark.asyncio
+    async def test_sync_returns_false_when_no_backends(self, monkeypatch):
+        """sync_from_backends() returns False when zero backends connect."""
+        import gateway
+
+        manager = Mock()
+        manager.connect_all = AsyncMock(return_value={"alpha": False, "beta": False})
+        manager.get_all_tools = Mock(return_value=[])
+        manager.disconnect_all = AsyncMock()
+
+        monkeypatch.setattr(gateway, "BackendManager", lambda config: manager)
+        monkeypatch.setattr(
+            gateway, "load_config", lambda: Mock(backends={"alpha": Mock(), "beta": Mock()})
+        )
+
+        result = await gateway.sync_from_backends()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_async_main_propagates_sync_failure(self, monkeypatch):
+        """async_main(--sync) returns the sync result so main() can exit non-zero."""
+        import gateway
+
+        async def fake_sync():
+            return False
+
+        monkeypatch.setattr(gateway, "sync_from_backends", fake_sync)
+        args = Mock(sync=True, test=False)
+        assert await gateway.async_main(args) is False
+
+    @pytest.mark.asyncio
+    async def test_async_main_test_returns_true(self, monkeypatch):
+        """--test path still reports success (True) when run_tests completes."""
+        import gateway
+
+        async def fake_test():
+            return None
+
+        monkeypatch.setattr(gateway, "run_tests", fake_test)
+        args = Mock(sync=False, test=True)
+        assert await gateway.async_main(args) is True
+
+    def test_main_exits_1_on_failed_sync(self, monkeypatch, capsys):
+        """`gateway --sync` exits 1 with a stderr hint when nothing was indexed."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--sync"])
+
+        # asyncio.run returns the async_main result; simulate a failed sync.
+        def fake_run(coro):
+            coro.close()  # avoid 'coroutine never awaited' warning
+            return False
+
+        monkeypatch.setattr(gateway.asyncio, "run", fake_run)
+
+        with pytest.raises(SystemExit) as exc:
+            gateway.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Index NOT rebuilt" in err
+
+    def test_main_succeeds_on_good_sync(self, monkeypatch):
+        """A successful sync (True) leaves the process at exit 0 (no SystemExit)."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--sync"])
+
+        def fake_run(coro):
+            coro.close()
+            return True
+
+        monkeypatch.setattr(gateway.asyncio, "run", fake_run)
+
+        # Must not raise SystemExit.
+        gateway.main()
+
+
+class TestRunTestsColdStart:
+    """GW-SB-002: `gateway --test` must not dump a raw traceback on cold start."""
+
+    @pytest.mark.asyncio
+    async def test_run_tests_cold_start_exits_1_with_hint(self, monkeypatch, capsys):
+        import gateway
+
+        async def boom():
+            raise RuntimeError(
+                "Ollama not available and no cached index found at /x. "
+                "Start Ollama (ollama serve) and run: ollama pull nomic-embed-text"
+            )
+
+        monkeypatch.setattr(gateway, "get_index", boom)
+
+        with pytest.raises(SystemExit) as exc:
+            await gateway.run_tests()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--sync" in err
+        assert "ollama serve" in err
+
+
+class TestPortGuard:
+    """GW-SB-003: malformed PORT must produce a named hint + exit 2, not a raw
+    ValueError."""
+
+    def test_non_integer_port_exits_2(self, monkeypatch, capsys):
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        monkeypatch.setenv("PORT", "not-a-number")
+
+        with patch("gateway._run_http") as mock_http:
+            with pytest.raises(SystemExit) as exc:
+                gateway.main()
+            mock_http.assert_not_called()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "Invalid PORT" in err
+        assert "not-a-number" in err
+
+    def test_out_of_range_port_exits_2(self, monkeypatch, capsys):
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        monkeypatch.setenv("PORT", "70000")
+
+        with patch("gateway._run_http") as mock_http:
+            with pytest.raises(SystemExit) as exc:
+                gateway.main()
+            mock_http.assert_not_called()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "Invalid PORT" in err
+
+    def test_valid_port_passes_int_to_run_http(self, monkeypatch):
+        """A well-formed PORT still reaches _run_http with the parsed int."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        monkeypatch.setenv("PORT", "9090")
+
+        with patch("gateway._run_http") as mock_http:
+            gateway.main()
+            mock_http.assert_called_once_with(9090)
+
+
+class TestLogLevelEnv:
+    """CFGDOC-01: LOG_LEVEL must actually drive the logging level."""
+
+    def test_basicconfig_source_reads_log_level(self):
+        """The module's logging setup must read LOG_LEVEL, not hardcode INFO.
+
+        Asserted against the source (no module reload, which would corrupt the
+        shared gateway module for the rest of the session). On the OLD code the
+        basicConfig call was `level=logging.INFO` with no env read, so this
+        assertion fails on the pre-fix gateway."""
+        import inspect
+        import gateway
+
+        src = inspect.getsource(gateway)
+        # The level must be derived from the LOG_LEVEL env var.
+        assert 'os.environ.get("LOG_LEVEL"' in src
+        # And it must NOT be the old hardcoded form.
+        assert "level=logging.INFO," not in src
+
+    def test_log_level_env_mapping_debug(self, monkeypatch):
+        """The exact expression the module uses maps LOG_LEVEL=DEBUG -> DEBUG."""
+        import logging
+
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        level = getattr(
+            logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO
+        )
+        assert level == logging.DEBUG
+
+    def test_unknown_log_level_falls_back_to_info(self, monkeypatch):
+        import logging
+
+        monkeypatch.setenv("LOG_LEVEL", "NONSENSE")
+        level = getattr(
+            logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO
+        )
+        assert level == logging.INFO
+
+
+# =============================================================================
 # Compass envelope shape sanity — every error path stamps an "error_envelope"
 # =============================================================================
 
@@ -1752,3 +1947,525 @@ class TestEnvelopeContract:
         assert env["code"] in _ERROR_CODES
         assert env["category"] in _ERROR_CATEGORIES
         assert env["retryable"] is False
+
+
+# =============================================================================
+# GW-A-001 — cold-start get_index() RuntimeError -> structured envelope
+# =============================================================================
+
+
+class TestColdStartIndexEnvelope:
+    """get_index() raises RuntimeError when there's no baked index AND Ollama
+    is unreachable. compass() / describe() / compass_categories() must surface
+    that as the structured service_unavailable envelope, never a raw raise."""
+
+    @staticmethod
+    def _assert_cold_start_envelope(result):
+        from gateway import _ERROR_CODES, _ERROR_CATEGORIES
+
+        assert isinstance(result, dict), "handler must return a dict, not raise"
+        assert "error_envelope" in result, (
+            f"cold-start must return the structured envelope, got: {result!r}"
+        )
+        env = result["error_envelope"]
+        assert env["code"] in {"ollama_unavailable", "index_unhealthy"}
+        assert env["code"] in _ERROR_CODES
+        assert env["category"] == "service_unavailable"
+        assert env["category"] in _ERROR_CATEGORIES
+        assert env["retryable"] is True
+        # Operator-actionable suggestions are required by the finding.
+        suggestions = " ".join(env.get("suggestions", [])).lower()
+        assert "ollama serve" in suggestions
+        assert "--sync" in suggestions
+
+    @pytest.mark.asyncio
+    async def test_compass_cold_start_returns_envelope(self, test_config):
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError(
+                "Ollama not available and no cached index found"
+            )
+
+        # No index, sync disabled (test_config.auto_sync is False).
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass
+
+            result = await compass(intent="read a file")
+
+        self._assert_cold_start_envelope(result)
+
+    @pytest.mark.asyncio
+    async def test_describe_cold_start_returns_envelope(self, test_config):
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError(
+                "Ollama not available and no cached index found"
+            )
+
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import describe
+
+            result = await describe(tool_name="bridge:read_file")
+
+        self._assert_cold_start_envelope(result)
+
+    @pytest.mark.asyncio
+    async def test_compass_categories_cold_start_returns_envelope(self, test_config):
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError(
+                "Ollama not available and no cached index found"
+            )
+
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass_categories
+
+            result = await compass_categories()
+
+        self._assert_cold_start_envelope(result)
+
+    @pytest.mark.asyncio
+    async def test_cold_start_code_tracks_ollama_health(self, test_config):
+        """When Ollama is known-down the code is ollama_unavailable; otherwise
+        the index itself is the blocker (index_unhealthy)."""
+        import gateway
+
+        gateway._config = test_config
+
+        async def cold_start():
+            raise RuntimeError("cold start")
+
+        # Ollama explicitly down -> ollama_unavailable.
+        gateway._health_state["ollama_available"] = False
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass_categories
+
+            result = await compass_categories()
+        assert result["error_envelope"]["code"] == "ollama_unavailable"
+
+        # Ollama nominally up but index won't load -> index_unhealthy.
+        gateway._health_state["ollama_available"] = True
+        with patch("gateway.get_index", side_effect=cold_start):
+            result = await compass_categories()
+        assert result["error_envelope"]["code"] == "index_unhealthy"
+
+
+# =============================================================================
+# GW-A-002 — describe() malformed-JSON index row degrades, never raises
+# =============================================================================
+
+
+class TestDescribeMalformedJson:
+    """A corrupt parameters/examples JSON blob in the index row must degrade
+    to {}/[] and flag the index unhealthy rather than raising
+    JSONDecodeError."""
+
+    @pytest.mark.asyncio
+    async def test_describe_invalid_parameters_json_degrades(
+        self, test_index, test_config
+    ):
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        gateway._health_state["index_available"] = True
+        # Backend has no fallback schema — force the index row path.
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        # Corrupt the parameters blob for an existing tool. The describe()
+        # SELECT reads parameters + examples columns; a non-JSON string there
+        # is what a partially-written / truncated index produces.
+        test_index.db.execute(
+            "UPDATE tools SET parameters = ? WHERE name = ?",
+            ("{not valid json", "test:read_file"),
+        )
+        test_index.db.commit()
+
+        from gateway import describe
+
+        # Must NOT raise — returns the tool with empty params instead.
+        result = await describe(tool_name="test:read_file")
+
+        assert result["tool"] == "test:read_file"
+        assert result["parameters"] == {}, (
+            "malformed parameters JSON must fall back to {}"
+        )
+        # The malformed blob flags the index unhealthy + the augmenter stamps
+        # the degraded reason.
+        assert gateway._health_state["index_available"] is False
+        assert result.get("degraded") is True
+        assert "index_unhealthy" in result.get("degraded_reasons", [])
+
+    @pytest.mark.asyncio
+    async def test_describe_invalid_examples_json_degrades(
+        self, test_index, test_config
+    ):
+        import gateway
+
+        gateway._compass_index = test_index
+        gateway._config = test_config
+        gateway._health_state["index_available"] = True
+        mgr = Mock()
+        mgr.get_tool_schema = Mock(return_value=None)
+        gateway._backend_manager = mgr
+
+        test_index.db.execute(
+            "UPDATE tools SET examples = ? WHERE name = ?",
+            ("[broken", "test:write_file"),
+        )
+        test_index.db.commit()
+
+        from gateway import describe
+
+        result = await describe(tool_name="test:write_file")
+
+        assert result["tool"] == "test:write_file"
+        assert result["examples"] == [], (
+            "malformed examples JSON must fall back to []"
+        )
+        assert gateway._health_state["index_available"] is False
+
+
+# =============================================================================
+# GW-A-003 — multi-word lexical fallback matches per-token (0.3 branch live)
+# =============================================================================
+
+
+class TestLexicalFallbackPerToken:
+    """_lexical_search_fallback tokenizes the query so multi-word degraded-mode
+    intents still match, and the previously-dead 0.3 confidence tier is now
+    reachable."""
+
+    def test_multi_word_intent_matches_via_token(self, test_index):
+        from gateway import _lexical_search_fallback
+
+        # "missing file" is NOT a substring of any tool name/description, but
+        # the token "file" matches test:read_file / test:write_file. With the
+        # old single-whole-query needle this returned []; per-token matching
+        # now finds the *_file tools.
+        matches = _lexical_search_fallback(
+            test_index, "missing file", top_k=5, category=None, server=None
+        )
+        names = {m["tool"] for m in matches}
+        assert "test:read_file" in names or "test:write_file" in names, (
+            f"per-token fallback should match a *_file tool, got: {names}"
+        )
+
+    def test_token_only_match_takes_0_3_confidence(self, test_index):
+        """The else-branch (0.3) is reachable: a row matched on a token but the
+        whole query is not a substring of its name or description."""
+        from gateway import _lexical_search_fallback
+
+        matches = _lexical_search_fallback(
+            test_index, "missing file", top_k=5, category=None, server=None
+        )
+        assert matches, "expected at least one token match"
+        # Every match here is token-only (whole 'missing file' never appears),
+        # so all confidences are the 0.3 tier.
+        assert all(m["confidence"] == 0.3 for m in matches), (
+            f"token-only matches must score 0.3, got: "
+            f"{[(m['tool'], m['confidence']) for m in matches]}"
+        )
+
+    def test_whole_query_name_substring_still_0_6(self, test_index):
+        """Regression guard: a whole-query substring of a name keeps 0.6."""
+        from gateway import _lexical_search_fallback
+
+        matches = _lexical_search_fallback(
+            test_index, "read_file", top_k=5, category=None, server=None
+        )
+        read_file = next(
+            (m for m in matches if m["tool"] == "test:read_file"), None
+        )
+        assert read_file is not None
+        assert read_file["confidence"] == 0.6
+
+    def test_escaping_preserved_for_wildcard_tokens(self, test_index):
+        """A token containing a LIKE wildcard must be escaped, not treated as a
+        wildcard (BE-A-007 must survive the per-token rewrite)."""
+        from gateway import _lexical_search_fallback
+
+        # '%' would match everything if unescaped; escaped, it matches only
+        # tools whose name/description literally contain '%' (none here).
+        matches = _lexical_search_fallback(
+            test_index, "%", top_k=5, category=None, server=None
+        )
+        assert matches == [], (
+            f"escaped '%' token must not wildcard-match the catalog, got: "
+            f"{[m['tool'] for m in matches]}"
+        )
+
+
+# =============================================================================
+# GW-A-001 (cold-start bypass) — compass() calls maybe_startup_sync() BEFORE
+# the guarded get_index(); get_sync_manager_instance/get_chain_indexer_instance
+# catch RuntimeError from get_index() and return None, and maybe_startup_sync
+# does NOT latch _startup_sync_done on a cold-start deferral (so it retries).
+# =============================================================================
+
+
+class TestColdStartBypass:
+    """A cold-start get_index() RuntimeError must not escape compass() through
+    the maybe_startup_sync() -> get_sync_manager_instance() path, and the
+    startup-sync flag must stay False so a later call retries once the index
+    is buildable."""
+
+    @pytest.mark.asyncio
+    async def test_compass_cold_start_does_not_raise_through_startup_sync(
+        self, test_config_with_backends
+    ):
+        """auto_sync=True drives maybe_startup_sync() at the top of compass();
+        get_index() raising RuntimeError must yield the structured cold-start
+        envelope, never a raw RuntimeError, and the startup flag stays False.
+        """
+        import gateway
+
+        # auto_sync + sync_check_on_startup True so maybe_startup_sync runs the
+        # slow path and calls get_sync_manager_instance() -> get_index().
+        gateway._config = test_config_with_backends
+        gateway._config.auto_sync = True
+        gateway._config.sync_check_on_startup = True
+        gateway._startup_sync_done = False
+        gateway._sync_manager = None
+        gateway._compass_index = None
+        gateway._analytics = None
+
+        async def cold_start():
+            raise RuntimeError(
+                "Ollama not available and no cached index found"
+            )
+
+        # Patch get_index so BOTH maybe_startup_sync's path and compass()'s
+        # own guarded get_index() hit the cold-start RuntimeError.
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass
+
+            # Must NOT raise — returns the structured envelope.
+            result = await compass(intent="read a file")
+
+        assert isinstance(result, dict), "compass must return a dict, not raise"
+        assert "error_envelope" in result, (
+            f"cold-start must return the structured envelope, got: {result!r}"
+        )
+        env = result["error_envelope"]
+        assert env["category"] == "service_unavailable"
+        assert env["retryable"] is True
+        # The cold-start deferral must NOT latch the flag — a later call (once
+        # Ollama/index is up) has to retry the startup sync.
+        assert gateway._startup_sync_done is False, (
+            "cold-start deferral must not latch _startup_sync_done"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_sync_manager_instance_returns_none_on_cold_start(
+        self, test_config_with_backends
+    ):
+        """get_sync_manager_instance() must catch get_index()'s RuntimeError
+        and return None (sync unavailable until an index exists), not raise."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._config.auto_sync = True
+        gateway._sync_manager = None
+
+        async def cold_start():
+            raise RuntimeError("cold start: no index, ollama down")
+
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import get_sync_manager_instance
+
+            result = await get_sync_manager_instance()
+
+        assert result is None, (
+            "cold-start get_index RuntimeError must degrade to None, not raise"
+        )
+        # And it must NOT have cached a half-built sync manager.
+        assert gateway._sync_manager is None
+
+    @pytest.mark.asyncio
+    async def test_get_chain_indexer_instance_returns_none_on_cold_start(
+        self, test_config_with_backends
+    ):
+        """get_chain_indexer_instance() must catch get_index()'s RuntimeError
+        and return None, mirroring the sync-manager cold-start guard."""
+        import gateway
+
+        gateway._config = test_config_with_backends
+        gateway._config.chain_indexing_enabled = True
+        gateway._chain_indexer = None
+        gateway._analytics = None
+
+        async def cold_start():
+            raise RuntimeError("cold start: no index, ollama down")
+
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import get_chain_indexer_instance
+
+            result = await get_chain_indexer_instance()
+
+        assert result is None
+        assert gateway._chain_indexer is None
+
+
+# =============================================================================
+# GW (per-loop locks) — the 6 module-global asyncio.Lock objects are replaced
+# by gateway._loop_lock(name) keyed on id(running loop), mirroring embedder's
+# per-loop semaphore. Awaiting the same named lock from two independent
+# worker-thread asyncio.run loops must not raise "bound to a different event
+# loop".
+# =============================================================================
+
+
+class TestPerLoopLocks:
+    """SC-001 sibling: _loop_lock(name) must hand each running event loop its
+    OWN asyncio.Lock so the singleton getters survive being driven from a
+    fresh asyncio.run loop per call (CLI subcommands / Gradio worker threads).
+
+    A single module-global asyncio.Lock binds its internal waiter Future to
+    the first loop that awaits it under contention, then raises
+    "bound to a different event loop" from the next loop.
+    """
+
+    @staticmethod
+    def _acquire_loop_lock_under_contention(name: str):
+        """In a brand-new event loop, acquire _loop_lock(name) from two
+        concurrent coroutines so a waiter forms — the exact precondition that
+        bound a module-global Lock to this loop and broke the next one.
+        Returns True on a clean acquire/usability run.
+        """
+        import gateway
+
+        async def _hold(lock, hold_s):
+            async with lock:
+                await asyncio.sleep(hold_s)
+            return True
+
+        async def _go():
+            lock = gateway._loop_lock(name)
+            # Two acquirers: the second queues as a waiter while the first
+            # holds the lock, binding the lock's waiter to THIS loop.
+            results = await asyncio.gather(
+                _hold(lock, 0.02), _hold(lock, 0.0)
+            )
+            # The returned lock must be usable (acquirable) in this loop.
+            assert lock.locked() is False
+            return all(results)
+
+        return asyncio.run(_go())
+
+    def test_loop_lock_survives_multiple_worker_loops(self):
+        """Several threads, each with its OWN asyncio.run loop, drive the same
+        named _loop_lock concurrently — no cross-loop RuntimeError, and every
+        loop gets a usable lock."""
+        errors: list = []
+        ok_seen: list = []
+
+        def thread_target():
+            try:
+                ok = self._acquire_loop_lock_under_contention("index")
+                ok_seen.append(ok)
+            except Exception as e:  # noqa: BLE001 — capture for assertion
+                errors.append(repr(e))
+
+        threads = [threading.Thread(target=thread_target) for _ in range(6)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+
+        assert not errors, (
+            "per-loop lock raised cross-loop RuntimeError(s): "
+            f"{errors}"
+        )
+        assert ok_seen and all(ok_seen), (
+            f"each loop should cleanly use the lock; got {ok_seen}"
+        )
+
+    def test_loop_lock_sequential_loops_rebind_cleanly(self):
+        """Deterministic form: loop A forms a waiter on _loop_lock('index'),
+        finishes, then loop B uses the same named lock. A module-global Lock
+        would stay bound to loop A's (dead) loop and break loop B with
+        'bound to a different event loop'."""
+        # Loop A
+        assert self._acquire_loop_lock_under_contention("index") is True
+        # Loop B — must not raise the cross-loop RuntimeError.
+        assert self._acquire_loop_lock_under_contention("index") is True
+
+    def test_loop_lock_keyed_on_running_loop_within_one_loop(self):
+        """Within a SINGLE running loop, _loop_lock(name) is keyed on that
+        loop's id and returns the SAME object on repeat calls, but DISTINCT
+        objects for distinct names — proving the per-loop, per-name keying
+        (not one shared global Lock for everything)."""
+        import gateway
+
+        captured: dict = {}
+
+        async def _go():
+            captured["index_1"] = gateway._loop_lock("index")
+            captured["index_2"] = gateway._loop_lock("index")
+            captured["sync"] = gateway._loop_lock("sync_manager")
+            # The lock dict for THIS loop must be registered under id(loop).
+            loop = asyncio.get_running_loop()
+            captured["registered"] = id(loop) in gateway._loop_init_locks
+
+        asyncio.run(_go())
+
+        # Same name in the same loop -> identical object (memoized per loop).
+        assert captured["index_1"] is captured["index_2"]
+        # Different names -> different lock objects (six independent locks).
+        assert captured["index_1"] is not captured["sync"]
+        # The loop's lock bundle is keyed on the running loop's id.
+        assert captured["registered"] is True
+
+
+# =============================================================================
+# GW (show_config redaction) — show_config() redacts backend.args entries (via
+# _redact_structural) and ollama_url credentials before printing.
+# =============================================================================
+
+
+class TestShowConfigRedaction:
+    """show_config() must not print backend.args secrets or ollama_url
+    credentials to stdout."""
+
+    def test_show_config_redacts_args_and_url_secrets(self, capsys, tmp_path):
+        # show_config() truncates args to the first 2 entries before printing,
+        # so the secret MUST sit within args[:2] — otherwise the SHOWSECRET
+        # assertion would pass vacuously (truncated out) even un-redacted.
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {
+                "local": {
+                    "type": "stdio",
+                    "command": "python",
+                    "args": ["--password=SHOWSECRET", "-m"],
+                    "env": {},
+                },
+            },
+            "ollama_url": "http://u:URLSECRET@h:11434",
+        }))
+
+        with patch.dict(os.environ, {"TOOL_COMPASS_CONFIG": str(config_file)}):
+            from gateway import show_config
+
+            show_config()
+
+        out = capsys.readouterr().out
+        # Neither secret may appear in the printed diagnostic dump.
+        assert "SHOWSECRET" not in out, "backend.args secret leaked to stdout"
+        assert "URLSECRET" not in out, "ollama_url secret leaked to stdout"
+        # Host:port stays visible for diagnosability.
+        assert "h:11434" in out
+        # And the redaction marker is present so the dump stays usable.
+        assert "[REDACTED]" in out

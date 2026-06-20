@@ -118,6 +118,13 @@ class CompassAnalytics:
         # path (writers never block on init once the connection is published).
         self._init_lock = threading.Lock()
 
+        # ANL-A-003: once close() runs, refuse to lazily reopen. close()
+        # takes self._init_lock (the same lock _get_db uses for lazy init)
+        # so close ordering serializes against reopen — a concurrent record_*
+        # can't null the handle underneath an in-flight op or resurrect the
+        # connection after close. Guarded by self._init_lock.
+        self._closed: bool = False
+
         # Session tracking for chain detection. Use a bounded deque so a long
         # session never drops middle items on truncation — patterns are saved
         # before the window slides.
@@ -152,6 +159,13 @@ class CompassAnalytics:
         # it is complete.
         if self.db is None:
             with self._init_lock:
+                # ANL-A-003: refuse to reopen after close(). Checked INSIDE
+                # the init lock so a record racing a close can't slip a fresh
+                # connection in after close() set the flag and nulled self.db.
+                if self._closed:
+                    raise sqlite3.ProgrammingError(
+                        "analytics DB is closed; cannot reopen"
+                    )
                 if self.db is None:
                     conn = sqlite3.connect(
                         str(self.db_path), check_same_thread=False
@@ -529,24 +543,31 @@ class CompassAnalytics:
             sequence = list(self._session_tool_sequence)
 
             with self._lock:
-                # Find subsequences of length 2-5
-                for length in range(2, min(6, len(sequence) + 1)):
-                    for i in range(len(sequence) - length + 1):
-                        subseq = sequence[i : i + length]
-                        seq_json = json.dumps(subseq)
-                        seq_hash = hashlib.sha256(seq_json.encode()).hexdigest()[:32]
+                # ANL-A-004: count ONLY the new subsequences ENDING at the
+                # just-appended tool (the last element). Re-counting every
+                # length-2..5 subsequence of the whole sliding deque on every
+                # call re-incremented any n-gram that merely stayed in the
+                # window, systematically inflating occurrence_count and
+                # tripping detect_chains thresholds on phantom repeats. The
+                # newest distinct subsequences introduced by this append are
+                # exactly the suffixes of `sequence` of length 2..5.
+                n = len(sequence)
+                for length in range(2, min(6, n + 1)):
+                    subseq = sequence[n - length : n]
+                    seq_json = json.dumps(subseq)
+                    seq_hash = hashlib.sha256(seq_json.encode()).hexdigest()[:32]
 
-                        # Upsert pattern
-                        db.execute(
-                            """
-                            INSERT INTO chain_patterns (session_id, tool_sequence, sequence_hash, occurrence_count)
-                            VALUES (?, ?, ?, 1)
-                            ON CONFLICT(sequence_hash) DO UPDATE SET
-                                occurrence_count = occurrence_count + 1,
-                                last_seen_at = CURRENT_TIMESTAMP
+                    # Upsert pattern
+                    db.execute(
+                        """
+                        INSERT INTO chain_patterns (session_id, tool_sequence, sequence_hash, occurrence_count)
+                        VALUES (?, ?, ?, 1)
+                        ON CONFLICT(sequence_hash) DO UPDATE SET
+                            occurrence_count = occurrence_count + 1,
+                            last_seen_at = CURRENT_TIMESTAMP
                         """,
-                            (self._session_id, seq_json, seq_hash),
-                        )
+                        (self._session_id, seq_json, seq_hash),
+                    )
 
                 db.commit()
         except sqlite3.Error as e:
@@ -927,11 +948,22 @@ class CompassAnalytics:
         logger.info(f"Loaded {len(self._hot_cache)} tools into hot cache from DB")
 
     def close(self):
-        """Close database connection."""
-        with self._lock:
-            if self.db:
-                self.db.close()
-                self.db = None
+        """Close database connection.
+
+        ANL-A-003: acquire BOTH locks — self._init_lock serializes close
+        against the lazy reopen in _get_db (which guards on self._init_lock),
+        and self._lock serializes against in-flight writers. Order is
+        init-lock then write-lock, matching no other acquisition order in the
+        class (writers never hold the init lock), so no deadlock cycle exists.
+        Set self._closed under the init lock so a concurrent record_* observes
+        the closed state and refuses to reopen.
+        """
+        with self._init_lock:
+            with self._lock:
+                self._closed = True
+                if self.db:
+                    self.db.close()
+                    self.db = None
 
 
 # Singleton instance

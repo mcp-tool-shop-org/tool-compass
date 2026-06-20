@@ -218,8 +218,12 @@ def _check_ollama_banner() -> str:
         cfg = _config if _config is not None else load_config()
         ollama_url = getattr(cfg, "ollama_url", "http://localhost:11434")
         embedder = Embedder(base_url=ollama_url, timeout=2.0)
-        is_healthy = run_async(embedder.health_check())
-        run_async(embedder.close())
+        # FE-SB-003: close() must run even when health_check() raises (Ollama
+        # down is the common path) or the aiohttp session leaks.
+        try:
+            is_healthy = run_async(embedder.health_check())
+        finally:
+            run_async(embedder.close())
         if is_healthy:
             return ""
         return (
@@ -257,8 +261,17 @@ def _lexical_fallback_for_ui(
         # Inline fallback — defensive, matches gateway shape.
         if not index or not getattr(index, "db", None):
             return []
-        needle = f"%{query.strip()}%"
-        where = ["(lower(name) LIKE lower(?) OR lower(description) LIKE lower(?))"]
+        # FE-SA-002: escape LIKE wildcards (% and _) and pair with ESCAPE so a
+        # query containing those characters is matched literally, not as a
+        # wildcard — mirroring gateway._escape_like / _lexical_search_fallback.
+        escaped = (
+            query.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
+        needle = f"%{escaped}%"
+        where = [
+            "(lower(name) LIKE lower(?) ESCAPE '\\' "
+            "OR lower(description) LIKE lower(?) ESCAPE '\\')"
+        ]
         params: list = [needle, needle]
         if category:
             where.append("category = ?")
@@ -409,6 +422,18 @@ def search_tools(
         index = get_index()
     except Exception as e:
         return format_error(e, "Could not load the tool index"), "{}"
+
+    # FE-SB-002: a synced-but-empty index (load_index returns True with 0 rows)
+    # must show the same "no tools indexed yet → sync" card the Browser tab
+    # uses — NOT the generic no-match page ("reword / lower confidence /
+    # remove filters"), whose advice can never surface a tool from an empty
+    # index. Short-circuit before running search.
+    try:
+        if index.get_stats().get("total_tools", 0) == 0:
+            return _render_empty_index(), "{}"
+    except Exception:
+        # Stats unavailable — fall through and let search run / fail normally.
+        pass
 
     # Handle filter values
     cat_filter = None if category == "All" else category
@@ -627,6 +652,25 @@ def _nearest_matches(
         return []
 
 
+def _render_empty_index() -> str:
+    """Build the 'no tools indexed yet → sync' card (FE-SB-002 + FE-A-008).
+
+    Single source of truth for the empty-index state shared by the Browser
+    tab (`filter_tools`) and Search (`search_tools`). A synced-but-empty
+    index must surface the actionable `tool-compass sync` next-step, NOT the
+    generic no-match advice ("reword / lower confidence / remove filters"),
+    which can never produce a tool from a zero-row index.
+    """
+    return """
+        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
+            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">📦</div>
+            <p style="color: #ffb74d;">No tools indexed yet.</p>
+            <p style="font-size: 0.9em; color: #e8e8f0;">Build the index first:</p>
+            <code style="color: #d4d4dc; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;">tool-compass sync</code>
+        </div>
+        """
+
+
 def _render_no_results(query: str, suggestions: List[Dict]) -> str:
     """Build the zero-results HTML, with optional 'did you mean' chips.
 
@@ -819,16 +863,10 @@ def filter_tools(server: str, category: str, search_text: str) -> str:
         return format_error(e, "Could not load tools from index")
 
     # Empty index — FE-A-008 + SD-V-001: v2.2 canonical CLI + contrast-safe
-    # greys + mono command snippet.
+    # greys + mono command snippet. Shared with search_tools via the
+    # _render_empty_index() single source of truth (FE-SB-002).
     if not tools:
-        return """
-        <div style="text-align: center; padding: 48px 24px; color: #a0a0b0;">
-            <div style="font-size: 2em; margin-bottom: 12px;" aria-hidden="true">📦</div>
-            <p style="color: #ffb74d;">No tools indexed yet.</p>
-            <p style="font-size: 0.9em; color: #e8e8f0;">Build the index first:</p>
-            <code style="color: #d4d4dc; font-family: 'JetBrains Mono', 'SF Mono', ui-monospace, monospace;">tool-compass sync</code>
-        </div>
-        """
+        return _render_empty_index()
 
     # Sanitize search text
     if search_text:
@@ -965,8 +1003,18 @@ def get_tool_details(tool_name: str) -> str:
         </div>
         """
 
-    params = json.loads(row["parameters"]) if row["parameters"] else {}
-    examples = json.loads(row["examples"]) if row["examples"] else []
+    # FE-SA-001: mirror get_all_tools — a malformed JSON blob from the index
+    # must degrade to empty defaults, not raise an uncaught JSONDecodeError out
+    # of the Gradio callback (which would dump a raw traceback under
+    # show_error=True instead of the styled format_error card).
+    try:
+        params = json.loads(row["parameters"]) if row["parameters"] else {}
+    except json.JSONDecodeError:
+        params = {}
+    try:
+        examples = json.loads(row["examples"]) if row["examples"] else []
+    except json.JSONDecodeError:
+        examples = []
 
     # Build parameters table — all untrusted strings run through html.escape to
     # block HTML/script injection from malicious tool metadata. SD-V-004:
@@ -1241,13 +1289,25 @@ def get_system_status() -> str:
     try:
         from embedder import Embedder
 
-        embedder = Embedder()
-        is_healthy = run_async(embedder.health_check())
-        if is_healthy:
-            ollama_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Connected'
-        else:
-            ollama_status = '<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; Model not loaded'
-        run_async(embedder.close())
+        # FE-SB-001: probe the configured endpoint + model so the Status tab
+        # agrees with _check_ollama_banner() (which reads cfg). A bare
+        # Embedder() uses the hardcoded module defaults and would report the
+        # WRONG endpoint's health for any non-default config.
+        cfg = _config if _config is not None else load_config()
+        embedder = Embedder(
+            base_url=getattr(cfg, "ollama_url", "http://localhost:11434"),
+            model=getattr(cfg, "embedding_model", "nomic-embed-text"),
+        )
+        # FE-SB-003: close() must run even when health_check() raises (Ollama
+        # down is the common path) or the aiohttp session leaks.
+        try:
+            is_healthy = run_async(embedder.health_check())
+            if is_healthy:
+                ollama_status = '<span aria-hidden="true">✅</span> <span>Passed</span> &mdash; Connected'
+            else:
+                ollama_status = '<span aria-hidden="true">⚠️</span> <span>Warning</span> &mdash; Model not loaded'
+        finally:
+            run_async(embedder.close())
     except Exception as e:
         safe_err = html.escape(truncate_text(str(e), 40), quote=True)
         ollama_status = f'<span aria-hidden="true">❌</span> <span>Failed</span> &mdash; Unavailable: {safe_err}'
@@ -1358,9 +1418,29 @@ def create_ui() -> gr.Blocks:
 
     with gr.Blocks(
         title="Tool Compass",
+        # VIS-D-001/002: the entire UI is hand-coded for a dark page (#1a1a2e
+        # surface, #22223e cards, light #e8e8f0 text). gr.themes.Soft() defaults
+        # to LIGHT, so backgroundless state blocks (empty/no-result/status views)
+        # were near-white text on a white panel (~1.2:1, invisible) out of the
+        # box. Pin the dark surface the palette assumes — on BOTH the light and
+        # _dark token variants — so the page, blocks, inputs and the gr.Code box
+        # all track the same dark chrome as the custom cards (no half-light seam).
         theme=gr.themes.Soft(
             primary_hue="blue",
             secondary_hue="green",
+        ).set(
+            body_background_fill="#1a1a2e",
+            body_background_fill_dark="#1a1a2e",
+            body_text_color="#e8e8f0",
+            body_text_color_dark="#e8e8f0",
+            background_fill_primary="#22223e",
+            background_fill_primary_dark="#22223e",
+            background_fill_secondary="#1a1a2e",
+            background_fill_secondary_dark="#1a1a2e",
+            block_background_fill="#22223e",
+            block_background_fill_dark="#22223e",
+            input_background_fill="#2a2a44",
+            input_background_fill_dark="#2a2a44",
         ),
         css="""
         .gradio-container { max-width: 1400px !important; }
@@ -1632,12 +1712,13 @@ def create_ui() -> gr.Blocks:
 
                 status_btn.click(fn=get_system_status, inputs=[], outputs=[status_html])
 
-        # FE-B-012: contrast-fixed footer grey (#a0a0a0 reads at 4.05:1 on
-        # the dark background — still light but no longer failing AA at
-        # body-text scale).
+        # VIS-D-003: footer grey lifted to #b4b4c4 — #a0a0a0 on the #1a1a2e
+        # surface is only ~4.0:1, which clears AA for large text (3:1) but NOT
+        # for this body-scale copy (needs 4.5:1). #b4b4c4 on #1a1a2e is ~5.4:1,
+        # a real AA pass. (Corrects the prior comment's overstated 4.05:1.)
         gr.Markdown(f"""
         ---
-        <div style="text-align: center; color: #a0a0a0;">
+        <div style="text-align: center; color: #b4b4c4;">
             Tool Compass v{__version__} | Semantic tool discovery for MCP
         </div>
         """)
@@ -1717,15 +1798,38 @@ def create_ui() -> gr.Blocks:
     }
 
     // ----- FE-B-006: combobox + listbox wiring on the search input -----
+    // FE-SB-004: aria-controls/aria-expanded must reflect whether the listbox
+    // actually exists. The #search-results-list element is only rendered on
+    // the populated-results path; before any search (and in the empty/
+    // no-match states) the reference would dangle. syncComboboxState() runs
+    // on every MutationObserver tick (Gradio swaps the results HTML) so the
+    // attributes stay honest as the listbox appears/disappears.
+    function syncComboboxState() {
+        const wrapper = document.getElementById('tc-search-input');
+        if (!wrapper) return;
+        const input = wrapper.querySelector('input, textarea');
+        if (!input) return;
+        const hasList = !!document.getElementById('search-results-list');
+        if (hasList) {
+            input.setAttribute('aria-controls', 'search-results-list');
+            input.setAttribute('aria-expanded', 'true');
+        } else {
+            input.removeAttribute('aria-controls');
+            input.setAttribute('aria-expanded', 'false');
+        }
+    }
+
     function enhanceCombobox() {
         const wrapper = document.getElementById('tc-search-input');
         if (!wrapper) return;
         const input = wrapper.querySelector('input, textarea');
-        if (!input || input.dataset.tcCombobox) return;
+        if (!input) return;
+        // Keep aria-controls/aria-expanded in sync on every tick even after
+        // the one-time wiring below has run.
+        syncComboboxState();
+        if (input.dataset.tcCombobox) return;
         input.setAttribute('role', 'combobox');
         input.setAttribute('aria-autocomplete', 'list');
-        input.setAttribute('aria-controls', 'search-results-list');
-        input.setAttribute('aria-expanded', 'true');
         input.dataset.tcCombobox = '1';
         // ArrowDown into the listbox focuses the first option, ArrowUp
         // focuses the last — matches W3C APG editable combobox.

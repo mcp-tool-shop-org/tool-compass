@@ -4,6 +4,9 @@ Tests for Tool Compass analytics module.
 Tests usage tracking, hot cache, and chain detection.
 """
 
+import asyncio
+import threading
+
 import pytest
 
 from analytics import HotToolEntry
@@ -263,6 +266,77 @@ class TestChainDetection:
         chains = await test_analytics.get_chains(limit=10)
         assert isinstance(chains, list)
 
+    @pytest.mark.asyncio
+    async def test_subsequence_counted_once_per_real_occurrence(
+        self, test_analytics
+    ):
+        """ANL-A-004: a single real occurrence of a subsequence must be
+        counted exactly once.
+
+        _save_chain_pattern used to re-count ALL length-2..5 subsequences of
+        the whole sliding deque on every call, so a subsequence stayed in the
+        window and got re-incremented on every subsequent record_tool_call —
+        systematically inflating occurrence_count. Record a strictly
+        non-repeating sequence so every subsequence occurs exactly once;
+        every persisted pattern must therefore have occurrence_count == 1.
+        """
+        import json as _json
+
+        # Strictly distinct tools => no subsequence ever truly repeats.
+        for name in ["test:a", "test:b", "test:c", "test:d", "test:e", "test:f"]:
+            await test_analytics.record_tool_call(
+                name, success=True, latency_ms=1.0
+            )
+
+        db = test_analytics._get_db()
+        rows = db.execute(
+            "SELECT tool_sequence, occurrence_count FROM chain_patterns"
+        ).fetchall()
+
+        assert rows, "expected chain_patterns to be populated"
+        overcounted = {
+            row["tool_sequence"]: row["occurrence_count"]
+            for row in rows
+            if row["occurrence_count"] != 1
+        }
+        assert not overcounted, (
+            "each subsequence occurred once but was counted multiple times: "
+            f"{overcounted}"
+        )
+
+        # Spot-check the [a, b] pair specifically: it appears once and only
+        # once in the recorded stream, so its stored count must be 1.
+        ab_hash_seq = _json.dumps(["test:a", "test:b"])
+        ab = db.execute(
+            "SELECT occurrence_count FROM chain_patterns WHERE tool_sequence = ?",
+            (ab_hash_seq,),
+        ).fetchone()
+        assert ab is not None, "the [a, b] subsequence should be recorded"
+        assert ab["occurrence_count"] == 1, ab["occurrence_count"]
+
+    @pytest.mark.asyncio
+    async def test_genuine_repeat_still_counted(self, test_analytics):
+        """ANL-A-004 guard: a subsequence that GENUINELY repeats across the
+        stream must still accumulate a count > 1, so the fix doesn't throw
+        away real occurrences."""
+        import json as _json
+
+        # a,b then later a,b again with distinct separators between, so the
+        # [a,b] pair genuinely occurs twice as a fresh suffix.
+        seq = ["test:a", "test:b", "test:x", "test:y", "test:a", "test:b"]
+        for name in seq:
+            await test_analytics.record_tool_call(
+                name, success=True, latency_ms=1.0
+            )
+
+        db = test_analytics._get_db()
+        ab = db.execute(
+            "SELECT occurrence_count FROM chain_patterns WHERE tool_sequence = ?",
+            (_json.dumps(["test:a", "test:b"]),),
+        ).fetchone()
+        assert ab is not None
+        assert ab["occurrence_count"] == 2, ab["occurrence_count"]
+
 
 class TestAnalyticsSummary:
     """Test analytics summary generation."""
@@ -336,3 +410,85 @@ class TestPersistence:
         """Should close database connection cleanly."""
         test_analytics.close()
         assert test_analytics.db is None
+
+
+class TestCloseConcurrency:
+    """ANL-A-003: close() and lazy _get_db() must mutually exclude.
+
+    close() acquired self._lock, but lazy init in _get_db() guards on
+    self._init_lock — so a concurrent record_* and close() did not serialize:
+    close could null the handle underneath an in-flight op, or a record could
+    reopen the DB *after* close. close() must also take self._init_lock and
+    refuse to reopen after close.
+    """
+
+    @pytest.mark.asyncio
+    async def test_close_refuses_reopen(self, test_analytics):
+        """After close(), a subsequent record must NOT silently reopen the DB."""
+        # Open + use the DB once.
+        await test_analytics.record_tool_call(
+            "test:warm", success=True, latency_ms=1.0
+        )
+        assert test_analytics.db is not None
+
+        test_analytics.close()
+        assert test_analytics.db is None
+
+        # A record after close must not resurrect the connection.
+        await test_analytics.record_tool_call(
+            "test:after_close", success=True, latency_ms=1.0
+        )
+        assert test_analytics.db is None, (
+            "close() must refuse reopen; DB handle was resurrected"
+        )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_close_and_record_no_crash(self, test_analytics):
+        """Hammer close() against concurrent record_* from worker threads.
+
+        Without close() taking the init lock, a thread first-touching the DB
+        could open a handle while close() nulled self.db, leaving an in-flight
+        op operating on a closed/None connection (sqlite ProgrammingError) or
+        a reopened-post-close handle. The corrected ordering must keep these
+        serialized — the loop must complete without an unexpected exception
+        escaping.
+        """
+        loop = asyncio.get_event_loop()
+        errors: list = []
+        stop = threading.Event()
+
+        def worker(n: int):
+            # Each thread drives its own event loop to call the async API.
+            wl = asyncio.new_event_loop()
+            try:
+                for i in range(15):
+                    if stop.is_set():
+                        break
+                    try:
+                        wl.run_until_complete(
+                            test_analytics.record_tool_call(
+                                f"test:t{n}", success=True, latency_ms=1.0
+                            )
+                        )
+                    except Exception as e:  # noqa: BLE001 - capture for assert
+                        errors.append(("record", repr(e)))
+            finally:
+                wl.close()
+
+        def closer():
+            for _ in range(20):
+                if stop.is_set():
+                    break
+                try:
+                    test_analytics.close()
+                except Exception as e:  # noqa: BLE001
+                    errors.append(("close", repr(e)))
+
+        threads = [threading.Thread(target=worker, args=(n,)) for n in range(4)]
+        threads.append(threading.Thread(target=closer))
+
+        await loop.run_in_executor(None, lambda: [t.start() for t in threads])
+        await loop.run_in_executor(None, lambda: [t.join(10) for t in threads])
+        stop.set()
+
+        assert not errors, f"concurrent close/record raised: {errors[:5]}"

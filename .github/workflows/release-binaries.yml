@@ -7,9 +7,22 @@
 #   checksums: checksums-<version>.txt
 name: Release Binaries
 
+# Triggers — the load-bearing one for the auto-chain is `workflow_run`:
+#  * `release: published` does NOT fire when the Release was created by
+#    release.yml using secrets.GITHUB_TOKEN (GitHub's recursion guard). Without
+#    the workflow_run trigger below, a tag-push release would publish npm + PyPI
+#    but silently SKIP the platform binaries here (and the npm wrapper that
+#    depends on them). The `workflow_run` trigger gated on
+#    Release.conclusion == 'success' closes the chain.
+#  * `release: published` retained for manual hand-cut Releases (gh release
+#    create from a maintainer's terminal — attributed to a user, fires normally).
+#  * `workflow_dispatch` retained for manually (re)building binaries for a tag.
 on:
   release:
     types: [published]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -17,9 +30,12 @@ on:
         required: true
         type: string
 
+# Serialize per-tag — resolved across all trigger types (under workflow_run
+# github.ref is the default branch, not the tag). Never cancel a mid-flight
+# binary build / asset upload.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
 
 env:
   TOOL_NAME: tool-compass
@@ -28,6 +44,11 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.target }}
+    # When triggered by workflow_run, only proceed if the upstream Release
+    # workflow succeeded. release: published / workflow_dispatch invocations set
+    # workflow_run to null, which evaluates this expression to truthy (we only
+    # short-circuit FAILED workflow_run events).
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +68,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          # Under workflow_run, github.ref is main, NOT the tag — check out the
+          # tagged commit so binaries are built from the released source.
+          ref: ${{ github.event.workflow_run.head_branch || github.event.release.tag_name || inputs.tag }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -64,7 +87,11 @@ jobs:
         id: version
         shell: bash
         run: |
-          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          # Resolve the tag across all trigger types. Under workflow_run
+          # github.event.release.tag_name is null — workflow_run.head_branch
+          # carries the tag ref. Asset names derive from this, so a stale value
+          # would name binaries tool-compass-main-... instead of -2.4.0-...
+          TAG="${{ github.event.workflow_run.head_branch || github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
@@ -126,7 +153,10 @@ jobs:
       - name: Generate checksums
         shell: bash
         run: |
-          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          # Resolve the tag across all trigger types (see Resolve version notes).
+          # The checksum filename embeds VERSION, so a stale value would emit
+          # checksums-main.txt — which npm-launcher could never find.
+          TAG="${{ github.event.workflow_run.head_branch || github.event.release.tag_name || inputs.tag }}"
           VERSION="${TAG#v}"
           cd artifacts
           sha256sum * > "checksums-${VERSION}.txt"
@@ -136,138 +166,10 @@ jobs:
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
-          tag_name: ${{ github.event.release.tag_name || inputs.tag }}
+          # Resolve the tag across all trigger types — under workflow_run the
+          # release context is null; head_branch carries the tag. A stale value
+          # would try to attach assets to a release named "main".
+          tag_name: ${{ github.event.workflow_run.head_branch || github.event.release.tag_name || inputs.tag }}
           files: artifacts/*
           fail_on_unmatched_files: true
 
-  publish-npm:
-    name: Publish npm wrapper
-    needs: attach
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
-    environment: npm
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
-        with:
-          ref: ${{ github.event.release.tag_name || inputs.tag }}
-
-      - name: Set up Node
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
-        with:
-          node-version: "20"
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Resolve version + tag
-        id: version
-        shell: bash
-        run: |
-          TAG="${{ github.event.release.tag_name || inputs.tag }}"
-          VERSION="${TAG#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Sync npm wrapper version to release tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
-          TAG="${{ steps.version.outputs.tag }}"
-          cd npm
-          # package.json version
-          node -e "const p=require('./package.json');p.version='${VERSION}';require('fs').writeFileSync('./package.json',JSON.stringify(p,null,2)+'\n');"
-          # bin shim version + tag (matches sync-version.mjs locally)
-          node -e "
-            const fs=require('fs');
-            let s=fs.readFileSync('bin/tool-compass.js','utf8');
-            s=s.replace(/version:\s*\"[^\"]+\"/,'version: \"${VERSION}\"');
-            s=s.replace(/tag:\s*\"[^\"]+\"/,'tag: \"${TAG}\"');
-            fs.writeFileSync('bin/tool-compass.js',s);
-          "
-          echo '--- Synced npm/package.json ---'
-          grep '"version"' package.json
-          echo '--- Synced npm/bin/tool-compass.js ---'
-          grep -E 'version|tag' bin/tool-compass.js
-
-      - name: Copy translated READMEs from repo root into npm wrapper
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd "${{ github.workspace }}"
-          # Source README translations live at repo root; the npm wrapper bundles
-          # them via package.json "files": ["README*.md", ...]. Copy at publish
-          # time so the single source of truth stays at the repo root.
-          for lang in ja zh es fr hi it pt-BR; do
-            if [ -f "README.${lang}.md" ]; then
-              cp "README.${lang}.md" "npm/README.${lang}.md"
-              echo "Copied README.${lang}.md → npm/"
-            else
-              echo "::warning::Missing README.${lang}.md at repo root — npm wrapper will ship without ${lang} translation"
-            fi
-          done
-          ls -la npm/README*.md
-
-      - name: Install + run wrapper smoke test
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd npm
-          npm install --no-fund --no-audit
-          npm test
-
-      - name: Wait for GitHub Release binaries to be available
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="${{ steps.version.outputs.tag }}"
-          # npm-launcher will fetch checksums-<version>.txt and the platform
-          # binary from this release tag on every fresh npx install. Fail loud
-          # rather than ship a wrapper that points at missing assets.
-          for _ in $(seq 1 12); do
-            assets=$(gh release view "$TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
-            if echo "$assets" | grep -q "checksums-${{ steps.version.outputs.version }}.txt" \
-               && echo "$assets" | grep -q "tool-compass-${{ steps.version.outputs.version }}-linux-x64" \
-               && echo "$assets" | grep -q "tool-compass-${{ steps.version.outputs.version }}-darwin-arm64" \
-               && echo "$assets" | grep -q "tool-compass-${{ steps.version.outputs.version }}-win-x64.exe"; then
-              echo "All expected binaries present on release ${TAG}:"
-              echo "$assets"
-              exit 0
-            fi
-            echo "Waiting for binaries on release ${TAG}…"
-            sleep 10
-          done
-          echo "::error::Release ${TAG} missing required binaries after 2 minutes"
-          gh release view "$TAG" --repo "${{ github.repository }}" --json assets
-          exit 1
-
-      - name: Publish to npm with provenance
-        shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: |
-          set -euo pipefail
-          cd npm
-          # --provenance emits a SLSA build attestation tied to this workflow's
-          # OIDC identity; npm verifies it before serving the package.
-          # --access public is required for first-publish of scoped packages.
-          npm publish --provenance --access public
-
-      - name: Post-publish smoke
-        shell: bash
-        run: |
-          set -euo pipefail
-          VERSION="${{ steps.version.outputs.version }}"
-          # npm registry propagation
-          for _ in $(seq 1 12); do
-            if npm view "@mcptoolshop/tool-compass@${VERSION}" version 2>/dev/null | grep -Fq "${VERSION}"; then
-              echo "npm registry has @mcptoolshop/tool-compass@${VERSION}"
-              break
-            fi
-            sleep 10
-          done
-          npm view "@mcptoolshop/tool-compass@${VERSION}" --json | jq '{name, version, dist}'
