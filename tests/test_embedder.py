@@ -918,3 +918,232 @@ class TestMetricsTotalCallsAccounting:
             assert after - before == 1
         finally:
             await emb.close()
+
+
+# =============================================================================
+# BE-FT-PE-001: Pluggable embedding provider seam
+# =============================================================================
+
+
+def _openai_embed_response():
+    """A 200-OK httpx-like response in the OpenAI embeddings shape."""
+    resp = Mock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "data": [{"embedding": np.random.randn(EMBEDDING_DIM).tolist()}]
+    }
+    return resp
+
+
+class TestProviderDefaultIsOllama:
+    """The default provider is ollama and behaves byte-for-byte as before:
+    same /api/embed endpoint, {model, input} body, nomic prefixes, and
+    data['embeddings'][0] parse. This guards the backward-compat contract.
+    """
+
+    def test_default_provider_name_is_ollama(self):
+        emb = Embedder()
+        assert emb.provider_name == "ollama"
+
+    @pytest.mark.asyncio
+    async def test_ollama_hits_api_embed_with_input_body(self):
+        emb = Embedder()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "embeddings": [np.random.randn(EMBEDDING_DIM).tolist()]
+        }
+        with patch.object(emb, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            result = await emb.embed("doc text")
+
+            assert isinstance(result, np.ndarray)
+            call = mock_client.post.call_args
+            # Endpoint is the legacy Ollama path (positional first arg).
+            assert call[0][0] == "/api/embed"
+            # Body uses the {model, input} shape with the nomic doc prefix.
+            body = call[1]["json"]
+            assert body["model"] == EMBEDDING_MODEL
+            assert body["input"].startswith("search_document:")
+            # Ollama needs no auth header.
+            assert call[1]["headers"] == {}
+
+    @pytest.mark.asyncio
+    async def test_ollama_query_uses_search_query_prefix(self):
+        emb = Embedder()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "embeddings": [np.random.randn(EMBEDDING_DIM).tolist()]
+        }
+        with patch.object(emb, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            await emb.embed_query("find files")
+
+            body = mock_client.post.call_args[1]["json"]
+            assert body["input"].startswith("search_query:")
+
+
+class TestOpenAICompatibleProvider:
+    """provider='openai' hits POST {base}/v1/embeddings with {model, input},
+    sends Authorization: Bearer when an api_key is configured, and parses the
+    vector from data[0].embedding. Non-nomic models use empty prefixes.
+    """
+
+    @pytest.mark.parametrize("provider", ["openai", "openai-compatible"])
+    def test_provider_name_resolves(self, provider):
+        emb = Embedder(provider=provider, base_url="http://lmstudio:1234")
+        # Both spellings resolve to the same backend ('openai').
+        assert emb.provider_name == "openai"
+
+    @pytest.mark.asyncio
+    async def test_openai_hits_v1_embeddings_with_bearer_and_parses_data0(self):
+        emb = Embedder(
+            provider="openai",
+            base_url="http://lmstudio:1234",
+            model="text-embedding-3-small",
+            api_key="sk-test-123",
+        )
+        with patch.object(emb, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=_openai_embed_response())
+            mock_get_client.return_value = mock_client
+
+            result = await emb.embed("a document")
+
+            assert isinstance(result, np.ndarray)
+            assert result.shape == (EMBEDDING_DIM,)
+            call = mock_client.post.call_args
+            # Endpoint is the OpenAI embeddings path.
+            assert call[0][0] == "/v1/embeddings"
+            # Body shape {model, input}; non-nomic models get NO prefix.
+            body = call[1]["json"]
+            assert body["model"] == "text-embedding-3-small"
+            assert body["input"] == "a document"
+            # Authorization: Bearer <key> from config.
+            assert call[1]["headers"]["Authorization"] == "Bearer sk-test-123"
+
+    @pytest.mark.asyncio
+    async def test_openai_query_has_no_prefix_by_default(self):
+        emb = Embedder(provider="openai", base_url="http://x:1")
+        with patch.object(emb, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=_openai_embed_response())
+            mock_get_client.return_value = mock_client
+
+            await emb.embed_query("raw query")
+
+            body = mock_client.post.call_args[1]["json"]
+            assert body["input"] == "raw query"  # no search_query: prefix
+
+    @pytest.mark.asyncio
+    async def test_openai_without_api_key_sends_no_auth_header(self):
+        # LM Studio etc. need no key — Authorization must be absent.
+        emb = Embedder(provider="openai", base_url="http://lmstudio:1234")
+        with patch.object(emb, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=_openai_embed_response())
+            mock_get_client.return_value = mock_client
+
+            await emb.embed("doc")
+
+            headers = mock_client.post.call_args[1]["headers"]
+            assert "Authorization" not in headers
+
+    @pytest.mark.asyncio
+    async def test_openai_honors_explicit_prefix_override(self):
+        emb = Embedder(
+            provider="openai",
+            base_url="http://x:1",
+            document_prefix="passage: ",
+        )
+        with patch.object(emb, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=_openai_embed_response())
+            mock_get_client.return_value = mock_client
+
+            await emb.embed("doc")
+
+            body = mock_client.post.call_args[1]["json"]
+            assert body["input"] == "passage: doc"
+
+
+class TestUnknownProviderFallback:
+    """An unknown provider name warns and falls back to ollama, preserving the
+    embed path rather than crashing on a typo."""
+
+    def test_unknown_provider_falls_back_to_ollama(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            emb = Embedder(provider="totally-made-up", base_url="http://x:1")
+        assert emb.provider_name == "ollama"
+        assert any(
+            "Unknown embedding_provider" in r.message for r in caplog.records
+        )
+
+    @pytest.mark.asyncio
+    async def test_unknown_provider_still_embeds_via_ollama_path(self):
+        emb = Embedder(provider="nope")
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            "embeddings": [np.random.randn(EMBEDDING_DIM).tolist()]
+        }
+        with patch.object(emb, "_get_client") as mock_get_client:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_get_client.return_value = mock_client
+
+            await emb.embed("text")
+
+            assert mock_client.post.call_args[0][0] == "/api/embed"
+
+
+class TestProviderRegistry:
+    """The registry is the documented extension point for future backends."""
+
+    def test_known_providers_includes_shipped(self):
+        names = embedder_module.known_providers()
+        assert "ollama" in names
+        assert "openai" in names
+        assert "openai-compatible" in names
+
+    def test_create_provider_builds_requested(self):
+        p = embedder_module.create_provider(
+            "openai", base_url="http://x:1", model="m"
+        )
+        assert isinstance(p, embedder_module.OpenAICompatibleProvider)
+        assert p.endpoint_path == "/v1/embeddings"
+
+    def test_register_custom_provider(self):
+        # A new backend is added without touching the orchestration layer.
+        @embedder_module.register_provider
+        class _DummyProvider(embedder_module.EmbeddingProvider):
+            name = "dummy-test-provider"
+
+            @property
+            def endpoint_path(self):
+                return "/dummy"
+
+            def build_body(self, text):
+                return {"t": text}
+
+            def parse_vector(self, data):
+                return data["v"]
+
+        try:
+            assert "dummy-test-provider" in embedder_module.known_providers()
+            p = embedder_module.create_provider(
+                "dummy-test-provider", base_url="http://x:1", model="m"
+            )
+            assert p.endpoint_path == "/dummy"
+        finally:
+            # Keep the global registry clean for other tests.
+            embedder_module._PROVIDER_REGISTRY.pop("dummy-test-provider", None)

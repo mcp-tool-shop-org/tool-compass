@@ -2248,3 +2248,233 @@ class TestBootstrapOllamaProbe:
         assert (
             bootstrap._ollama_has_model("http://x:11434", "nomic-embed-text") is False
         )
+
+
+# =============================================================================
+# cmd_init — onboarding scaffold + MCP-client registration snippet
+# =============================================================================
+#
+# Feature: `tool-compass init`. Resolves the user config path via
+# config.get_config_path() (which honors TOOL_COMPASS_CONFIG), writes a
+# config there (parent dirs created as needed), refuses to clobber an
+# existing config without --force, and prints a Claude Desktop mcpServers
+# snippet. --json emits {created, source, force, overwrote,
+# claude_desktop_config}. We isolate every test by pointing
+# TOOL_COMPASS_CONFIG at a fresh tmp path so the developer's real config is
+# never touched.
+
+
+@pytest.fixture
+def init_config_path(tmp_path, monkeypatch):
+    """Point get_config_path() at a fresh tmp file via TOOL_COMPASS_CONFIG.
+
+    Uses a NESTED dir that does not exist yet so the parent-dir-creation
+    path in _cmd_init is exercised on the happy path.
+    """
+    target = tmp_path / "nested" / "cfg" / "compass_config.json"
+    monkeypatch.setenv("TOOL_COMPASS_CONFIG", str(target))
+    # get_config_path resolves the env var, so the returned path is .resolve()d.
+    return Path(str(target)).resolve()
+
+
+class TestCmdInit:
+    def test_init_creates_file_at_resolved_path(self, init_config_path, capsys):
+        """init writes a config at the TOOL_COMPASS_CONFIG path, creating
+        parent dirs, and exits 0."""
+        assert not init_config_path.exists()
+        rc = cli.main(["init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert init_config_path.exists()
+        # The written file is valid JSON with a backends key (example or
+        # minimal fallback both carry it).
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        assert "backends" in written
+        # The resolved path is echoed to the user.
+        assert str(init_config_path) in out
+
+    def test_init_prints_claude_desktop_snippet(self, init_config_path, capsys):
+        """The pasteable Claude Desktop mcpServers block appears in output."""
+        rc = cli.main(["init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "mcpServers" in out
+        assert "tool-compass" in out
+        # The npx serve form must be present and copyable.
+        assert "@mcptoolshop/tool-compass" in out
+        assert "serve" in out
+
+    def test_init_prints_next_steps(self, init_config_path, capsys):
+        """Next-steps guidance references sync + serve."""
+        rc = cli.main(["init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "sync" in out
+        assert "serve" in out
+        assert "backends" in out.lower()
+
+    def test_init_refuses_overwrite_without_force(self, init_config_path, capsys):
+        """An existing config is NOT clobbered without --force; exit 1 + hint."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {"keep": "me"}}', encoding="utf-8")
+        rc = cli.main(["init"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "already exists" in err.lower()
+        assert "--force" in err
+        # The original content must be untouched.
+        preserved = json.loads(init_config_path.read_text(encoding="utf-8"))
+        assert preserved == {"backends": {"keep": "me"}}
+
+    def test_init_force_overwrites(self, init_config_path, capsys):
+        """--force replaces an existing config and reports the overwrite."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {"old": "value"}}', encoding="utf-8")
+        rc = cli.main(["init", "--force"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        # The file was rewritten — the sentinel "old" key is gone (the scaffold
+        # writes the example/minimal config, neither of which has an "old" key).
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        assert "old" not in written.get("backends", {})
+        assert "verwr" in out.lower() or "overwrote" in out.lower()  # "Overwrote"
+
+    def test_init_json_shape(self, init_config_path, capsys):
+        """--json emits a stable {created, source, force, overwrote, ...} shape."""
+        rc = cli.main(["init", "--json"])
+        out = capsys.readouterr().out.strip()
+        assert rc == 0
+        parsed = json.loads(out)
+        assert parsed["created"] == str(init_config_path)
+        assert parsed["force"] is False
+        assert parsed["overwrote"] is False
+        # The Claude Desktop config is embedded as a structured object.
+        cd = parsed["claude_desktop_config"]
+        assert cd["mcpServers"]["tool-compass"]["command"] == "npx"
+        assert "serve" in cd["mcpServers"]["tool-compass"]["args"]
+
+    def test_init_json_overwrote_flag(self, init_config_path, capsys):
+        """--json with --force over an existing file reports overwrote=True."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {}}', encoding="utf-8")
+        rc = cli.main(["init", "--force", "--json"])
+        out = capsys.readouterr().out.strip()
+        assert rc == 0
+        parsed = json.loads(out)
+        assert parsed["overwrote"] is True
+        assert parsed["force"] is True
+
+    def test_init_json_refuse_no_stdout_json(self, init_config_path, capsys):
+        """Refuse-without-force in --json mode still exits 1 (no created JSON)."""
+        init_config_path.parent.mkdir(parents=True, exist_ok=True)
+        init_config_path.write_text('{"backends": {}}', encoding="utf-8")
+        rc = cli.main(["init", "--json"])
+        captured = capsys.readouterr()
+        assert rc == 1
+        # Error rides on stderr; stdout must not carry a success JSON payload.
+        assert "already exists" in captured.err.lower()
+        assert captured.out.strip() == ""
+
+    def test_init_no_secrets_in_snippet(self, init_config_path, capsys):
+        """The pasteable snippet must NOT embed any token/secret material.
+
+        Asserts against the snippet helper directly (not full stdout) so a
+        tmp-dir name that happens to contain a marker word can't false-positive.
+        """
+        rc = cli.main(["init"])
+        assert rc == 0
+        snippet = cli._claude_desktop_snippet().lower()
+        for marker in ("token", "password", "secret", "api_key", "apikey"):
+            assert marker not in snippet
+
+    def test_init_no_color(self, init_config_path, capsys):
+        """--no-color path emits no ANSI escapes."""
+        rc = cli.main(["--no-color", "init"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "\x1b[" not in out
+
+    def test_init_copies_example_when_present(self, init_config_path, monkeypatch, capsys):
+        """When the repo example is locatable, its bytes are copied verbatim —
+        so a field a sibling agent adds to the example is picked up for free."""
+        # Force _locate_example_config to return a temp example carrying a
+        # sentinel field (mimics a future embedding_provider addition).
+        sentinel_example = init_config_path.parent.parent / "example.json"
+        sentinel_example.parent.mkdir(parents=True, exist_ok=True)
+        sentinel_example.write_text(
+            json.dumps({"backends": {}, "embedding_provider": "future_field"}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cli, "_locate_example_config", lambda: sentinel_example)
+        rc = cli.main(["init"])
+        assert rc == 0
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        # The sentinel field flowed through untouched (we copy, never reparse).
+        assert written["embedding_provider"] == "future_field"
+
+    def test_init_minimal_fallback_when_no_example(self, init_config_path, monkeypatch, capsys):
+        """When no example is locatable, a minimal valid config is written from
+        the live dataclass defaults (round-trips through to_dict)."""
+        monkeypatch.setattr(cli, "_locate_example_config", lambda: None)
+        rc = cli.main(["init"])
+        assert rc == 0
+        written = json.loads(init_config_path.read_text(encoding="utf-8"))
+        # Minimal config: empty backends skeleton + documented defaults present.
+        assert written["backends"] == {}
+        assert "ollama_url" in written
+        assert "default_top_k" in written
+
+    def test_init_write_failure_returns_1(self, init_config_path, monkeypatch, capsys):
+        """An OSError while writing the config surfaces a clean error + exit 1."""
+        import pathlib
+
+        original_write = pathlib.Path.write_text
+
+        def boom(self, *args, **kwargs):
+            if self == init_config_path:
+                raise OSError("disk full")
+            return original_write(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, "write_text", boom)
+        rc = cli.main(["init"])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "could not write" in err.lower()
+
+
+class TestInitHelpers:
+    """Direct unit coverage for the init helper functions."""
+
+    def test_claude_desktop_snippet_is_valid_json(self):
+        snippet = cli._claude_desktop_snippet()
+        parsed = json.loads(snippet)
+        server = parsed["mcpServers"]["tool-compass"]
+        assert server["command"] == "npx"
+        assert server["args"] == ["-y", "@mcptoolshop/tool-compass", "serve"]
+
+    def test_claude_desktop_snippet_obj_matches_text(self):
+        obj = cli._claude_desktop_snippet_obj()
+        assert obj == json.loads(cli._claude_desktop_snippet())
+
+    def test_minimal_config_json_round_trips(self):
+        """The minimal-config fallback is valid JSON that load-parses into a
+        CompassConfig via from_dict (defaults round-trip)."""
+        import config
+
+        raw = cli._minimal_config_json()
+        data = json.loads(raw)
+        # from_dict must accept it without raising — it's a real config shape.
+        cfg = config.CompassConfig.from_dict(data)
+        assert cfg.backends == {}
+        # to_dict/from_dict round-trip stability: the parsed config re-serializes
+        # to the same documented-default values.
+        assert cfg.to_dict()["default_top_k"] == data["default_top_k"]
+
+    def test_locate_example_config_finds_repo_example(self):
+        """In a source checkout the repo example sits next to cli.py."""
+        located = cli._locate_example_config()
+        # The repo ships compass_config.example.json next to cli.py, so this
+        # resolves in the test environment.
+        assert located is not None
+        assert located.name == "compass_config.example.json"
+        assert located.is_file()

@@ -617,6 +617,153 @@ class TestTopChainsCacheSizeClamp:
         assert config.top_chains_cache_size == CompassConfig().top_chains_cache_size
 
 
+class TestEmbeddingProviderConfig:
+    """BE-FT-PE-001: the pluggable-embedding config fields round-trip through
+    to_dict/from_dict, validate against the known providers (unknown -> warn +
+    fall back to ollama), redact the api_key in doctor() dumps, and honor the
+    TOOL_COMPASS_EMBEDDING_API_KEY env override."""
+
+    def test_defaults_preserve_ollama_behavior(self):
+        config = CompassConfig()
+        assert config.embedding_provider == "ollama"
+        assert config.embedding_base_url is None
+        assert config.embedding_api_key is None
+        assert config.embedding_query_prefix is None
+        assert config.embedding_document_prefix is None
+
+    def test_new_fields_roundtrip(self):
+        original = CompassConfig(
+            embedding_provider="openai",
+            embedding_base_url="http://lmstudio:1234",
+            embedding_api_key="sk-secret-abc",
+            embedding_query_prefix="",
+            embedding_document_prefix="passage: ",
+        )
+        data = original.to_dict()
+        # All new fields are serialized.
+        assert data["embedding_provider"] == "openai"
+        assert data["embedding_base_url"] == "http://lmstudio:1234"
+        assert data["embedding_api_key"] == "sk-secret-abc"
+        assert data["embedding_query_prefix"] == ""
+        assert data["embedding_document_prefix"] == "passage: "
+
+        restored = CompassConfig.from_dict(data)
+        assert restored.embedding_provider == "openai"
+        assert restored.embedding_base_url == "http://lmstudio:1234"
+        assert restored.embedding_api_key == "sk-secret-abc"
+        assert restored.embedding_query_prefix == ""
+        assert restored.embedding_document_prefix == "passage: "
+
+    def test_openai_compatible_alias_normalizes(self):
+        config = CompassConfig.from_dict(
+            {"backends": {}, "embedding_provider": "openai-compatible"}
+        )
+        # 'openai-compatible' is a known provider (registry alias) and is
+        # stored normalized (lower-cased, stripped) but NOT rewritten.
+        assert config.embedding_provider == "openai-compatible"
+
+    def test_unknown_provider_falls_back_to_ollama(self):
+        config = CompassConfig.from_dict(
+            {"backends": {}, "embedding_provider": "made-up-backend"}
+        )
+        assert config.embedding_provider == "ollama"
+
+    def test_provider_case_insensitive(self):
+        config = CompassConfig.from_dict(
+            {"backends": {}, "embedding_provider": "OpenAI"}
+        )
+        assert config.embedding_provider == "openai"
+
+    def test_api_key_is_redacted_in_redact_config(self):
+        cfg = CompassConfig(
+            embedding_provider="openai",
+            embedding_base_url="http://x:1",
+            embedding_api_key="sk-super-secret-999",
+        )
+        redacted = _redact_config(cfg.to_dict())
+        blob = json.dumps(redacted)
+        assert "sk-super-secret-999" not in blob
+        # Field name (containing _key) triggers name-based redaction.
+        assert redacted["embedding_api_key"] == "[REDACTED]"
+        # Non-secret sibling fields stay visible for diagnosability.
+        assert redacted["embedding_provider"] == "openai"
+        assert redacted["embedding_base_url"] == "http://x:1"
+
+    def test_doctor_does_not_leak_embedding_api_key(self, tmp_path):
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "embedding_provider": "openai",
+            "embedding_base_url": "http://x:1",
+            "embedding_api_key": "${MY_EMBED_KEY}",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "MY_EMBED_KEY": "live_embed_secret_777",
+        }
+        with patch.dict(os.environ, env):
+            report = doctor()
+        blob = json.dumps(report, default=str)
+        assert "live_embed_secret_777" not in blob
+        assert report["config"]["embedding_api_key"] == "[REDACTED]"
+
+    def test_env_var_overrides_api_key(self, tmp_path):
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "embedding_provider": "openai",
+            "embedding_base_url": "http://x:1",
+            "embedding_api_key": "file-key",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "TOOL_COMPASS_EMBEDDING_API_KEY": "env-wins-key",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        # Env override wins over the file value (operator-intent signal).
+        assert config.embedding_api_key == "env-wins-key"
+
+    def test_empty_env_api_key_does_not_blank_file_value(self, tmp_path):
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "embedding_api_key": "file-key",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "TOOL_COMPASS_EMBEDDING_API_KEY": "",  # exported but empty
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.embedding_api_key == "file-key"
+
+    def test_resolved_base_url_ollama_uses_ollama_url(self):
+        cfg = CompassConfig(ollama_url="http://oll:11434")
+        assert cfg.resolved_embedding_base_url() == "http://oll:11434"
+
+    def test_resolved_base_url_prefers_override(self):
+        cfg = CompassConfig(
+            embedding_provider="openai",
+            ollama_url="http://oll:11434",
+            embedding_base_url="http://lmstudio:1234",
+        )
+        assert cfg.resolved_embedding_base_url() == "http://lmstudio:1234"
+
+    def test_example_config_file_roundtrips(self):
+        """compass_config.example.json must parse and round-trip cleanly
+        (including the new embedding_* fields)."""
+        example_path = (
+            Path(__file__).resolve().parent.parent / "compass_config.example.json"
+        )
+        data = json.loads(example_path.read_text())
+        config = CompassConfig.from_dict(data)
+        assert config.embedding_provider == "ollama"
+        # Round-trips back out.
+        restored = CompassConfig.from_dict(config.to_dict())
+        assert restored.embedding_provider == "ollama"
+
+
 class TestDoctorAnalyticsHealth:
     """CFGDOC-04: doctor() now reports the analytics degraded state via
     analytics.get_health() — but only if a live singleton already exists, and

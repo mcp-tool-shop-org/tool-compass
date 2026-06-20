@@ -406,3 +406,98 @@ class TestToolDefinition:
 
         for param in tool.parameters.keys():
             assert param in text
+
+
+class TestCacheKeyIncorporatesProvider:
+    """BE-FT-PE-001: the embedding cache key must fold in the PROVIDER name and
+    base_url (in addition to the model) so switching embedding_provider /
+    embedding_base_url can't return a stale cross-provider vector for the same
+    text. The dim self-heal is unaffected — it keys on EMBEDDING_DIM + BLOB
+    byte length, not this hash.
+    """
+
+    def _index_with_embedder(self, embedder, temp_index_path, temp_db_path):
+        return CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=embedder,
+        )
+
+    def test_hash_differs_across_provider_names(
+        self, temp_index_path, temp_db_path
+    ):
+        """Same text + same base_url + same model but DIFFERENT provider name
+        -> different cache key."""
+        from unittest.mock import Mock
+
+        e1 = Mock()
+        e1.provider_name = "ollama"
+        e1.base_url = "http://localhost:11434"
+        e1.model = "nomic-embed-text"
+
+        e2 = Mock()
+        e2.provider_name = "openai"
+        e2.base_url = "http://localhost:11434"
+        e2.model = "nomic-embed-text"
+
+        idx1 = self._index_with_embedder(e1, temp_index_path, temp_db_path)
+        idx2 = self._index_with_embedder(
+            e2, temp_index_path.with_suffix(".2.hnsw"),
+            temp_db_path.with_suffix(".2.db"),
+        )
+
+        text = "read a file from disk"
+        assert idx1._compute_text_hash(text) != idx2._compute_text_hash(text)
+
+    def test_hash_differs_across_base_urls(
+        self, temp_index_path, temp_db_path
+    ):
+        """Same provider + model but DIFFERENT base_url -> different key
+        (two OpenAI-compatible endpoints can return different vectors)."""
+        from unittest.mock import Mock
+
+        e1 = Mock()
+        e1.provider_name = "openai"
+        e1.base_url = "http://server-a:1234"
+        e1.model = "text-embedding-3-small"
+
+        e2 = Mock()
+        e2.provider_name = "openai"
+        e2.base_url = "http://server-b:1234"
+        e2.model = "text-embedding-3-small"
+
+        idx1 = self._index_with_embedder(e1, temp_index_path, temp_db_path)
+        idx2 = self._index_with_embedder(
+            e2, temp_index_path.with_suffix(".2.hnsw"),
+            temp_db_path.with_suffix(".2.db"),
+        )
+
+        text = "read a file from disk"
+        assert idx1._compute_text_hash(text) != idx2._compute_text_hash(text)
+
+    def test_hash_stable_for_same_provider(
+        self, temp_index_path, temp_db_path, mock_embedder
+    ):
+        """Identical embedder identity -> identical key (cache hits still
+        work)."""
+        idx = self._index_with_embedder(
+            mock_embedder, temp_index_path, temp_db_path
+        )
+        text = "read a file from disk"
+        assert idx._compute_text_hash(text) == idx._compute_text_hash(text)
+
+    def test_hash_degrades_gracefully_without_provider_name(
+        self, temp_index_path, temp_db_path
+    ):
+        """A pre-seam / mock embedder exposing only base_url + model must not
+        crash _compute_text_hash (provider_name missing -> 'unknown')."""
+        from unittest.mock import Mock
+
+        e = Mock(spec=["base_url", "model"])
+        e.base_url = "http://localhost:11434"
+        e.model = "nomic-embed-text"
+        idx = self._index_with_embedder(e, temp_index_path, temp_db_path)
+        # Must produce a stable hex digest, not raise.
+        h = idx._compute_text_hash("some text")
+        assert isinstance(h, str)
+        assert len(h) == 64

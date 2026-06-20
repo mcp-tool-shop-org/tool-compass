@@ -216,13 +216,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "Tool Compass — semantic MCP tool discovery gateway.\n"
             "\n"
             "With no subcommand, runs the gateway server (default).\n"
-            "Subcommands: serve, search, describe, sync, doctor, ui, status,\n"
-            "             categories, audit, analytics, chains.\n"
+            "Subcommands: init, serve, search, describe, sync, doctor, ui,\n"
+            "             status, categories, audit, analytics, chains.\n"
+            "First run: `tool-compass init` scaffolds a config + prints setup.\n"
             "Web UI: install `tool-compass[ui]` and run `tool-compass ui`."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
+            "  tool-compass init                  # first-run setup (config + MCP snippet)\n"
             "  tool-compass                       # run the MCP gateway\n"
             "  tool-compass search 'read a file'  # one-shot search\n"
             "  tool-compass describe bridge:read_file\n"
@@ -406,6 +408,37 @@ def _build_parser() -> argparse.ArgumentParser:
             "Run with HTTP transport. Without a value: uses $PORT (or 8080). "
             "With a value (e.g. --http 9090): sets PORT to that value."
         ),
+    )
+
+    # init — scaffold a compass_config.json at the resolved user config path
+    # and print a ready-to-paste Claude Desktop MCP snippet. The onboarding
+    # entry point: a first-run user types `tool-compass init`, gets a config
+    # file plus the next three commands, and can paste the mcpServers block
+    # straight into their client.
+    p_init = sub.add_parser(
+        "init",
+        help="Scaffold compass_config.json + print MCP client setup",
+        epilog=(
+            "Examples:\n"
+            "  tool-compass init                # write config + print next steps\n"
+            "  tool-compass init --force        # overwrite an existing config\n"
+            "  tool-compass init --json | jq .created\n"
+            "\n"
+            "Writes to the resolved user config path (see `tool-compass doctor`).\n"
+            "Refuses to clobber an existing config unless --force is passed.\n"
+            "Prints a Claude Desktop mcpServers snippet you can paste verbatim."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_init.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing compass_config.json (default refuses).",
+    )
+    p_init.add_argument(
+        "--json",
+        action="store_true",
+        help="JSON output ({created, force, overwrote}) for script pipelines.",
     )
 
     # ui — launch the Gradio web UI. Thin wrapper around `tool-compass-ui`.
@@ -922,6 +955,186 @@ def _cmd_sync(args: argparse.Namespace) -> int:
             ),
             exit_code=1,
         )
+
+
+# =============================================================================
+# init — onboarding scaffold + MCP-client registration snippet
+# =============================================================================
+
+
+# Server key + npx package name used in the pasteable Claude Desktop snippet.
+# Kept as module constants so the handler and tests reference one source.
+_MCP_SERVER_KEY = "tool-compass"
+_NPX_PACKAGE = "@mcptoolshop/tool-compass"
+
+
+def _claude_desktop_snippet() -> str:
+    """Return a ready-to-paste Claude Desktop `mcpServers` JSON block.
+
+    Uses the zero-prerequisite `npx -y @mcptoolshop/tool-compass serve` form
+    (matches npm/README.md + the handbook recipes). Deliberately carries NO
+    secrets — backends and any tokens live in compass_config.json, never in
+    the client config — so a user can paste this verbatim without leaking
+    anything. Built via ``json.dumps`` so the indentation is always valid
+    JSON the user can drop straight into ``claude_desktop_config.json``.
+    """
+    block = {
+        "mcpServers": {
+            _MCP_SERVER_KEY: {
+                "command": "npx",
+                "args": ["-y", _NPX_PACKAGE, "serve"],
+            }
+        }
+    }
+    return json.dumps(block, indent=2)
+
+
+def _minimal_config_json() -> str:
+    """Serialize a minimal-but-valid compass_config.json.
+
+    Fallback used only when the repo's ``compass_config.example.json`` cannot
+    be located (e.g. a wheel install that doesn't ship the example). Rather
+    than duplicate the full schema, we round-trip the in-code defaults through
+    ``CompassConfig.to_dict()`` so the written file always tracks the live
+    schema (including any new fields a sibling agent adds to the dataclass).
+    The empty ``backends: {}`` skeleton signals the user to fill it in.
+    """
+    from config import get_default_config
+
+    return json.dumps(get_default_config().to_dict(), indent=2)
+
+
+def _locate_example_config() -> Optional[Path]:
+    """Find the repo's compass_config.example.json, or None if absent.
+
+    Checks next to this module first (source/editable installs ship the
+    example alongside cli.py), then the resolved base path. Copying the
+    example at runtime means a field another agent adds to the example
+    (e.g. ``embedding_provider``) is picked up automatically — we never
+    parse or rewrite it, just copy the bytes.
+    """
+    candidates = [Path(__file__).parent / "compass_config.example.json"]
+    try:
+        from config import get_base_path
+
+        candidates.append(get_base_path() / "compass_config.example.json")
+    except Exception:  # pragma: no cover — defensive
+        pass
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _cmd_init(args: argparse.Namespace) -> int:
+    """Scaffold compass_config.json + print MCP-client setup.
+
+    The onboarding entry point. Resolves the user config path via
+    ``config.get_config_path()`` (honors TOOL_COMPASS_CONFIG /
+    TOOL_COMPASS_DATA_DIR exactly like every other command), creates parent
+    dirs, and writes a config — sourced from the repo's
+    ``compass_config.example.json`` if locatable, else a minimal valid config
+    round-tripped from the live dataclass defaults.
+
+    Refuses to overwrite an existing config unless ``--force`` is passed
+    (exit 1 + hint). On success prints the written path, the next three
+    commands, and a Claude Desktop ``mcpServers`` snippet. ``--json`` emits a
+    ``{created, force, overwrote}`` shape with zero decoration for scripts.
+    """
+    err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
+    out_console = _make_console(no_color_flag=_no_color(args))
+    json_mode = bool(getattr(args, "json", False))
+    force = bool(getattr(args, "force", False))
+
+    from config import get_config_path
+
+    config_path = get_config_path()
+
+    # Refuse to clobber an existing config unless --force. Exit 1 (expected
+    # failure) with an actionable hint — never a silent overwrite.
+    existed = config_path.exists()
+    if existed and not force:
+        return _print_error(
+            err_console,
+            f"Config already exists at {config_path}.",
+            hint="Pass --force to overwrite it, or edit it directly.",
+            exit_code=1,
+        )
+
+    # Resolve the content: prefer copying the example (so a field a sibling
+    # agent adds to the example is picked up for free), else a minimal config.
+    example = _locate_example_config()
+    try:
+        if example is not None:
+            content = example.read_text(encoding="utf-8")
+            source = str(example)
+        else:
+            content = _minimal_config_json()
+            source = "built-in defaults"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(content, encoding="utf-8")
+    except OSError as e:
+        return _print_error(
+            err_console,
+            f"Could not write config to {config_path}: {e}",
+            hint="Check the directory is writable, or set TOOL_COMPASS_CONFIG.",
+            exit_code=1,
+        )
+
+    snippet = _claude_desktop_snippet()
+
+    if json_mode:
+        # Pure JSON on stdout — no decoration so `... --json | jq` works.
+        payload = {
+            "created": str(config_path),
+            "source": source,
+            "force": force,
+            "overwrote": existed,
+            "claude_desktop_config": _claude_desktop_snippet_obj(),
+        }
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    verb = "Overwrote" if existed else "Created"
+    # Print the path on its own plain line so Rich never reflows it mid-path —
+    # a wrapped config path is un-copyable. The ✓ line stays styled.
+    _print_success(out_console, f"{verb} config:")
+    print(str(config_path))
+    out_console.print()
+    out_console.print("[bold]Next steps[/bold]")
+    out_console.print(
+        f"  [{_C_DIM}]1.[/{_C_DIM}] Edit [bold]backends[/bold] in "
+        f"{config_path} to point at your MCP servers."
+    )
+    out_console.print(
+        f"  [{_C_DIM}]2.[/{_C_DIM}] Run [bold]tool-compass sync[/bold] to "
+        "build the search index."
+    )
+    out_console.print(
+        f"  [{_C_DIM}]3.[/{_C_DIM}] Run [bold]tool-compass serve[/bold] to "
+        "start the MCP gateway."
+    )
+    out_console.print()
+    out_console.print(
+        "[bold]Register with Claude Desktop[/bold] "
+        f"[{_C_DIM}](paste into claude_desktop_config.json):[/{_C_DIM}]"
+    )
+    # Print the snippet via a plain print so Rich never reflows / styles the
+    # JSON — the user must be able to copy it byte-for-byte.
+    print(snippet)
+    return 0
+
+
+def _claude_desktop_snippet_obj() -> dict:
+    """The Claude Desktop snippet as a dict (for the --json payload)."""
+    return {
+        "mcpServers": {
+            _MCP_SERVER_KEY: {
+                "command": "npx",
+                "args": ["-y", _NPX_PACKAGE, "serve"],
+            }
+        }
+    }
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
@@ -1602,6 +1815,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 return gateway_main() or 0
             finally:
                 sys.argv = saved_argv
+        if args.command == "init":
+            return _cmd_init(args)
         if args.command == "doctor":
             return _cmd_doctor(args)
         if args.command == "search":

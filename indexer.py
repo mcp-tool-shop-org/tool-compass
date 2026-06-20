@@ -109,14 +109,26 @@ class CompassIndex:
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _compute_text_hash(self, text: str) -> str:
-        """Compute stable cache key from (text, provider, model).
+        """Compute stable cache key from (text, provider, base_url, model).
 
-        Combining text+provider+model avoids cross-model contamination when
-        the embedding backend swaps (e.g., nomic-embed-text → different dim).
+        BE-FT-PE-001: with a pluggable embedding backend the same text+model
+        can produce DIFFERENT vectors across providers (e.g. ollama
+        nomic-embed-text vs an OpenAI-compatible server), and even across
+        endpoints of the same provider. Folding the provider NAME and the
+        base_url into the key — in addition to the model — guarantees a cache
+        entry written by one provider can never be served to another, so
+        switching ``embedding_provider`` / ``embedding_base_url`` can't return
+        a stale cross-provider vector. The dim self-heal in ``_cache_get`` is
+        unaffected (it keys on EMBEDDING_DIM + BLOB byte length, not this hash).
+
+        ``provider_name`` is read defensively: test mocks and any embedder
+        predating the seam expose only ``base_url`` / ``model``, so a missing
+        attribute degrades to "unknown" rather than raising.
         """
-        provider = getattr(self.embedder, "base_url", "unknown")
+        provider_name = getattr(self.embedder, "provider_name", "unknown")
+        base_url = getattr(self.embedder, "base_url", "unknown")
         model = getattr(self.embedder, "model", "unknown")
-        payload = f"{text}||{provider}||{model}".encode("utf-8")
+        payload = f"{text}||{provider_name}||{base_url}||{model}".encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
     def _cache_get(self, text_hash: str) -> Optional[np.ndarray]:

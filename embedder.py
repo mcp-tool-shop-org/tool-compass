@@ -1,11 +1,36 @@
 """
 Tool Compass - Embedder Module
-Handles embedding generation via Ollama's nomic-embed-text model.
+Handles embedding generation via a *pluggable* provider backend.
+
+Provider seam (BE-FT-PE-001)
+============================
+Historically this module was hard-wired to Ollama's ``POST /api/embed``
+endpoint with the nomic-embed-text ``search_query:`` / ``search_document:``
+prefix convention. The low-risk seam decouples the *transport orchestration*
+(circuit breaker + retry + per-loop concurrency cap + cache + metrics) from
+the *provider-specific* parts:
+
+    - the endpoint path appended to ``base_url`` (Ollama: ``/api/embed``),
+    - the request body shape (Ollama: ``{"model", "input"}``),
+    - where the vector lives in the JSON response
+      (Ollama: ``data["embeddings"][0]``),
+    - the per-kind text prefix (nomic: ``search_query:`` / ``search_document:``),
+    - any auth headers (OpenAI-compatible: ``Authorization: Bearer <key>``).
+
+Everything the orchestration layer does is unchanged: ``Embedder`` still owns
+``_embed_with_concurrency_cap`` / ``_post_embed_with_retry`` / the breaker /
+``_record_*`` / the per-loop semaphore. They now call
+``self._provider.endpoint_path`` / ``build_body`` / ``parse_vector`` /
+``apply_prefix`` / ``request_headers`` instead of the hardcoded Ollama call.
+
+Adding a new backend (e.g. sentence-transformers, Cohere) means writing an
+``EmbeddingProvider`` subclass and registering it via ``@register_provider``
+— the orchestration layer never changes.
 """
 
 import httpx
 import numpy as np
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple, Type
 import asyncio
 import logging
 import time
@@ -18,6 +43,15 @@ logger = logging.getLogger(__name__)
 OLLAMA_BASE_URL = "http://localhost:11434"
 EMBEDDING_MODEL = "nomic-embed-text"
 EMBEDDING_DIM = 768  # nomic-embed-text dimension
+
+# Default provider — current behavior. Keeping this a module constant means a
+# bare Embedder() embeds byte-for-byte identically to the pre-seam code.
+DEFAULT_PROVIDER = "ollama"
+
+# nomic-embed-text retrieval-prefix convention. Non-nomic models (OpenAI etc.)
+# don't use it, so providers expose configurable/empty prefixes.
+NOMIC_QUERY_PREFIX = "search_query: "
+NOMIC_DOCUMENT_PREFIX = "search_document: "
 
 # Circuit breaker + retry tuning (IDX-B-002, IDX-B-004).
 # BE-B-014: defaults; CompassConfig overrides at Embedder.__init__.
@@ -72,10 +106,229 @@ def _get_global_embed_semaphore() -> asyncio.Semaphore:
     return sem
 
 
+# =============================================================================
+# Provider seam (BE-FT-PE-001)
+# =============================================================================
+#
+# An EmbeddingProvider isolates the provider-specific request/response details.
+# It is intentionally tiny and stateless w.r.t. the orchestration layer: it
+# does NOT own the httpx client, the breaker, retries, or the cache. The
+# Embedder calls into it for exactly five things:
+#
+#   endpoint_path                -> path appended to base_url for the POST
+#   request_headers()            -> auth/content headers for the POST
+#   build_body(text)             -> the JSON body dict
+#   parse_vector(json_response)  -> the raw embedding list out of the JSON
+#   apply_prefix(text, kind)     -> retrieval prefix ('query' | 'document')
+#
+# This keeps the seam at the smallest possible surface — the same retry +
+# breaker + concurrency + cache + metrics path serves every provider.
+
+
+class EmbeddingProvider:
+    """Base class for a provider-specific embedding backend.
+
+    Subclasses customize the endpoint, body shape, response parse, auth
+    headers, and retrieval-prefix convention. The orchestration layer
+    (breaker/retry/concurrency/cache/metrics) lives entirely in ``Embedder``
+    and is never touched by a provider.
+    """
+
+    #: Provider name as used in config + the registry. Subclasses set this.
+    name: str = "base"
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        api_key: Optional[str] = None,
+        query_prefix: Optional[str] = None,
+        document_prefix: Optional[str] = None,
+    ):
+        # base_url is normalized (no trailing slash) so endpoint joins are
+        # predictable regardless of how the operator wrote it in config.
+        self.base_url = (base_url or "").rstrip("/")
+        self.model = model
+        self.api_key = api_key
+        # None means "use this provider's default prefix"; "" means "no prefix"
+        # (an explicit operator choice). We distinguish them deliberately.
+        self.query_prefix = (
+            query_prefix if query_prefix is not None else self.default_query_prefix
+        )
+        self.document_prefix = (
+            document_prefix
+            if document_prefix is not None
+            else self.default_document_prefix
+        )
+
+    # --- prefix convention -------------------------------------------------
+    default_query_prefix: str = ""
+    default_document_prefix: str = ""
+
+    def apply_prefix(self, text: str, kind: str) -> str:
+        """Prefix ``text`` per the retrieval convention for ``kind``.
+
+        kind is 'query' or 'document'. Unknown kinds get the document prefix
+        (the conservative default — corpus embeddings outnumber queries).
+        """
+        if kind == "query":
+            return f"{self.query_prefix}{text}"
+        return f"{self.document_prefix}{text}"
+
+    # --- transport ---------------------------------------------------------
+    @property
+    def endpoint_path(self) -> str:
+        """Path appended to base_url for the embed POST. Override per provider."""
+        raise NotImplementedError
+
+    def request_headers(self) -> Dict[str, str]:
+        """Headers for the embed POST. Default: none (Ollama needs no auth)."""
+        return {}
+
+    def build_body(self, text: str) -> dict:
+        """Build the JSON request body for one already-prefixed text."""
+        raise NotImplementedError
+
+    def parse_vector(self, data: dict) -> list:
+        """Pull the raw embedding list out of the parsed JSON response."""
+        raise NotImplementedError
+
+
+class OllamaProvider(EmbeddingProvider):
+    """Default provider — Ollama's ``POST /api/embed`` (byte-for-byte legacy).
+
+    Body: ``{"model", "input"}``. Vector at ``data["embeddings"][0]``.
+    Prefixes: the nomic search_query/search_document convention.
+    """
+
+    name = "ollama"
+    default_query_prefix = NOMIC_QUERY_PREFIX
+    default_document_prefix = NOMIC_DOCUMENT_PREFIX
+
+    @property
+    def endpoint_path(self) -> str:
+        return "/api/embed"
+
+    def build_body(self, text: str) -> dict:
+        return {"model": self.model, "input": text}
+
+    def parse_vector(self, data: dict) -> list:
+        # Legacy parse — kept exactly as the pre-seam code:
+        # data["embeddings"][0].
+        return data["embeddings"][0]
+
+
+class OpenAICompatibleProvider(EmbeddingProvider):
+    """OpenAI / OpenAI-compatible provider — ``POST {base}/v1/embeddings``.
+
+    Covers OpenAI, LM Studio, and any server exposing the OpenAI embeddings
+    contract. Body: ``{"model", "input"}``. Vector at
+    ``data["data"][0]["embedding"]``. An api_key (from config or env) is sent
+    as ``Authorization: Bearer <key>``. Prefixes default to empty because
+    non-nomic models don't use the search_* retrieval convention; an operator
+    can still set them explicitly via config.
+    """
+
+    name = "openai"
+    # Non-nomic models: no retrieval prefix by default.
+    default_query_prefix = ""
+    default_document_prefix = ""
+
+    @property
+    def endpoint_path(self) -> str:
+        return "/v1/embeddings"
+
+    def request_headers(self) -> Dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def build_body(self, text: str) -> dict:
+        return {"model": self.model, "input": text}
+
+    def parse_vector(self, data: dict) -> list:
+        # OpenAI embeddings contract: data["data"][0]["embedding"].
+        return data["data"][0]["embedding"]
+
+
+# --- registry / factory ----------------------------------------------------
+#
+# The registry is the documented extension point. To add a backend later
+# (sentence-transformers, Cohere, ...) write an EmbeddingProvider subclass and
+# decorate it with @register_provider — no orchestration-layer changes needed.
+
+_PROVIDER_REGISTRY: Dict[str, Type[EmbeddingProvider]] = {}
+
+
+def register_provider(cls: Type[EmbeddingProvider]) -> Type[EmbeddingProvider]:
+    """Class decorator: register an EmbeddingProvider under its ``name``.
+
+    Also registers any aliases listed in a ``aliases`` class attribute so
+    'openai-compatible' resolves to the OpenAI provider.
+    """
+    _PROVIDER_REGISTRY[cls.name] = cls
+    for alias in getattr(cls, "aliases", ()):  # pragma: no branch
+        _PROVIDER_REGISTRY[alias] = cls
+    return cls
+
+
+# Register the two shipped providers. 'openai-compatible' is an alias so both
+# spellings in config resolve to the same backend.
+OpenAICompatibleProvider.aliases = ("openai-compatible",)
+register_provider(OllamaProvider)
+register_provider(OpenAICompatibleProvider)
+
+
+def known_providers() -> Tuple[str, ...]:
+    """Return the sorted tuple of registered provider names (incl. aliases)."""
+    return tuple(sorted(_PROVIDER_REGISTRY.keys()))
+
+
+def create_provider(
+    provider: Optional[str],
+    base_url: str,
+    model: str,
+    api_key: Optional[str] = None,
+    query_prefix: Optional[str] = None,
+    document_prefix: Optional[str] = None,
+) -> EmbeddingProvider:
+    """Factory: build the EmbeddingProvider for ``provider``.
+
+    An unknown provider name warns and falls back to the default (ollama) so a
+    typo in config degrades gracefully to working behavior rather than
+    crashing the embed path — mirroring CompassConfig.validate_and_clamp's
+    "warn + fall back" discipline.
+    """
+    key = (provider or DEFAULT_PROVIDER).strip().lower()
+    cls = _PROVIDER_REGISTRY.get(key)
+    if cls is None:
+        logger.warning(
+            "Unknown embedding_provider %r; falling back to %r. "
+            "Known providers: %s",
+            provider,
+            DEFAULT_PROVIDER,
+            ", ".join(known_providers()),
+        )
+        cls = _PROVIDER_REGISTRY[DEFAULT_PROVIDER]
+    return cls(
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        query_prefix=query_prefix,
+        document_prefix=document_prefix,
+    )
+
+
 class Embedder:
     """
-    Async embedder using Ollama's nomic-embed-text model.
-    Optimized for tool description embedding.
+    Async embedder with a pluggable provider backend (default: Ollama).
+
+    The orchestration layer — circuit breaker + retry + per-loop concurrency
+    cap + metrics — is provider-agnostic. Provider-specific details
+    (endpoint, body, response parse, auth, prefixes) live behind
+    ``self._provider``. A bare ``Embedder()`` is byte-for-byte the legacy
+    Ollama nomic-embed-text embedder.
     """
 
     def __init__(
@@ -88,6 +341,10 @@ class Embedder:
         retry_attempts: Optional[int] = None,
         retry_backoffs: Optional[Tuple[float, ...]] = None,
         on_breaker_transition: Optional[Callable[[str, str], None]] = None,
+        provider: Optional[str] = None,
+        api_key: Optional[str] = None,
+        query_prefix: Optional[str] = None,
+        document_prefix: Optional[str] = None,
     ):
         """Initialize embedder.
 
@@ -100,10 +357,34 @@ class Embedder:
             on_breaker_transition: callback fired on state transition
                 (from_state, to_state) — used by the gateway to emit the
                 breaker_transitions_total counter (BE-B-002).
+
+        Provider seam (BE-FT-PE-001 — all optional, default to the legacy
+        Ollama behavior so a bare ``Embedder()`` is unchanged):
+            provider: backend name ('ollama' [default] / 'openai' /
+                'openai-compatible'). Unknown -> warn + fall back to ollama.
+            api_key: secret for OpenAI-compatible auth (Authorization: Bearer).
+            query_prefix / document_prefix: override the retrieval prefix
+                convention. None -> the provider's default (nomic search_* for
+                ollama, empty for openai).
         """
         self.base_url = base_url
         self.model = model
         self.timeout = timeout
+
+        # Build the provider behind the orchestration layer. An unknown name
+        # warns + falls back to ollama (graceful degradation, not a crash).
+        self.provider_name = (provider or DEFAULT_PROVIDER).strip().lower()
+        self._provider = create_provider(
+            provider=provider,
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            query_prefix=query_prefix,
+            document_prefix=document_prefix,
+        )
+        # Reflect the actually-resolved provider name (post fallback) so
+        # callers/metrics report the truth, not the requested-but-unknown name.
+        self.provider_name = self._provider.name
 
         self._breaker_failure_threshold = (
             int(breaker_failure_threshold)
@@ -377,22 +658,31 @@ class Embedder:
         payload: dict,
         trace_id: Optional[str] = None,
     ) -> httpx.Response:
-        """POST /api/embed with retry on transient failures (IDX-B-004 + BE-B-014).
+        """POST the provider's embed endpoint with retry (IDX-B-004 + BE-B-014).
 
         Retries on: TransportError, TimeoutException, 5xx responses.
         Does NOT retry 4xx (client errors).
         Every failed attempt counts toward the circuit breaker.
         Breaker must be probed BEFORE entering this method so we don't
-        waste attempts when Ollama is known-down.
+        waste attempts when the backend is known-down.
 
         Retry attempts and backoff are taken from instance config (BE-B-014).
+
+        BE-FT-PE-001: the endpoint path + auth headers come from the provider
+        (Ollama: ``/api/embed`` + no headers; OpenAI-compatible:
+        ``/v1/embeddings`` + ``Authorization: Bearer``). The retry/breaker
+        logic itself is untouched.
         """
         last_exc: Optional[BaseException] = None
         attempts = self._retry_attempts
         backoffs = self._retry_backoffs
+        endpoint = self._provider.endpoint_path
+        headers = self._provider.request_headers()
         for attempt in range(1, attempts + 1):
             try:
-                response = await client.post("/api/embed", json=payload)
+                response = await client.post(
+                    endpoint, json=payload, headers=headers
+                )
                 if response.status_code >= 500:
                     # Transient server error — retry.
                     err = f"HTTP {response.status_code}: {response.text[:200]}"
@@ -481,7 +771,8 @@ class Embedder:
                 start = time.monotonic()
                 response = await self._post_embed_with_retry(
                     client,
-                    {"model": self.model, "input": prefixed_text},
+                    # BE-FT-PE-001: provider builds the request body shape.
+                    self._provider.build_body(prefixed_text),
                     trace_id=trace_id,
                 )
                 latency_ms = (time.monotonic() - start) * 1000.0
@@ -493,6 +784,7 @@ class Embedder:
                         "latency_ms": latency_ms,
                         "queue_wait_ms": queue_wait_ms,
                         "model": self.model,
+                        "provider": self.provider_name,
                         "trace_id": trace_id,
                     },
                 )
@@ -500,7 +792,8 @@ class Embedder:
                 await self._inflight_decr()
 
         data = response.json()
-        embedding = np.array(data["embeddings"][0], dtype=np.float32)
+        # BE-FT-PE-001: provider knows where the vector lives in the JSON.
+        embedding = np.array(self._provider.parse_vector(data), dtype=np.float32)
 
         # Normalize for cosine similarity
         norm = np.linalg.norm(embedding)
@@ -522,8 +815,9 @@ class Embedder:
         Returns:
             numpy array of shape (EMBEDDING_DIM,)
         """
-        # Add task prefix for better retrieval (nomic-embed-text recommendation)
-        prefixed_text = f"search_document: {text}"
+        # Add task prefix for better retrieval. The provider owns the
+        # convention (nomic search_document: for ollama, empty for openai).
+        prefixed_text = self._provider.apply_prefix(text, "document")
         return await self._embed_with_concurrency_cap(prefixed_text, trace_id)
 
     async def embed_query(
@@ -540,8 +834,9 @@ class Embedder:
         Returns:
             numpy array of shape (EMBEDDING_DIM,)
         """
-        # Query prefix for retrieval tasks
-        prefixed_query = f"search_query: {query}"
+        # Query prefix for retrieval tasks — provider owns the convention
+        # (nomic search_query: for ollama, empty for openai).
+        prefixed_query = self._provider.apply_prefix(query, "query")
         return await self._embed_with_concurrency_cap(prefixed_query, trace_id)
 
     async def embed_batch(

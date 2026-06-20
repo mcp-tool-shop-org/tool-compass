@@ -75,6 +75,24 @@ class CompassConfig:
     embedding_model: str = "nomic-embed-text"
     ollama_url: str = "http://localhost:11434"
 
+    # Pluggable embedding backend (BE-FT-PE-001). Defaults preserve the
+    # current Ollama behavior exactly.
+    #   embedding_provider: "ollama" (default) | "openai" | "openai-compatible".
+    #     Unknown values warn + fall back to "ollama" (validate_and_clamp).
+    #   embedding_base_url: override the embed endpoint base. None -> use
+    #     ollama_url for the ollama provider; REQUIRED for openai-compatible.
+    #   embedding_api_key: secret for OpenAI-compatible auth (Bearer token).
+    #     Redacted in doctor() dumps; an env override
+    #     (TOOL_COMPASS_EMBEDDING_API_KEY) wins over the file value.
+    #   embedding_query_prefix / embedding_document_prefix: override the
+    #     retrieval-prefix convention. None -> provider default (nomic
+    #     search_* for ollama, empty for openai-compatible).
+    embedding_provider: str = "ollama"
+    embedding_base_url: Optional[str] = None
+    embedding_api_key: Optional[str] = None
+    embedding_query_prefix: Optional[str] = None
+    embedding_document_prefix: Optional[str] = None
+
     # Index settings
     index_dir: str = "./db"
     auto_sync: bool = True  # Auto-discover tools from backends on startup
@@ -240,6 +258,24 @@ class CompassConfig:
         # Other settings
         config.embedding_model = data.get("embedding_model", config.embedding_model)
         config.ollama_url = data.get("ollama_url", config.ollama_url)
+
+        # Pluggable embedding backend (BE-FT-PE-001).
+        config.embedding_provider = data.get(
+            "embedding_provider", config.embedding_provider
+        )
+        config.embedding_base_url = data.get(
+            "embedding_base_url", config.embedding_base_url
+        )
+        config.embedding_api_key = data.get(
+            "embedding_api_key", config.embedding_api_key
+        )
+        config.embedding_query_prefix = data.get(
+            "embedding_query_prefix", config.embedding_query_prefix
+        )
+        config.embedding_document_prefix = data.get(
+            "embedding_document_prefix", config.embedding_document_prefix
+        )
+
         config.index_dir = data.get("index_dir", config.index_dir)
         config.auto_sync = data.get("auto_sync", config.auto_sync)
         config.default_top_k = data.get("default_top_k", config.default_top_k)
@@ -469,6 +505,53 @@ class CompassConfig:
                 f"{original} to {self.hnsw_ef_search}"
             )
 
+        # BE-FT-PE-001: validate embedding_provider against the known
+        # providers; an unknown value warns + falls back to "ollama" so a
+        # typo degrades to working behavior rather than breaking the embed
+        # path. Import locally to avoid a config<->embedder import cycle.
+        try:
+            from embedder import known_providers, DEFAULT_PROVIDER
+        except Exception:  # pragma: no cover - embedder import should not fail
+            known_providers = None
+            DEFAULT_PROVIDER = "ollama"
+        provider = self.embedding_provider
+        normalized = provider.strip().lower() if isinstance(provider, str) else None
+        valid = set(known_providers()) if known_providers is not None else None
+        if normalized is None or (valid is not None and normalized not in valid):
+            logger.warning(
+                "Config value embedding_provider=%r is not a known provider; "
+                "falling back to %r%s",
+                provider,
+                DEFAULT_PROVIDER,
+                f" (known: {', '.join(sorted(valid))})" if valid else "",
+            )
+            self.embedding_provider = DEFAULT_PROVIDER
+        else:
+            # Store the normalized (lower-cased, stripped) name.
+            self.embedding_provider = normalized
+
+    def resolved_embedding_base_url(self) -> str:
+        """Return the base URL the embedder should POST to (BE-FT-PE-001).
+
+        For the ollama provider, ``embedding_base_url`` is an optional
+        override of ``ollama_url`` (so the legacy single-URL config keeps
+        working). For openai-compatible, ``embedding_base_url`` is the
+        configured endpoint base; if an operator left it unset we fall back to
+        ``ollama_url`` and log a warning so the misconfiguration is visible
+        rather than silently hitting the Ollama port with the wrong contract.
+        """
+        if self.embedding_base_url:
+            return self.embedding_base_url
+        if self.embedding_provider != "ollama":
+            logger.warning(
+                "embedding_provider=%r but embedding_base_url is unset; "
+                "falling back to ollama_url=%r. Set embedding_base_url to the "
+                "provider endpoint.",
+                self.embedding_provider,
+                self.ollama_url,
+            )
+        return self.ollama_url
+
     def to_dict(self) -> dict:
         """Serialize to dictionary."""
         backends = {}
@@ -499,6 +582,11 @@ class CompassConfig:
             "backends": backends,
             "embedding_model": self.embedding_model,
             "ollama_url": self.ollama_url,
+            "embedding_provider": self.embedding_provider,
+            "embedding_base_url": self.embedding_base_url,
+            "embedding_api_key": self.embedding_api_key,
+            "embedding_query_prefix": self.embedding_query_prefix,
+            "embedding_document_prefix": self.embedding_document_prefix,
             "index_dir": self.index_dir,
             "auto_sync": self.auto_sync,
             "default_top_k": self.default_top_k,
@@ -623,6 +711,15 @@ def apply_env_overrides(config: CompassConfig) -> CompassConfig:
                 f"TOOL_COMPASS_HOT_CACHE_SIZE={raw_cache!r} is not an integer; "
                 "ignoring env override."
             )
+
+    # BE-FT-PE-001: the embedding API key is a secret — prefer the env var
+    # over a value baked into the config file so operators can keep the key out
+    # of the on-disk config entirely. An empty string is ignored (treated as
+    # "not set") so an exported-but-empty var doesn't blank out a file value.
+    raw_api_key = os.environ.get("TOOL_COMPASS_EMBEDDING_API_KEY")
+    if raw_api_key is not None and raw_api_key.strip() != "":
+        config.embedding_api_key = raw_api_key
+        changed = True
 
     # Re-clamp so the hot_cache_size env value lands in the same safe range
     # (and emits the same warning) as a config-file value would.
