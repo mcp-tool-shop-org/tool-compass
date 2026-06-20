@@ -187,11 +187,8 @@ def _load_starlette_app():
 
 def test_ready_returns_503_when_ollama_down():
     """/ready must fail with 503 and name ollama when the health probe is false."""
-    pytest.importorskip("starlette")
-    try:
-        from starlette.testclient import TestClient
-    except ImportError:
-        pytest.skip("starlette TestClient not available")
+    pytest.importorskip("starlette.testclient")
+    from starlette.testclient import TestClient
 
     app, gateway = _load_starlette_app()
 
@@ -224,11 +221,8 @@ def test_metrics_endpoint_renders_prometheus_format():
     permanently skipped; it now locks in the content-type the route actually
     ships.
     """
-    pytest.importorskip("starlette")
-    try:
-        from starlette.testclient import TestClient
-    except ImportError:
-        pytest.skip("starlette TestClient not available")
+    pytest.importorskip("starlette.testclient")
+    from starlette.testclient import TestClient
 
     app, _gateway = _load_starlette_app()
     client = TestClient(app)
@@ -255,11 +249,8 @@ def test_metrics_endpoint_renders_prometheus_format():
 
 def test_metrics_includes_embed_latency_p95():
     """/metrics body must expose embed latency p95 as a numeric gauge line."""
-    pytest.importorskip("starlette")
-    try:
-        from starlette.testclient import TestClient
-    except ImportError:
-        pytest.skip("starlette TestClient not available")
+    pytest.importorskip("starlette.testclient")
+    from starlette.testclient import TestClient
 
     app, gateway = _load_starlette_app()
 

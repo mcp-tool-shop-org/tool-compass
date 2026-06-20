@@ -353,6 +353,67 @@ class TestRedactConfig:
         assert backends["local"]["env"]["GITHUB_TOKEN"] == "[REDACTED]"
 
 
+class TestRedactUrlCredentials:
+    """CFG-A-001 (sibling): a credentialed ollama_url like
+    ``http://user:${TOKEN}@host:11434`` must have its userinfo stripped to
+    ``http://[REDACTED]@host:11434`` in doctor() output and in _redact_config,
+    while host:port stays visible for diagnosability.
+
+    The ${VAR} substitution feature resolves env secrets INTO ollama_url
+    userinfo at load time; without this the raw user:secret@ landed verbatim
+    in a pasteable bug-report dump.
+    """
+
+    def test_redact_url_credentials_strips_userinfo(self):
+        from config import redact_url_credentials
+
+        out = redact_url_credentials("http://u:livesecret@h:11434")
+        assert "livesecret" not in out
+        assert out == "http://[REDACTED]@h:11434"
+
+    def test_redact_url_credentials_passthrough_when_no_userinfo(self):
+        from config import redact_url_credentials
+
+        # No credentials -> unchanged, host:port intact.
+        assert (
+            redact_url_credentials("http://localhost:11434")
+            == "http://localhost:11434"
+        )
+
+    def test_redact_config_scrubs_ollama_url_userinfo(self):
+        """_redact_config must scrub embedded userinfo from ollama_url (a leaf
+        scalar) while keeping the host visible."""
+        cfg = CompassConfig(ollama_url="http://u:livesecret@h:11434")
+        redacted = _redact_config(cfg.to_dict())
+        blob = json.dumps(redacted)
+        assert "livesecret" not in blob, "ollama_url secret leaked"
+        assert redacted["ollama_url"] == "http://[REDACTED]@h:11434"
+        assert "h:11434" in redacted["ollama_url"]
+
+    def test_doctor_redacts_ollama_url_credentials(self, tmp_path):
+        """End-to-end: doctor() must not surface the ollama_url userinfo secret
+        but must keep host:port for diagnosability."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({
+            "backends": {},
+            "ollama_url": "http://u:${OLLAMA_PW}@h:11434",
+        }))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "OLLAMA_PW": "livesecret",
+        }
+        with patch.dict(os.environ, env):
+            report = doctor()
+
+        blob = json.dumps(report, default=str)
+        assert "livesecret" not in blob, "doctor() leaked ollama_url secret"
+        # Host:port survives in both the top-level field and the config dump.
+        assert "h:11434" in report["ollama_url"]
+        assert report["ollama_url"] == "http://[REDACTED]@h:11434"
+        assert "h:11434" in report["config"]["ollama_url"]
+        assert "livesecret" not in report["config"]["ollama_url"]
+
+
 class TestValidateAndClampCoercion:
     """CFG-A-002: validate_and_clamp must survive non-numeric hand-edited
     values. The compare-before-coerce ordering raised TypeError on a string

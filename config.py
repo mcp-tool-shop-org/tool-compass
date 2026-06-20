@@ -26,6 +26,7 @@ import shutil
 import sys
 import re
 import time
+from urllib.parse import urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -728,6 +729,28 @@ def _redact_structural(value):
     return "[REDACTED]"
 
 
+def redact_url_credentials(value):
+    """CFG-A-001 (post-fix sibling): strip userinfo from an http(s) URL so a
+    credentialed endpoint like ``http://user:${TOKEN}@host:11434`` (ollama_url
+    or a backend ``url``, both ${VAR}-substituted at load) doesn't leak its
+    secret into the doctor()/show_config diagnostic dumps. Host:port is kept
+    for diagnosability. Non-URL / credential-free values pass through."""
+    if not isinstance(value, str) or "://" not in value:
+        return value
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return value
+    if not (parts.username or parts.password):
+        return value
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urlunsplit(
+        (parts.scheme, f"[REDACTED]@{host}", parts.path, parts.query, parts.fragment)
+    )
+
+
 def _redact_config(cfg_dict: dict) -> dict:
     """Walk the config dict and redact secrets.
 
@@ -753,7 +776,8 @@ def _redact_config(cfg_dict: dict) -> dict:
             return redacted
         if isinstance(obj, list):
             return [walk(item) for item in obj]
-        return obj
+        # Leaf scalar: scrub embedded URL credentials (ollama_url, backend url).
+        return redact_url_credentials(obj)
 
     return walk(cfg_dict)
 
@@ -858,7 +882,10 @@ def doctor() -> dict:
         "analytics_exists": analytics_exists,
         "analytics_size_bytes": analytics_size,
         "analytics_schema_version": analytics_schema_version,
-        "ollama_url": cfg.ollama_url,
+        # CFG-A-001 sibling: scrub any user:pass@ embedded in the URL before
+        # it lands in a pasteable bug-report dump. The reachability probe below
+        # still uses the raw cfg value (it returns only a bool, not the URL).
+        "ollama_url": redact_url_credentials(cfg.ollama_url),
         "ollama_reachable": _ollama_reachable(cfg.ollama_url),
         "deprecated_tools": deprecated_tools_count,
     }

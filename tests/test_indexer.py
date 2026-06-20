@@ -229,6 +229,93 @@ class TestEmbeddingCacheSelfHeal:
         await index.close()
 
 
+class TestGetToolByIdMalformedJson:
+    """GW-A-002 sibling: a tools-table row with malformed JSON in the
+    `parameters`/`examples` columns must be skipped-with-defaults inside
+    _get_tool_by_id, not raise JSONDecodeError.
+
+    _get_tool_by_id runs per-result inside search(); without the guard a
+    single corrupt row raised and poisoned the ENTIRE result set (every
+    result silently degraded to lexical) instead of dropping the one bad
+    field. The fix falls back to {}/[] for the corrupt column and keeps the
+    rest of the catalog searchable.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_tool_by_id_bad_parameters_json_returns_defaults(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """A row with invalid JSON in `parameters` returns a ToolDefinition
+        with parameters={} (and examples=[] when also corrupt), never a raise.
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        await index.build_index(sample_tools)
+
+        # Corrupt the parameters column for one existing tool while leaving at
+        # least one VALID row untouched. Capture its row id for direct probing.
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE tools SET parameters = ?, examples = ? WHERE name = ?",
+                ("{not json", "[also broken", "test:read_file"),
+            )
+            index.db.commit()
+        row = index.db.execute(
+            "SELECT id FROM tools WHERE name = ?", ("test:read_file",)
+        ).fetchone()
+        bad_id = row["id"]
+
+        # Direct probe: must NOT raise JSONDecodeError; degrades to {} / [].
+        tool = index._get_tool_by_id(bad_id)
+        assert tool is not None
+        assert tool.name == "test:read_file"
+        assert tool.parameters == {}, (
+            "malformed parameters JSON must fall back to {}"
+        )
+        assert tool.examples == [], (
+            "malformed examples JSON must fall back to []"
+        )
+
+        await index.close()
+
+    @pytest.mark.asyncio
+    async def test_search_survives_one_corrupt_row(
+        self, temp_index_path, temp_db_path, mock_embedder, sample_tools
+    ):
+        """End-to-end: with one corrupt row present, a search that surfaces a
+        DIFFERENT (valid) row still returns normally — the corrupt row does
+        not poison the whole search.
+        """
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=mock_embedder,
+        )
+        await index.build_index(sample_tools)
+
+        # Corrupt git_status's parameters; read_file stays valid.
+        with index._db_write_lock:
+            index.db.execute(
+                "UPDATE tools SET parameters = ? WHERE name = ?",
+                ("{not json", "test:git_status"),
+            )
+            index.db.commit()
+
+        # A search must not raise, even if the corrupt row is among candidates.
+        results = await index.search("read a file", top_k=5)
+        assert len(results) > 0
+        # Any surfaced result is a well-formed ToolDefinition (the corrupt row,
+        # if surfaced, degrades to {} rather than raising).
+        for r in results:
+            assert isinstance(r.tool, ToolDefinition)
+            assert isinstance(r.tool.parameters, dict)
+
+        await index.close()
+
+
 class TestIndexStats:
     """Test index statistics and metadata."""
 

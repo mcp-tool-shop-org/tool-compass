@@ -56,7 +56,13 @@ except ImportError:
 
 from indexer import CompassIndex, SearchResult
 from tool_manifest import ToolDefinition
-from config import load_config, CompassConfig, CONFIG_PATH
+from config import (
+    load_config,
+    CompassConfig,
+    CONFIG_PATH,
+    redact_url_credentials,
+    _redact_structural,
+)
 # Use simple backend client to avoid anyio conflicts when nested inside another MCP server
 from backend_client_simple import SimpleBackendManager as BackendManager
 from analytics import CompassAnalytics, get_analytics
@@ -351,13 +357,27 @@ def _record_breaker_transition(from_state: str, to_state: str) -> None:
     _metric_counters["circuit_breaker_transitions_total"][key] += 1
 
 
-# Async locks to prevent race conditions during singleton initialization
-_index_lock = asyncio.Lock()
-_backend_lock = asyncio.Lock()
-_analytics_lock = asyncio.Lock()
-_sync_manager_lock = asyncio.Lock()
-_chain_indexer_lock = asyncio.Lock()
-_startup_sync_lock = asyncio.Lock()
+# SC-001 sibling: per-event-loop singleton-init locks. A module-global
+# asyncio.Lock binds its internal waiter Future to the first loop that awaits
+# it under contention, then raises "bound to a different event loop" when the
+# CLI (fresh asyncio.run per subcommand) or the Gradio UI (worker-thread
+# asyncio.run) awaits the same lock from another loop. Key locks on the running
+# loop id instead — mirrors embedder._get_global_embed_semaphore.
+_loop_init_locks: Dict[int, Dict[str, "asyncio.Lock"]] = {}
+
+
+def _loop_lock(name: str) -> "asyncio.Lock":
+    """Return the named singleton-init lock for the running event loop."""
+    loop = asyncio.get_running_loop()
+    locks = _loop_init_locks.get(id(loop))
+    if locks is None:
+        locks = {}
+        _loop_init_locks[id(loop)] = locks
+    lock = locks.get(name)
+    if lock is None:
+        lock = asyncio.Lock()
+        locks[name] = lock
+    return lock
 
 
 def get_config() -> CompassConfig:
@@ -387,7 +407,7 @@ async def get_index() -> CompassIndex:
         return _compass_index
 
     # Slow path: acquire lock and check again
-    async with _index_lock:
+    async with _loop_lock("index"):
         # Double-check after acquiring lock (another coroutine may have initialized)
         if _compass_index is not None:
             return _compass_index
@@ -461,7 +481,7 @@ async def get_backends() -> BackendManager:
         return _backend_manager
 
     # Slow path with lock
-    async with _backend_lock:
+    async with _loop_lock("backend"):
         if _backend_manager is not None:
             return _backend_manager
 
@@ -487,7 +507,7 @@ async def get_analytics_instance() -> Optional[CompassAnalytics]:
         return _analytics
 
     # Slow path with lock
-    async with _analytics_lock:
+    async with _loop_lock("analytics"):
         if _analytics is not None:
             return _analytics
 
@@ -514,11 +534,19 @@ async def get_sync_manager_instance() -> Optional[SyncManager]:
         return _sync_manager
 
     # Slow path with lock
-    async with _sync_manager_lock:
+    async with _loop_lock("sync_manager"):
         if _sync_manager is not None:
             return _sync_manager
 
-        index = await get_index()
+        # GW-A-001 sibling: get_index() raises RuntimeError on cold start (no
+        # baked index + Ollama down). Returning None here ("sync features
+        # unavailable until an index exists") keeps that from escaping callers
+        # like compass()'s maybe_startup_sync() as a raw stack.
+        try:
+            index = await get_index()
+        except RuntimeError as e:
+            logger.warning(f"sync manager unavailable on cold start: {e}")
+            return None
         backends = await get_backends()
         _sync_manager = get_sync_manager(config, index, backends)
 
@@ -542,11 +570,16 @@ async def get_chain_indexer_instance() -> Optional[ChainIndexer]:
         return _chain_indexer
 
     # Slow path with lock
-    async with _chain_indexer_lock:
+    async with _loop_lock("chain_indexer"):
         if _chain_indexer is not None:
             return _chain_indexer
 
-        index = await get_index()
+        # GW-A-001 sibling: same cold-start guard as get_sync_manager_instance.
+        try:
+            index = await get_index()
+        except RuntimeError as e:
+            logger.warning(f"chain indexer unavailable on cold start: {e}")
+            return None
         analytics = await get_analytics_instance()
         chain_indexer = get_chain_indexer(index.embedder, analytics)
 
@@ -578,18 +611,27 @@ async def maybe_startup_sync():
         return
 
     # Slow path with lock
-    async with _startup_sync_lock:
+    async with _loop_lock("startup_sync"):
         # Double-check after acquiring lock
         if _startup_sync_done:
             return
 
-        _startup_sync_done = True
+        # GW-A-001 sibling: do NOT latch _startup_sync_done before the work.
+        # get_sync_manager_instance() returns None on cold start (index not
+        # ready); leave the flag unset there so the next call retries once the
+        # index/Ollama is available. Only latch once a sync actually ran (or
+        # sync is disabled), so a cold-start deferral is not permanent.
         sync_manager = await get_sync_manager_instance()
-        if sync_manager:
-            try:
-                await sync_manager.sync_if_needed()
-            except Exception as e:
-                logger.warning(f"Startup sync failed: {e}")
+        if sync_manager is None:
+            if not get_config().auto_sync:
+                _startup_sync_done = True  # sync disabled: nothing to do, ever
+            # else cold start — leave unset to retry on a later call
+            return
+        try:
+            await sync_manager.sync_if_needed()
+        except Exception as e:
+            logger.warning(f"Startup sync failed: {e}")
+        _startup_sync_done = True
 
 
 # =============================================================================
@@ -1984,7 +2026,8 @@ def show_config():
     print(f"Progressive disclosure: {config.progressive_disclosure}")
     print(f"Auto sync: {config.auto_sync}")
     print(f"Embedding model: {config.embedding_model}")
-    print(f"Ollama URL: {config.ollama_url}")
+    # CFG-A-001 sibling: scrub credentials embedded in the URL before printing.
+    print(f"Ollama URL: {redact_url_credentials(config.ollama_url)}")
     print(f"Default top_k: {config.default_top_k}")
     print(f"Min confidence: {config.min_confidence}")
 
@@ -1994,10 +2037,14 @@ def show_config():
         print(f"  Type: {backend.type}")
         if hasattr(backend, "command"):
             print(f"  Command: {backend.command}")
+            # backend.args carries ${VAR}-resolved secrets (e.g.
+            # --password=...) exactly like env/headers, so redact each entry
+            # rather than printing it raw. (CFG-A-001 sibling.)
+            redacted_args = _redact_structural(backend.args)
             print(
-                f"  Args: {backend.args[:2]}..."
-                if len(backend.args) > 2
-                else f"  Args: {backend.args}"
+                f"  Args: {redacted_args[:2]}..."
+                if len(redacted_args) > 2
+                else f"  Args: {redacted_args}"
             )
 
 

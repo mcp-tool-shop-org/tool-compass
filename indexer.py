@@ -603,13 +603,28 @@ class CompassIndex:
         if row is None:
             return None
 
+        # GW-A-002 sibling: guard json.loads on possibly-corrupt tools-table
+        # rows. _get_tool_by_id runs per-result inside search(); without this a
+        # single malformed row raised JSONDecodeError and poisoned the ENTIRE
+        # result set (everything degraded to lexical) instead of dropping the
+        # one bad field. Fall back to empty defaults for the corrupt column.
+        try:
+            parameters = json.loads(row["parameters"]) if row["parameters"] else {}
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("tool %r: malformed parameters JSON; using {}", row["name"])
+            parameters = {}
+        try:
+            examples = json.loads(row["examples"]) if row["examples"] else []
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("tool %r: malformed examples JSON; using []", row["name"])
+            examples = []
         return ToolDefinition(
             name=row["name"],
             description=row["description"],
             category=row["category"],
             server=row["server"],
-            parameters=json.loads(row["parameters"]) if row["parameters"] else {},
-            examples=json.loads(row["examples"]) if row["examples"] else [],
+            parameters=parameters,
+            examples=examples,
             is_core=bool(row["is_core"]),
         )
 
