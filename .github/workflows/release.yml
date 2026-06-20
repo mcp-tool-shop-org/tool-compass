@@ -1,0 +1,165 @@
+# Tool Compass — npm Trusted Publisher (OIDC) + GitHub Release.
+#
+# This is the canonical npm publish path. The npm Trusted Publisher binding
+# configured on npmjs.com for @mcptoolshop/tool-compass points at THIS file
+# (.github/workflows/release.yml, workflow name "Release") — the filename and
+# the `name:` below are load-bearing and MUST NOT be renamed.
+#
+# The GitHub Release this workflow creates (step "Create GitHub Release") is
+# what fires the downstream chain: publish.yml (PyPI + GHCR + smoke) and
+# release-binaries.yml (platform binaries + npm wrapper). Because that Release
+# is created with secrets.GITHUB_TOKEN, the `release: published` event does NOT
+# fire (GitHub's recursion guard) — the downstream workflows therefore key off
+# a `workflow_run` trigger gated on this workflow's success. See their headers.
+#
+# The npm wrapper lives in the npm/ subdir (npm/package.json,
+# npm/bin/tool-compass.js), so every npm step runs with working-directory: npm.
+# The pyproject.toml version check runs at the repo root.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Serialize per-tag releases; never cancel an in-flight release just because
+# someone re-pushed the same tag or fired workflow_dispatch. Cancelling a
+# mid-flight `npm publish` after the Sigstore-provenance attestation is signed
+# but before the packument-save commits leaves the registry returning E409
+# ('packument-save race') for 5-30 minutes on retry.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write       # for GitHub Release creation
+  id-token: write       # for npm provenance via Sigstore OIDC
+
+jobs:
+  release:
+    name: Publish to npm + GitHub Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm >=11.5 in sandbox for OIDC trusted-publishing auth
+        run: |
+          # Node 22 ships npm 10.9, which signs Sigstore provenance fine but
+          # cannot negotiate the OIDC auth path for trusted publishing — the
+          # PUT returns a misleading 404 "not in this registry".
+          #
+          # An in-place `npm install -g npm@latest` races on Node 22's bundled
+          # npm 10.9 arborist rebuild and breaks irrecoverably (MODULE_NOT_FOUND:
+          # promise-retry). Sandbox install + PATH shadow avoids the race.
+          SANDBOX="$HOME/.npm-cli-sandbox"
+          mkdir -p "$SANDBOX"
+          pushd "$SANDBOX" >/dev/null
+          echo '{"name":"npm-cli-sandbox","version":"0.0.0","private":true}' > package.json
+          npm install --no-save --no-audit --no-fund --silent npm@latest
+          popd >/dev/null
+          echo "$SANDBOX/node_modules/.bin" >> "$GITHUB_PATH"
+          "$SANDBOX/node_modules/.bin/npm" --version
+
+      - name: Verify tag matches npm/package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./npm/package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Tag: ${GITHUB_REF_NAME} → ${TAG_VERSION}"
+          echo "npm/package.json: ${PKG_VERSION}"
+          if [ "${PKG_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "::error::Tag ${TAG_VERSION} does not match npm/package.json version ${PKG_VERSION}"
+            exit 1
+          fi
+
+      # ubuntu-latest's default python3 is not pinned to a particular minor
+      # version. tomllib lives in Python 3.11+ stdlib — falling through to a
+      # 3.10 default would ImportError. Pin 3.11 explicitly (same setup-python
+      # SHA as ci.yml + publish.yml) so the version check is reproducible.
+      - name: Setup Python for pyproject version check
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: '3.11'
+
+      - name: Verify tag matches pyproject.toml version
+        run: |
+          PY_VERSION=$(python3 -c "import tomllib; print(tomllib.loads(open('pyproject.toml').read())['project']['version'])")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "pyproject.toml: ${PY_VERSION}"
+          if [ "${PY_VERSION}" != "${TAG_VERSION}" ]; then
+            echo "::error::Tag ${TAG_VERSION} does not match pyproject.toml version ${PY_VERSION}"
+            exit 1
+          fi
+
+      # The npm wrapper's bin shim hard-codes the release tag (it points
+      # npm-launcher at the GitHub Release binaries for this exact tag). A stale
+      # tag here would make `npx tool-compass` fetch the wrong release's
+      # binaries. Verify the shim was synced before we publish.
+      - name: Verify npm/bin/tool-compass.js references the tag
+        run: |
+          if ! grep -Fq "${GITHUB_REF_NAME}" npm/bin/tool-compass.js; then
+            echo "::error::npm/bin/tool-compass.js does not reference ${GITHUB_REF_NAME} — run scripts/sync-version.mjs before tagging"
+            exit 1
+          fi
+          echo "npm/bin/tool-compass.js references ${GITHUB_REF_NAME} ✓"
+
+      # No package-lock.json is committed (sole runtime dep is
+      # @mcptoolshop/npm-launcher, digest-locked by the registry). `npm install`
+      # is the honest path here.
+      - name: Install npm wrapper dependencies
+        working-directory: npm
+        run: npm install --no-audit --no-fund
+
+      - name: npm pack dry-run (verify shape)
+        working-directory: npm
+        run: npm pack --dry-run
+
+      - name: Publish to npm with provenance (OIDC trusted publisher)
+        working-directory: npm
+        # OIDC trusted publisher — NO token, NO NODE_AUTH_TOKEN. The
+        # id-token: write permission + the npm@latest installed above negotiate
+        # the auth path. --access public is required for the scoped package.
+        run: npm publish --provenance --access public
+
+      - name: Create GitHub Release (idempotent)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Extract the [<version>] section from CHANGELOG.md as the release
+          # notes. Falls back to the tag name if the section is missing/empty.
+          VERSION="${GITHUB_REF_NAME#v}"
+          NOTES_FILE="$(mktemp)"
+          awk -v ver="${VERSION}" '
+            $0 ~ "^## \\[" ver "\\]" {capture=1; next}
+            capture && /^## \[/ {exit}
+            capture {print}
+          ' CHANGELOG.md > "${NOTES_FILE}"
+
+          if [ ! -s "${NOTES_FILE}" ]; then
+            echo "Tool Compass ${GITHUB_REF_NAME}" > "${NOTES_FILE}"
+            echo "" >> "${NOTES_FILE}"
+            echo "See CHANGELOG.md for details." >> "${NOTES_FILE}"
+          fi
+
+          # Create the release only if it doesn't already exist. This Release is
+          # what fires the downstream workflow_run chain (publish.yml +
+          # release-binaries.yml). Skipping when it exists makes the step
+          # idempotent on workflow_dispatch re-runs / second tag pushes (no
+          # HTTP 422 "tag_name already exists").
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "Release ${GITHUB_REF_NAME} already exists; skipping create."
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Tool Compass ${GITHUB_REF_NAME}" \
+              --notes-file "${NOTES_FILE}" \
+              --verify-tag
+          fi

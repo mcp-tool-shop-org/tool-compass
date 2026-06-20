@@ -3,14 +3,32 @@
 
 name: Publish
 
+# Triggers — the load-bearing one for the auto-chain is `workflow_run`:
+#  * `release: published` does NOT fire when the Release was created by
+#    release.yml using secrets.GITHUB_TOKEN (GitHub's recursion guard). Without
+#    the workflow_run trigger below, a tag-push release would publish to npm
+#    (via release.yml) but silently SKIP PyPI + GHCR here. The `workflow_run`
+#    trigger gated on Release.conclusion == 'success' closes the chain.
+#  * `release: published` retained for manual hand-cut Releases (gh release
+#    create from a maintainer's terminal — attributed to a user, fires normally).
+#  * `workflow_dispatch` retained for re-run-from-UI on transient failure.
 on:
   release:
     types: [published]
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
   workflow_dispatch:
 
+# Publish workflows must serialize, not cancel. Cancelling a mid-flight twine
+# upload leaves PyPI in a state where the next retry fails with E409 ('File
+# already exists') and needs manual --skip-existing recovery. Group per release
+# tag — resolved across all trigger types (under workflow_run github.ref is the
+# default branch, not the tag) — so distinct tags run independently while
+# same-tag re-fires queue safely.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -20,6 +38,11 @@ jobs:
   build:
     name: Build package
     runs-on: ubuntu-latest
+    # When triggered by workflow_run, only proceed if the upstream Release
+    # workflow succeeded. release: published / workflow_dispatch invocations set
+    # workflow_run to null, which evaluates this expression to truthy (we only
+    # want to short-circuit FAILED workflow_run events).
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success' }}
     # CT-B-011: fail-fast budgets per SRE 'fail fast' (Google SRE Book ch.21).
     # Default GitHub timeout is 360 min; a wedged dependency install or twine
     # check is well outside the legitimate envelope at 10 min.
@@ -28,6 +51,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Under workflow_run, github.ref is the default branch (main), NOT the
+          # tag — build the tagged commit, not main's HEAD. Resolve the tag from
+          # the single canonical expression used throughout this workflow.
+          ref: ${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref_name }}
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -107,6 +135,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          # Under workflow_run, github.ref is main, NOT the tag — build the
+          # tagged commit, not main's HEAD. Same resolved-tag expression used
+          # throughout this workflow.
+          ref: ${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref_name }}
 
       - name: Log in to GHCR
         uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
@@ -115,14 +148,36 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Resolve the release version explicitly. Under workflow_run github.ref
+      # points at the default branch (main), NOT the tag — so
+      # docker/metadata-action's type=semver rules (which only fire on a
+      # refs/tags/... ref) emit NOTHING and the image never gets a :X.Y.Z / :X.Y
+      # tag (only :latest + :sha-...). The tag that started the upstream Release
+      # run is carried on github.event.workflow_run.head_branch (= the tag ref).
+      # Feed the resolved version into metadata-action via type=raw below.
+      - name: Resolve release version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          REF="${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref_name }}"
+          V="${REF#v}"
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "major_minor=$(echo "$V" | cut -d. -f1-2)" >> "$GITHUB_OUTPUT"
+          echo "resolved=${V} (event=${{ github.event_name }} ref=${REF})"
+
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@030e881283bb7a6894de51c315a6bfe6a94e05cf # v6.0.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # type=raw from the explicitly-resolved version (see Resolve step) —
+          # NOT type=semver, which silently emits nothing under workflow_run
+          # because github.ref is main, not the tag. Each enable=... gates its
+          # raw tag so an empty/missing version never pushes a bogus tag.
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ steps.ver.outputs.version != '' }}
+            type=raw,value=${{ steps.ver.outputs.major_minor }},enable=${{ steps.ver.outputs.major_minor != '' }}
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
 
@@ -169,7 +224,10 @@ jobs:
         id: ver
         run: |
           set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
+          # Resolve the tag across all trigger types. Under workflow_run
+          # github.event.release.tag_name is null and github.ref is main —
+          # workflow_run.head_branch carries the tag ref (e.g. v2.4.0).
+          TAG="${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref_name }}"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
 
