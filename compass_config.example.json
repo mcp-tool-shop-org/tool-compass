@@ -54,5 +54,12 @@
   "hot_cache_size": 10,
   "chain_indexing_enabled": true,
   "chain_detection_min_occurrences": 3,
-  "top_chains_cache_size": 5
+  "top_chains_cache_size": 5,
+  "ollama_breaker_failure_threshold": 3,
+  "ollama_breaker_open_seconds": 30.0,
+  "ollama_retry_attempts": 3,
+  "ollama_retry_backoffs": [0.5, 1.0, 2.0],
+  "hnsw_m": 16,
+  "hnsw_ef_construction": 200,
+  "hnsw_ef_search": 50
 }

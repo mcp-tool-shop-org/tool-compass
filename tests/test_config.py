@@ -22,6 +22,7 @@ from config import (
     load_config,
     doctor,
     _redact_config,
+    apply_env_overrides,
 )
 
 
@@ -481,3 +482,182 @@ class TestValidateAndClampCoercion:
         assert config.embedding_model == "custom-model"
         assert config.min_confidence == CompassConfig().min_confidence
         assert config.default_top_k == CompassConfig().default_top_k
+
+
+class TestEnvOverrides:
+    """CFGDOC-01: TOOL_COMPASS_ANALYTICS_DISABLED and TOOL_COMPASS_HOT_CACHE_SIZE
+    are advertised in .env.example but were never read — the app only honored
+    the analytics_enabled / hot_cache_size config-JSON keys, so a user who set
+    the documented env var saw no effect. These tests prove the env vars now
+    take effect (and would fail on the old, ignore-everything behavior)."""
+
+    def test_analytics_disabled_env_turns_off_analytics(self, tmp_path):
+        """Truthy TOOL_COMPASS_ANALYTICS_DISABLED -> analytics_enabled False.
+
+        Old behavior: get_default_config ignored the env var, so
+        analytics_enabled stayed True. This asserts False, so it fails pre-fix.
+        """
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_ANALYTICS_DISABLED": "true",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.analytics_enabled is False
+
+    def test_analytics_disabled_env_falsey_leaves_analytics_on(self, tmp_path):
+        """A non-truthy value (e.g. 'false'/'0'/'') must NOT disable analytics."""
+        for raw in ("false", "0", "no", ""):
+            env = {
+                "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+                "TOOL_COMPASS_ANALYTICS_DISABLED": raw,
+            }
+            with patch.dict(os.environ, env):
+                config = load_config()
+            assert config.analytics_enabled is True, f"raw={raw!r} disabled analytics"
+
+    def test_hot_cache_size_env_overrides_default(self, tmp_path):
+        """TOOL_COMPASS_HOT_CACHE_SIZE sets hot_cache_size.
+
+        Old behavior: env var ignored, hot_cache_size stayed at default 10.
+        This sets 25 and asserts 25, so it fails pre-fix.
+        """
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "25",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.hot_cache_size == 25
+
+    def test_hot_cache_size_env_overrides_file_value(self, tmp_path):
+        """The env var wins over a value set in the config file (more specific
+        operator signal)."""
+        config_file = tmp_path / "compass_config.json"
+        config_file.write_text(json.dumps({"backends": {}, "hot_cache_size": 7}))
+        env = {
+            "TOOL_COMPASS_CONFIG": str(config_file),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "42",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.hot_cache_size == 42
+
+    def test_hot_cache_size_env_is_clamped(self, tmp_path):
+        """An out-of-range env value flows through validate_and_clamp (0 -> 1)
+        rather than silently disabling the cache."""
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "0",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()
+        assert config.hot_cache_size == 1  # clamped from 0
+
+    def test_hot_cache_size_env_non_numeric_is_ignored(self, tmp_path):
+        """A non-integer env value is ignored (default kept), not a crash."""
+        env = {
+            "TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json"),
+            "TOOL_COMPASS_HOT_CACHE_SIZE": "lots",
+        }
+        with patch.dict(os.environ, env):
+            config = load_config()  # must not raise
+        assert config.hot_cache_size == CompassConfig().hot_cache_size
+
+    def test_apply_env_overrides_no_vars_is_noop(self):
+        """With neither env var set, the config is unchanged."""
+        cfg = CompassConfig()
+        with patch.dict(os.environ, {}, clear=True):
+            out = apply_env_overrides(cfg)
+        assert out.analytics_enabled is True
+        assert out.hot_cache_size == CompassConfig().hot_cache_size
+
+
+class TestTopChainsCacheSizeClamp:
+    """CFGDOC-03: top_chains_cache_size feeds a slice bound
+    (chain_indexer.py: chains[:n]). It escaped validate_and_clamp's
+    coerce/clamp loop, so a hand-edited 0/negative silently emptied or
+    truncated the chain cache with no warning."""
+
+    def test_negative_top_chains_cache_size_clamped_to_zero(self):
+        """A negative value is clamped to 0 (with a warning).
+
+        Old behavior: -3 passed straight through to chains[:-3], silently
+        dropping the last three chains. This asserts the clamp, failing pre-fix.
+        """
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": -3}
+        )
+        assert config.top_chains_cache_size == 0
+
+    def test_zero_top_chains_cache_size_preserved(self):
+        """0 is allowed (disables the cache) and not bumped up."""
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": 0}
+        )
+        assert config.top_chains_cache_size == 0
+
+    def test_string_top_chains_cache_size_coerced(self):
+        """A numeric string is coerced through the coerce loop."""
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": "8"}
+        )
+        assert config.top_chains_cache_size == 8
+
+    def test_non_numeric_top_chains_cache_size_resets_to_default(self):
+        """A non-numeric value resets to the class default instead of crashing.
+
+        Old behavior: top_chains_cache_size was absent from the coerce tuple,
+        so a string like 'many' survived into chains[:'many'] and raised
+        TypeError at slice time. This asserts the reset, failing pre-fix.
+        """
+        config = CompassConfig.from_dict(
+            {"backends": {}, "top_chains_cache_size": "many"}
+        )
+        assert config.top_chains_cache_size == CompassConfig().top_chains_cache_size
+
+
+class TestDoctorAnalyticsHealth:
+    """CFGDOC-04: doctor() now reports the analytics degraded state via
+    analytics.get_health() — but only if a live singleton already exists, and
+    it must never force-create one (which would open + initialize the DB as a
+    side effect of running diagnostics)."""
+
+    def test_doctor_analytics_health_none_when_no_singleton(self, tmp_path):
+        """No live analytics singleton -> analytics_health is None, and doctor()
+        does NOT create one."""
+        import analytics as analytics_mod
+
+        # Ensure no singleton exists.
+        original = analytics_mod._analytics_instance
+        analytics_mod._analytics_instance = None
+        try:
+            env = {"TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json")}
+            with patch.dict(os.environ, env):
+                report = doctor()
+            assert report["analytics_health"] is None
+            # doctor() must not have constructed a singleton.
+            assert analytics_mod._analytics_instance is None
+        finally:
+            analytics_mod._analytics_instance = original
+
+    def test_doctor_includes_health_when_singleton_exists(self, tmp_path):
+        """A live singleton's degraded state is surfaced under analytics_health."""
+        import analytics as analytics_mod
+
+        original = analytics_mod._analytics_instance
+        inst = analytics_mod.CompassAnalytics(
+            db_path=tmp_path / "db" / "compass_analytics.db"
+        )
+        # Simulate the 'sqlite broke' degraded mode without touching the DB.
+        inst._degraded = True
+        analytics_mod._analytics_instance = inst
+        try:
+            env = {"TOOL_COMPASS_CONFIG": str(tmp_path / "missing.json")}
+            with patch.dict(os.environ, env):
+                report = doctor()
+            assert report["analytics_health"] is not None
+            assert report["analytics_health"]["degraded"] is True
+            assert report["analytics_health"]["reason"] is not None
+        finally:
+            analytics_mod._analytics_instance = original

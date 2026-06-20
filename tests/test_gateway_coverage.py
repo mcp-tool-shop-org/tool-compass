@@ -1692,6 +1692,200 @@ class TestMainEntrypoint:
 
 
 # =============================================================================
+# Stage-C CLI humanization — exit codes + actionable hints for the CLI paths
+# (GW-SB-001 sync exit, GW-SB-002 cold-start --test, GW-SB-003 PORT guard,
+#  CFGDOC-01 LOG_LEVEL honored).
+# =============================================================================
+
+
+class TestSyncExitStatus:
+    """GW-SB-001: a sync that indexed nothing must NOT exit 0."""
+
+    @pytest.mark.asyncio
+    async def test_sync_returns_false_when_no_backends(self, monkeypatch):
+        """sync_from_backends() returns False when zero backends connect."""
+        import gateway
+
+        manager = Mock()
+        manager.connect_all = AsyncMock(return_value={"alpha": False, "beta": False})
+        manager.get_all_tools = Mock(return_value=[])
+        manager.disconnect_all = AsyncMock()
+
+        monkeypatch.setattr(gateway, "BackendManager", lambda config: manager)
+        monkeypatch.setattr(
+            gateway, "load_config", lambda: Mock(backends={"alpha": Mock(), "beta": Mock()})
+        )
+
+        result = await gateway.sync_from_backends()
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_async_main_propagates_sync_failure(self, monkeypatch):
+        """async_main(--sync) returns the sync result so main() can exit non-zero."""
+        import gateway
+
+        async def fake_sync():
+            return False
+
+        monkeypatch.setattr(gateway, "sync_from_backends", fake_sync)
+        args = Mock(sync=True, test=False)
+        assert await gateway.async_main(args) is False
+
+    @pytest.mark.asyncio
+    async def test_async_main_test_returns_true(self, monkeypatch):
+        """--test path still reports success (True) when run_tests completes."""
+        import gateway
+
+        async def fake_test():
+            return None
+
+        monkeypatch.setattr(gateway, "run_tests", fake_test)
+        args = Mock(sync=False, test=True)
+        assert await gateway.async_main(args) is True
+
+    def test_main_exits_1_on_failed_sync(self, monkeypatch, capsys):
+        """`gateway --sync` exits 1 with a stderr hint when nothing was indexed."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--sync"])
+
+        # asyncio.run returns the async_main result; simulate a failed sync.
+        def fake_run(coro):
+            coro.close()  # avoid 'coroutine never awaited' warning
+            return False
+
+        monkeypatch.setattr(gateway.asyncio, "run", fake_run)
+
+        with pytest.raises(SystemExit) as exc:
+            gateway.main()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "Index NOT rebuilt" in err
+
+    def test_main_succeeds_on_good_sync(self, monkeypatch):
+        """A successful sync (True) leaves the process at exit 0 (no SystemExit)."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py", "--sync"])
+
+        def fake_run(coro):
+            coro.close()
+            return True
+
+        monkeypatch.setattr(gateway.asyncio, "run", fake_run)
+
+        # Must not raise SystemExit.
+        gateway.main()
+
+
+class TestRunTestsColdStart:
+    """GW-SB-002: `gateway --test` must not dump a raw traceback on cold start."""
+
+    @pytest.mark.asyncio
+    async def test_run_tests_cold_start_exits_1_with_hint(self, monkeypatch, capsys):
+        import gateway
+
+        async def boom():
+            raise RuntimeError(
+                "Ollama not available and no cached index found at /x. "
+                "Start Ollama (ollama serve) and run: ollama pull nomic-embed-text"
+            )
+
+        monkeypatch.setattr(gateway, "get_index", boom)
+
+        with pytest.raises(SystemExit) as exc:
+            await gateway.run_tests()
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "--sync" in err
+        assert "ollama serve" in err
+
+
+class TestPortGuard:
+    """GW-SB-003: malformed PORT must produce a named hint + exit 2, not a raw
+    ValueError."""
+
+    def test_non_integer_port_exits_2(self, monkeypatch, capsys):
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        monkeypatch.setenv("PORT", "not-a-number")
+
+        with patch("gateway._run_http") as mock_http:
+            with pytest.raises(SystemExit) as exc:
+                gateway.main()
+            mock_http.assert_not_called()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "Invalid PORT" in err
+        assert "not-a-number" in err
+
+    def test_out_of_range_port_exits_2(self, monkeypatch, capsys):
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        monkeypatch.setenv("PORT", "70000")
+
+        with patch("gateway._run_http") as mock_http:
+            with pytest.raises(SystemExit) as exc:
+                gateway.main()
+            mock_http.assert_not_called()
+        assert exc.value.code == 2
+        err = capsys.readouterr().err
+        assert "Invalid PORT" in err
+
+    def test_valid_port_passes_int_to_run_http(self, monkeypatch):
+        """A well-formed PORT still reaches _run_http with the parsed int."""
+        import gateway
+
+        monkeypatch.setattr("sys.argv", ["gateway.py"])
+        monkeypatch.setenv("PORT", "9090")
+
+        with patch("gateway._run_http") as mock_http:
+            gateway.main()
+            mock_http.assert_called_once_with(9090)
+
+
+class TestLogLevelEnv:
+    """CFGDOC-01: LOG_LEVEL must actually drive the logging level."""
+
+    def test_basicconfig_source_reads_log_level(self):
+        """The module's logging setup must read LOG_LEVEL, not hardcode INFO.
+
+        Asserted against the source (no module reload, which would corrupt the
+        shared gateway module for the rest of the session). On the OLD code the
+        basicConfig call was `level=logging.INFO` with no env read, so this
+        assertion fails on the pre-fix gateway."""
+        import inspect
+        import gateway
+
+        src = inspect.getsource(gateway)
+        # The level must be derived from the LOG_LEVEL env var.
+        assert 'os.environ.get("LOG_LEVEL"' in src
+        # And it must NOT be the old hardcoded form.
+        assert "level=logging.INFO," not in src
+
+    def test_log_level_env_mapping_debug(self, monkeypatch):
+        """The exact expression the module uses maps LOG_LEVEL=DEBUG -> DEBUG."""
+        import logging
+
+        monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+        level = getattr(
+            logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO
+        )
+        assert level == logging.DEBUG
+
+    def test_unknown_log_level_falls_back_to_info(self, monkeypatch):
+        import logging
+
+        monkeypatch.setenv("LOG_LEVEL", "NONSENSE")
+        level = getattr(
+            logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO
+        )
+        assert level == logging.INFO
+
+
+# =============================================================================
 # Compass envelope shape sanity — every error path stamps an "error_envelope"
 # =============================================================================
 

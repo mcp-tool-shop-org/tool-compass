@@ -1443,6 +1443,50 @@ class TestCmdDoctorExtended:
         assert rc == 0
         assert "1 configured" in out
 
+    def test_doctor_text_shows_unresolved_vars(self, monkeypatch, capsys):
+        """cli-ux-005: text mode warns on config_unresolved_vars.
+
+        Before the fix, text mode silently dropped this field even though
+        doctor() returns it (only JSON mode surfaced it).
+        """
+        payload = {
+            "version": "2.3.0",
+            "config_path": "x",
+            "backends": {"a": {}},
+            "config_unresolved_vars": ["API_TOKEN", "OLLAMA_HOST"],
+            "ollama_url": "u",
+            "ollama_reachable": True,
+            "index_exists": True,
+        }
+        import config
+
+        monkeypatch.setattr(config, "doctor", lambda: payload)
+        rc = cli.main(["doctor", "--text"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "unresolved config vars" in out
+        assert "API_TOKEN" in out
+        assert "OLLAMA_HOST" in out
+
+    def test_doctor_text_no_unresolved_vars_no_warning(self, monkeypatch, capsys):
+        """Empty/absent config_unresolved_vars prints no unresolved-var line."""
+        payload = {
+            "version": "2.3.0",
+            "config_path": "x",
+            "backends": {"a": {}},
+            "config_unresolved_vars": [],
+            "ollama_url": "u",
+            "ollama_reachable": True,
+            "index_exists": True,
+        }
+        import config
+
+        monkeypatch.setattr(config, "doctor", lambda: payload)
+        rc = cli.main(["doctor", "--text"])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "unresolved config vars" not in out
+
 
 # =============================================================================
 # cmd_sync — text-mode success, error envelope, no-backends, FileNotFoundError
@@ -1490,56 +1534,66 @@ def _patch_sync(monkeypatch, *, config_obj=None, sync_result=None, sync_raises=N
 
 
 class TestCmdSyncExtended:
+    # full_sync's real return shape (the shared contract): status,
+    # tools_indexed, backends_synced, connected_backends, failed_backends,
+    # build_result. The old mocks here fabricated tools_added/updated/removed/
+    # duration_seconds/errors — keys full_sync never emits — which masked the
+    # fact that _cmd_sync always printed "+0 ~0 -0" and never warned on a
+    # partial failure (cli-ux-001 / cli-ux-002).
     def test_sync_text_success(self, monkeypatch, capsys):
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 3,
-                "tools_updated": 2,
-                "tools_removed": 1,
-                "duration_seconds": 4.5,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 6,
+                "backends_synced": ["a", "b"],
+                "connected_backends": ["a", "b"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync"])
         out = capsys.readouterr().out
         assert rc == 0
-        assert "+3" in out
-        assert "~2" in out
-        assert "-1" in out
-        assert "4.5" in out
+        # Honest count from tools_indexed — no more fabricated "+0 ~0 -0".
+        assert "6 tools indexed" in out
 
-    def test_sync_text_with_errors(self, monkeypatch, capsys):
+    def test_sync_text_with_failed_backends(self, monkeypatch, capsys):
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 0,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration": 1.0,
-                "errors": ["backend foo timed out"],
+                "status": "complete",
+                "tools_indexed": 4,
+                "backends_synced": ["foo", "bar"],
+                "connected_backends": ["bar"],
+                "failed_backends": ["foo"],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync"])
-        err = capsys.readouterr().err
+        captured = capsys.readouterr()
+        # Warning rides on stderr; sync still succeeds (partial, not fatal).
         assert rc == 0
-        assert "backend error" in err
+        assert "failed to connect" in captured.err
+        assert "foo" in captured.err
+        assert "4 tools indexed" in captured.out
 
     def test_sync_json_mode(self, monkeypatch, capsys):
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 1,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration_seconds": 0.1,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 1,
+                "backends_synced": ["a"],
+                "connected_backends": ["a"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync", "--json"])
         out = capsys.readouterr().out.strip()
         parsed = json.loads(out)
-        assert parsed["tools_added"] == 1
+        assert parsed["tools_indexed"] == 1
         assert rc == 0
 
     def test_sync_no_backends_configured(self, monkeypatch, capsys):
@@ -1556,11 +1610,12 @@ class TestCmdSyncExtended:
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 0,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration_seconds": 0,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 0,
+                "backends_synced": ["a"],
+                "connected_backends": ["a"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["sync", "--force"])
@@ -1584,11 +1639,12 @@ class TestCmdSyncExtended:
         _patch_sync(
             monkeypatch,
             sync_result={
-                "tools_added": 0,
-                "tools_updated": 0,
-                "tools_removed": 0,
-                "duration_seconds": 0,
-                "errors": [],
+                "status": "complete",
+                "tools_indexed": 0,
+                "backends_synced": ["a"],
+                "connected_backends": ["a"],
+                "failed_backends": [],
+                "build_result": {},
             },
         )
         rc = cli.main(["--no-color", "sync"])
@@ -2118,3 +2174,77 @@ class TestMainHelpFallback:
         # happens after parsing.
         rc = cli.main(["doctor"])
         assert rc == 2
+
+
+# =============================================================================
+# bootstrap._ollama_has_model — cli-ux-003: respects OLLAMA_URL + no curl
+# dependency (reuses config._ollama_reachable, probes /api/tags via httpx).
+# =============================================================================
+
+
+class TestBootstrapOllamaProbe:
+    def test_returns_false_when_unreachable(self, monkeypatch):
+        import bootstrap
+        import config
+
+        # Reachability gate fails -> short-circuit False, never touches httpx.
+        monkeypatch.setattr(config, "_ollama_reachable", lambda u, t=2.0: False)
+        assert bootstrap._ollama_has_model("http://x:11434", "nomic-embed-text") is False
+
+    def test_true_when_reachable_and_model_present(self, monkeypatch):
+        import bootstrap
+        import config
+        import httpx
+
+        monkeypatch.setattr(config, "_ollama_reachable", lambda u, t=2.0: True)
+
+        class _Resp:
+            status_code = 200
+            text = '{"models":[{"name":"nomic-embed-text:latest"}]}'
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url):
+                # cli-ux-003: must hit the OLLAMA_URL-derived endpoint.
+                assert url == "http://x:11434/api/tags"
+                return _Resp()
+
+        monkeypatch.setattr(httpx, "Client", _Client)
+        assert bootstrap._ollama_has_model("http://x:11434", "nomic-embed-text") is True
+
+    def test_false_when_model_missing(self, monkeypatch):
+        import bootstrap
+        import config
+        import httpx
+
+        monkeypatch.setattr(config, "_ollama_reachable", lambda u, t=2.0: True)
+
+        class _Resp:
+            status_code = 200
+            text = '{"models":[{"name":"llama3:latest"}]}'
+
+        class _Client:
+            def __init__(self, *a, **k):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url):
+                return _Resp()
+
+        monkeypatch.setattr(httpx, "Client", _Client)
+        assert (
+            bootstrap._ollama_has_model("http://x:11434", "nomic-embed-text") is False
+        )

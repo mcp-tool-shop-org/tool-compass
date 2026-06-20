@@ -329,6 +329,7 @@ class CompassConfig:
             ("default_top_k", int),
             ("sync_polling_interval", int),
             ("hot_cache_size", int),
+            ("top_chains_cache_size", int),
             ("chain_detection_min_occurrences", int),
             ("ollama_breaker_failure_threshold", int),
             ("ollama_breaker_open_seconds", float),
@@ -384,6 +385,18 @@ class CompassConfig:
                 f"Config value hot_cache_size clamped from {original} to {clamped}"
             )
             self.hot_cache_size = clamped
+
+        # top_chains_cache_size: max(0, value). It is used as a slice bound
+        # (chain_indexer.py: chains[:n]); a hand-edited 0/negative would
+        # silently empty/truncate the chain cache with no warning. 0 is allowed
+        # by design — it disables the in-memory chain cache.
+        if self.top_chains_cache_size < 0:
+            original = self.top_chains_cache_size
+            clamped = max(0, int(self.top_chains_cache_size))
+            logger.warning(
+                f"Config value top_chains_cache_size clamped from {original} to {clamped}"
+            )
+            self.top_chains_cache_size = clamped
 
         # chain_detection_min_occurrences: max(2, value). Below 2, every pair
         # of tools becomes a "chain" and the detector drowns in noise.
@@ -562,6 +575,63 @@ def get_python_executable() -> str:
     return sys.executable
 
 
+def _env_truthy(value: Optional[str]) -> bool:
+    """Interpret an env-var string as a boolean.
+
+    CFGDOC-01: ``.env.example`` advertises ``TOOL_COMPASS_ANALYTICS_DISABLED``
+    as a flag; users reasonably set it to ``true`` / ``1`` / ``yes``. Treat the
+    common truthy spellings as True and everything else (including the empty
+    string and ``false``/``0``/``no``) as False, so an exported-but-empty var
+    doesn't accidentally disable analytics.
+    """
+    if value is None:
+        return False
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
+def apply_env_overrides(config: CompassConfig) -> CompassConfig:
+    """Apply env-var overrides that ``.env.example`` documents, in place.
+
+    CFGDOC-01: two vars were advertised in ``.env.example`` but never read —
+    the app honored them only via config-JSON keys, so a user who set the
+    documented env var saw no effect. Wire them here so the documentation is
+    truthful:
+
+    - ``TOOL_COMPASS_ANALYTICS_DISABLED`` (truthy) -> ``analytics_enabled=False``
+    - ``TOOL_COMPASS_HOT_CACHE_SIZE`` (int) -> ``hot_cache_size``
+
+    The hot-cache value flows through ``validate_and_clamp()`` so an out-of-range
+    or non-numeric env value is clamped/reset with the same warning as a
+    hand-edited config file (rather than crashing or silently disabling the
+    cache). Env overrides win over file/default values by design — they are the
+    most specific signal of operator intent.
+    """
+    changed = False
+
+    if "TOOL_COMPASS_ANALYTICS_DISABLED" in os.environ:
+        if _env_truthy(os.environ.get("TOOL_COMPASS_ANALYTICS_DISABLED")):
+            config.analytics_enabled = False
+            changed = True
+
+    raw_cache = os.environ.get("TOOL_COMPASS_HOT_CACHE_SIZE")
+    if raw_cache is not None and raw_cache.strip() != "":
+        try:
+            config.hot_cache_size = int(raw_cache)
+            changed = True
+        except (TypeError, ValueError):
+            logger.warning(
+                f"TOOL_COMPASS_HOT_CACHE_SIZE={raw_cache!r} is not an integer; "
+                "ignoring env override."
+            )
+
+    # Re-clamp so the hot_cache_size env value lands in the same safe range
+    # (and emits the same warning) as a config-file value would.
+    if changed:
+        config.validate_and_clamp()
+
+    return config
+
+
 def get_default_config() -> CompassConfig:
     """
     Get default config with no backends configured.
@@ -571,12 +641,13 @@ def get_default_config() -> CompassConfig:
 
     Uses environment variables for Ollama URL and other settings.
     """
-    return CompassConfig(
+    config = CompassConfig(
         backends={},  # No backends by default - user must configure
         ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434"),
         auto_sync=True,
         progressive_disclosure=True,
     )
+    return apply_env_overrides(config)
 
 
 def get_example_config() -> CompassConfig:
@@ -697,10 +768,17 @@ CONFIG_PATH = get_config_path()
 
 
 def load_config() -> CompassConfig:
-    """Load config from file or return defaults."""
+    """Load config from file or return defaults.
+
+    CFGDOC-01: env overrides (TOOL_COMPASS_ANALYTICS_DISABLED /
+    TOOL_COMPASS_HOT_CACHE_SIZE) are applied on top of the file-loaded config
+    too, so the documented env vars work whether or not a config file exists.
+    They win over file values — the env var is the more specific operator
+    signal. (get_default_config already applies them on the no-file path.)
+    """
     config_path = get_config_path()
     if config_path.exists():
-        return CompassConfig.from_file(config_path)
+        return apply_env_overrides(CompassConfig.from_file(config_path))
     return get_default_config()
 
 
@@ -863,6 +941,21 @@ def doctor() -> dict:
 
     unresolved_vars = list(getattr(cfg, "_unresolved_vars", []) or [])
 
+    # CFGDOC-04: surface the analytics degraded state ("sqlite broke, metrics
+    # silently stopped") in bug reports — but ONLY if a live analytics
+    # singleton already exists. We must NOT force-create one here: doctor() is
+    # a read-only snapshot, and instantiating CompassAnalytics would open the
+    # DB and write the schema as a side effect of running diagnostics. Import
+    # the module to read its singleton without constructing the class.
+    analytics_health: Optional[dict] = None
+    try:
+        import analytics as _analytics_mod
+
+        if _analytics_mod._analytics_instance is not None:
+            analytics_health = _analytics_mod._analytics_instance.get_health()
+    except Exception as e:
+        logger.debug(f"doctor(): could not read analytics health: {e}")
+
     return {
         "version": __version__,
         "python_version": sys.version,
@@ -882,6 +975,10 @@ def doctor() -> dict:
         "analytics_exists": analytics_exists,
         "analytics_size_bytes": analytics_size,
         "analytics_schema_version": analytics_schema_version,
+        # CFGDOC-04: None when no live analytics singleton exists (e.g. a fresh
+        # `python config.py` run); otherwise the {'degraded', 'reason'} health
+        # dict so bug reports capture the "metrics silently stopped" mode.
+        "analytics_health": analytics_health,
         # CFG-A-001 sibling: scrub any user:pass@ embedded in the URL before
         # it lands in a pasteable bug-report dump. The reachability probe below
         # still uses the raw cfg value (it returns only a bool, not the URL).

@@ -94,7 +94,74 @@ class SyncManager:
                 sync_status TEXT DEFAULT 'unknown'
             )
         """)
+        # DEG-02: sync_status is the only durable per-backend health surface
+        # (get_sync_status reads it), but it was only ever written 'synced'.
+        # last_error / last_error_at let an 'error' row carry *why* it failed
+        # so triage isn't blind. Added via ALTER for forward-compat on
+        # pre-existing tables; ignore the "duplicate column" error on re-init.
+        for column_ddl in (
+            "ALTER TABLE backend_sync_state ADD COLUMN last_error TEXT",
+            "ALTER TABLE backend_sync_state ADD COLUMN last_error_at TIMESTAMP",
+        ):
+            try:
+                db.execute(column_ddl)
+            except sqlite3.OperationalError:
+                pass  # column already exists
         db.commit()
+
+    def _mark_backend_error(self, backend_name: str, message: str) -> None:
+        """DEG-02: persist a per-backend failure so triage isn't blind.
+
+        Writes sync_status='error' plus a truncated last_error / last_error_at
+        without disturbing the cached tool_count/tool_hash (those still reflect
+        the last *good* sync). Best-effort: a failure to record the failure
+        must never mask the original error, so DB problems are only logged.
+        """
+        try:
+            db = self._get_db()
+            db.execute(
+                """
+                INSERT INTO backend_sync_state
+                    (backend_name, sync_status, last_error, last_error_at)
+                VALUES (?, 'error', ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(backend_name) DO UPDATE SET
+                    sync_status = 'error',
+                    last_error = excluded.last_error,
+                    last_error_at = CURRENT_TIMESTAMP
+            """,
+                (backend_name, message[:200]),
+            )
+            db.commit()
+        except sqlite3.Error as e:
+            logger.debug(f"_mark_backend_error({backend_name}) failed: {e}")
+
+    def _mark_backends_synced(self, backend_names: List[str]) -> None:
+        """DEG-02: promote backends to terminal 'synced' after a good rebuild.
+
+        Clears any stale last_error so a backend that previously failed and
+        now recovers doesn't keep showing an error. tool_count/tool_hash were
+        already written in the 'rebuilding' interim, so we only flip the
+        status here.
+        """
+        if not backend_names:
+            return
+        try:
+            db = self._get_db()
+            for name in backend_names:
+                db.execute(
+                    """
+                    UPDATE backend_sync_state
+                    SET sync_status = 'synced',
+                        last_sync_at = CURRENT_TIMESTAMP,
+                        last_error = NULL,
+                        last_error_at = NULL
+                    WHERE backend_name = ?
+                """,
+                    (name,),
+                )
+            db.commit()
+        except sqlite3.Error as e:
+            logger.debug(f"_mark_backends_synced failed: {e}")
 
     def _compute_tool_hash(self, tools: List[Any]) -> str:
         """
@@ -170,6 +237,10 @@ class SyncManager:
                 except Exception as e:
                     logger.error(f"Error checking backend {backend_name}: {e}")
                     results[backend_name] = f"error: {str(e)[:50]}"
+                    # DEG-02: persist the failure so get_sync_status surfaces
+                    # it — the docstring promised 'error' and it was never
+                    # written anywhere durable.
+                    self._mark_backend_error(backend_name, f"check failed: {e}")
 
             # If any backends changed, rebuild affected portions
             if changed_backends:
@@ -184,6 +255,8 @@ class SyncManager:
                     logger.error(f"Error rebuilding index: {e}")
                     for name in changed_backends:
                         results[name] = f"sync_error: {str(e)[:50]}"
+                        # DEG-02: persist the rebuild failure too.
+                        self._mark_backend_error(name, f"rebuild failed: {e}")
 
             return results
 
@@ -239,6 +312,12 @@ class SyncManager:
         # Per-backend diff counters (IDX-FT-004).
         diff_stats: Dict[str, Dict[str, int]] = {}
 
+        # DEG-02: backends whose tools we actually staged this pass. We defer
+        # the durable sync_status='synced' write until AFTER the index rebuild
+        # below succeeds — writing 'synced' before a rebuild that can still
+        # fail (DEG-01) is exactly what blinded triage.
+        staged_backends: List[str] = []
+
         for backend_name in backend_names:
             tools = self.backends.get_backend_tools(backend_name)
             if not tools:
@@ -260,6 +339,7 @@ class SyncManager:
                 "updated": len(new_names & old_names),
                 "removed": removed_count,
             }
+            staged_backends.append(backend_name)
 
             # Convert to ToolDefinition format
             for tool in tools:
@@ -299,17 +379,19 @@ class SyncManager:
                     )
                 )
 
-            # Update sync state
+            # DEG-02: write an interim 'rebuilding' state (not 'synced') with
+            # the fresh count/hash. The terminal 'synced' is written only once
+            # the index rebuild below actually succeeds.
             tool_hash = self._compute_tool_hash(tools)
             db.execute(
                 """
                 INSERT INTO backend_sync_state (backend_name, tool_count, tool_hash, last_sync_at, sync_status)
-                VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'synced')
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'rebuilding')
                 ON CONFLICT(backend_name) DO UPDATE SET
                     tool_count = excluded.tool_count,
                     tool_hash = excluded.tool_hash,
                     last_sync_at = CURRENT_TIMESTAMP,
-                    sync_status = 'synced'
+                    sync_status = 'rebuilding'
             """,
                 (backend_name, len(tools), tool_hash),
             )
@@ -351,12 +433,43 @@ class SyncManager:
                 f"Full rebuild complete: {len(all_tools)} tools from "
                 f"backends: {backend_names}"
             )
+            # DEG-02: rebuild succeeded — promote staged backends to 'synced'.
+            self._mark_backends_synced(staged_backends)
         elif all_tools:
             # Normal incremental path — HNSW supports dynamic add.
+            # DEG-01: add_single_tool swallows exceptions and returns False on
+            # Ollama-down / breaker-open. Count failures instead of discarding
+            # the bool, so we don't claim a clean 'Added N' on a partial add.
+            failed = 0
             for tool in all_tools:
-                await self.index.add_single_tool(tool)
+                ok = await self.index.add_single_tool(tool)
+                if not ok:
+                    failed += 1
 
-            logger.info(f"Added {len(all_tools)} tools from backends: {backend_names}")
+            if failed:
+                # DEG-01: do NOT emit the unconditional success line — be
+                # honest that some adds failed.
+                logger.warning(
+                    f"Sync partial: {failed}/{len(all_tools)} tool add(s) "
+                    f"failed for backends {backend_names} (index/embedder "
+                    f"unavailable?)"
+                )
+                # DEG-02: a partial add means the index does not reflect these
+                # backends — mark them 'error', not 'synced'.
+                for name in staged_backends:
+                    self._mark_backend_error(
+                        name, f"{failed}/{len(all_tools)} tool add(s) failed"
+                    )
+            else:
+                logger.info(
+                    f"Added {len(all_tools)} tools from backends: {backend_names}"
+                )
+                # DEG-02: all adds landed — now it's genuinely synced.
+                self._mark_backends_synced(staged_backends)
+        elif staged_backends:
+            # Tools were staged (removals applied + state written) but nothing
+            # remained to add — that's still a successful sync.
+            self._mark_backends_synced(staged_backends)
 
     def _categorize_tool(self, name: str, description: str) -> str:
         """Infer category from tool name and description."""
@@ -389,8 +502,16 @@ class SyncManager:
         async with self._sync_lock:
             logger.info("Starting full sync from all backends...")
 
-            # Connect to all backends
+            # Connect to all backends. connect_all() iterates every CONFIGURED
+            # backend (config.backends.keys()), so connect_results is the full
+            # configured set mapped to connect-success.
             connect_results = await self.backends.connect_all()
+
+            # CONTRACT: split the configured set into who connected vs. who
+            # failed THIS pass. The cli's _cmd_sync reads failed_backends to
+            # warn on partial failure.
+            connected_backends = [n for n, ok in connect_results.items() if ok]
+            failed_backends = [n for n, ok in connect_results.items() if not ok]
 
             # Collect all tools
             from tool_manifest import ToolDefinition
@@ -401,8 +522,12 @@ class SyncManager:
             # Pre-compute the OLD name-set across ALL backends so we can log
             # the diff after build_index clears the old rows (IDX-FT-004).
             # build_index already truncates the tools table, so we capture
-            # baseline before it runs.
+            # baseline before it runs. We also keep the per-row (name, server)
+            # pairs so DEG-03 can tell which dropped tools belonged to a
+            # backend that merely failed to connect (unreachable) vs. one that
+            # genuinely went away.
             old_all_names: set = set()
+            old_name_server: List[tuple] = []
             idx_db = getattr(self.index, "db", None)
             if idx_db is not None:
                 try:
@@ -413,11 +538,24 @@ class SyncManager:
                         cursor = idx_db.execute("SELECT name, server FROM tools")
                         rows = cursor.fetchall()
                     old_all_names = {row["name"] for row in rows}
+                    old_name_server = [(row["name"], row["server"]) for row in rows]
                 except Exception as e:
                     logger.debug(f"full_sync: baseline fetch failed: {e}")
 
+            # DEG-02: a configured backend that failed to connect this pass is
+            # a durable health signal — persist 'error' so get_sync_status
+            # surfaces it instead of leaving a stale 'synced'.
+            for backend_name in failed_backends:
+                self._mark_backend_error(
+                    backend_name, "connect failed during full_sync"
+                )
+
             # Per-backend diff counters (IDX-FT-004).
             diff_stats: Dict[str, Dict[str, int]] = {}
+
+            # DEG-02: backends successfully staged this pass; promoted to
+            # 'synced' only after build_index succeeds below.
+            staged_backends: List[str] = []
 
             for backend_name, connected in connect_results.items():
                 if not connected:
@@ -469,20 +607,22 @@ class SyncManager:
                         )
                     )
 
-                # Update sync state
+                # DEG-02: interim 'rebuilding' state; promoted to 'synced'
+                # only after build_index succeeds below.
                 tool_hash = self._compute_tool_hash(tools)
                 db.execute(
                     """
                     INSERT INTO backend_sync_state (backend_name, tool_count, tool_hash, last_sync_at, sync_status)
-                    VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'synced')
+                    VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'rebuilding')
                     ON CONFLICT(backend_name) DO UPDATE SET
                         tool_count = excluded.tool_count,
                         tool_hash = excluded.tool_hash,
                         last_sync_at = CURRENT_TIMESTAMP,
-                        sync_status = 'synced'
+                        sync_status = 'rebuilding'
                 """,
                     (backend_name, len(tools), tool_hash),
                 )
+                staged_backends.append(backend_name)
 
             db.commit()
 
@@ -492,23 +632,52 @@ class SyncManager:
                     f"Sync diff for {bname}: {stats['added']} added, "
                     f"{stats['updated']} updated, {stats['removed']} removed"
                 )
-            # Also note globally removed tools (backends that vanished entirely).
+            # Also note globally removed tools (tools present last pass but not
+            # this one). DEG-03: a full_sync rebuilds from ONLY the backends
+            # that connected, so a transiently-unreachable backend's tools get
+            # dropped too. Distinguish "removed because the backend is gone"
+            # from "removed because the backend was unreachable this pass" so
+            # the log doesn't claim an unreachable backend's tools were
+            # intentionally retired.
             new_all_names = {t.name for t in all_tools}
             globally_removed = old_all_names - new_all_names
-            if globally_removed:
+            failed_set = set(failed_backends)
+            dropped_unreachable = {
+                name
+                for (name, server) in old_name_server
+                if name in globally_removed and server in failed_set
+            }
+            dropped_gone = globally_removed - dropped_unreachable
+            if dropped_gone:
                 logger.info(
-                    f"Full sync will drop {len(globally_removed)} tool(s) "
-                    f"from removed/disconnected backends"
+                    f"Full sync will drop {len(dropped_gone)} tool(s) "
+                    f"from removed backends"
+                )
+            if dropped_unreachable:
+                # Conservative: still rebuild (build_index is the contract),
+                # but WARN loudly that these drops are due to unreachable
+                # backends, not intentional removal — so a transient outage
+                # reads as an outage in the logs, not a retirement.
+                logger.warning(
+                    f"Full sync is dropping {len(dropped_unreachable)} tool(s) "
+                    f"from {len(failed_set & {s for _, s in old_name_server})} "
+                    f"backend(s) that failed to connect this pass "
+                    f"({sorted(failed_set)}); these were UNREACHABLE, not "
+                    f"removed — they will reappear once the backend(s) reconnect."
                 )
 
             # Rebuild entire index
             if all_tools:
                 result = await self.index.build_index(all_tools)
                 logger.info(f"Full sync complete: {len(all_tools)} tools indexed")
+                # DEG-02: rebuild landed — promote staged backends to 'synced'.
+                self._mark_backends_synced(staged_backends)
                 return {
                     "status": "complete",
                     "tools_indexed": len(all_tools),
                     "backends_synced": list(connect_results.keys()),
+                    "connected_backends": connected_backends,
+                    "failed_backends": failed_backends,
                     "build_result": result,
                 }
             else:
@@ -520,10 +689,13 @@ class SyncManager:
                 # above claimed they were dropped when nothing was.
                 build_result = await self.index.build_index([])
                 logger.info("Full sync complete: index emptied (0 tools)")
+                self._mark_backends_synced(staged_backends)
                 return {
                     "status": "no_tools",
                     "tools_indexed": 0,
                     "backends_synced": list(connect_results.keys()),
+                    "connected_backends": connected_backends,
+                    "failed_backends": failed_backends,
                     "build_result": build_result,
                 }
 
@@ -532,7 +704,8 @@ class SyncManager:
         db = self._get_db()
 
         cursor = db.execute("""
-            SELECT backend_name, tool_count, tool_hash, last_sync_at, sync_status
+            SELECT backend_name, tool_count, tool_hash, last_sync_at,
+                   sync_status, last_error, last_error_at
             FROM backend_sync_state
         """)
 
@@ -543,6 +716,10 @@ class SyncManager:
                 "tool_hash": row["tool_hash"][:8] + "..." if row["tool_hash"] else None,
                 "last_sync_at": row["last_sync_at"],
                 "status": row["sync_status"],
+                # DEG-02: surface the persisted failure reason so triage can
+                # see *why* a backend is in 'error' without reading logs.
+                "last_error": row["last_error"],
+                "last_error_at": row["last_error_at"],
             }
 
         # Add any backends not yet synced
@@ -553,6 +730,8 @@ class SyncManager:
                     "tool_hash": None,
                     "last_sync_at": None,
                     "status": "never_synced",
+                    "last_error": None,
+                    "last_error_at": None,
                 }
 
         return {

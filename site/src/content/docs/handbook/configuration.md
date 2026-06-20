@@ -52,7 +52,14 @@ If no config file is found, built-in defaults are used. See `compass_config.exam
 | `hot_cache_size` | int | `10` | Number of frequently used tools to keep in memory |
 | `chain_indexing_enabled` | bool | `true` | Enable tool chain detection and indexing |
 | `chain_detection_min_occurrences` | int | `3` | Minimum pattern occurrences before promoting to a chain |
-| `top_chains_cache_size` | int | `5` | Number of top chains to keep in memory cache |
+| `top_chains_cache_size` | int | `5` | Number of top chains to keep in memory cache (clamped to ≥ 0; 0 disables the cache) |
+| `ollama_breaker_failure_threshold` | int | `3` | Consecutive Ollama failures before the circuit breaker opens (clamped `1`–`20`) |
+| `ollama_breaker_open_seconds` | float | `30.0` | How long the breaker stays open before a trial request, in seconds (clamped `1.0`–`600.0`) |
+| `ollama_retry_attempts` | int | `3` | Retry attempts for a failed embedding request (clamped `0`–`10`) |
+| `ollama_retry_backoffs` | float[] | `[0.5, 1.0, 2.0]` | Per-retry backoff delays in seconds; resets to the default if not a list of non-negative numbers |
+| `hnsw_m` | int | `16` | HNSW graph connectivity (`M`); higher = better recall, more memory (clamped `4`–`64`) |
+| `hnsw_ef_construction` | int | `200` | HNSW build-time search width; higher = better index quality, slower build (clamped `40`–`800`) |
+| `hnsw_ef_search` | int | `50` | HNSW query-time search width; higher = better recall, slower search (clamped `10`–`400`) |
 
 ### Variable substitution
 

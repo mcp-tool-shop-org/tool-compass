@@ -34,6 +34,7 @@ import asyncio
 import argparse
 import logging
 import json
+import os
 import sqlite3
 import time
 import uuid
@@ -70,8 +71,13 @@ from sync_manager import SyncManager, get_sync_manager
 from chain_indexer import ChainIndexer, get_chain_indexer
 
 # Configure logging
+# CFGDOC-01: honor the LOG_LEVEL env var that .env.example advertises and
+# docker-compose's dev profile sets to DEBUG. Previously hardcoded to INFO,
+# making the documented dev-debug workflow a silent no-op. Unknown values fall
+# back to INFO via getattr's default.
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=getattr(logging, os.environ.get("LOG_LEVEL", "INFO").upper(), logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
 
@@ -1808,8 +1814,14 @@ async def compass_audit(
 # =============================================================================
 
 
-async def sync_from_backends():
-    """Sync tool definitions from live backend servers and rebuild index."""
+async def sync_from_backends() -> bool:
+    """Sync tool definitions from live backend servers and rebuild index.
+
+    Returns True when the index was rebuilt, False when the sync indexed
+    nothing (no backends connected, no tools discovered, or Ollama
+    unavailable). GW-SB-001: the caller turns a False into a non-zero exit
+    so CI/deploy wrappers can't mistake an empty sync for success.
+    """
 
     print("\n" + "=" * 60)
     print("  TOOL COMPASS - INDEX SYNC")
@@ -1837,7 +1849,7 @@ async def sync_from_backends():
     if connected == 0:
         print("\n❌ No backends connected. Check that servers are running.")
         print("   Hint: Start MCP servers or check compass_config.json")
-        return
+        return False
 
     # Step 3: Discover tools
     print("\n[3/4] Discovering tools...")
@@ -1847,7 +1859,7 @@ async def sync_from_backends():
     if not tools:
         print("\n❌ No tools discovered. Backends may be misconfigured.")
         await manager.disconnect_all()
-        return
+        return False
 
     # Convert to ToolDefinition format for indexing
     print("      Converting to index format...", end=" ", flush=True)
@@ -1895,7 +1907,7 @@ async def sync_from_backends():
         print("   1. ollama serve")
         print("   2. ollama pull nomic-embed-text")
         await manager.disconnect_all()
-        return
+        return False
     print("OK")
 
     print("      Generating embeddings and building index...")
@@ -1913,6 +1925,8 @@ async def sync_from_backends():
     print(f"  Build time: {result['total_time']:.2f}s")
     print("  Index ready for queries")
     print("-" * 60 + "\n")
+
+    return True
 
 
 def categorize_tool(name: str, description: str) -> str:
@@ -1950,7 +1964,22 @@ async def run_tests():
     print("TOOL COMPASS GATEWAY - TEST SUITE")
     print("=" * 60)
 
-    index = await get_index()
+    # GW-SB-002: get_index() raises RuntimeError on cold start (no baked index
+    # AND Ollama unreachable) — the same error the MCP tools convert to a
+    # structured envelope. Surface the human remediation to stderr instead of a
+    # raw traceback, then exit non-zero so CLI callers see the failure.
+    try:
+        index = await get_index()
+    except RuntimeError as e:
+        import sys
+
+        print(
+            "❌ No index yet — run 'python gateway.py --sync' first, "
+            "ensure 'ollama serve' is running.",
+            file=sys.stderr,
+        )
+        print(f"   ({e})", file=sys.stderr)
+        sys.exit(1)
     stats = index.get_stats()
 
     print(f"\nIndex: {stats['total_tools']} tools")
@@ -2048,12 +2077,16 @@ def show_config():
             )
 
 
-async def async_main(args):
-    """Handle async CLI operations."""
+async def async_main(args) -> bool:
+    """Handle async CLI operations.
+
+    Returns True on success, False when --sync indexed nothing (GW-SB-001).
+    """
     if args.sync:
-        await sync_from_backends()
+        return await sync_from_backends()
     elif args.test:
         await run_tests()
+    return True
 
 
 def build_http_app():
@@ -2561,7 +2594,18 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
     if args.config:
         show_config()
     elif args.sync or args.test:
-        asyncio.run(async_main(args))
+        # GW-SB-001: a sync that connected no backends / discovered no tools /
+        # found Ollama down returns False — exit non-zero with a one-line hint
+        # so CI/deploy wrappers don't mistake an empty sync for success.
+        ok = asyncio.run(async_main(args))
+        if not ok:
+            import sys
+
+            print(
+                "Index NOT rebuilt: 0 backends connected (or no tools / Ollama down).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     else:
         # NOTE: Never print() to stdout in MCP mode - it corrupts JSON-RPC!
         # Use stderr for diagnostics if needed
@@ -2589,9 +2633,26 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
         import os
         port = os.environ.get("PORT")
         if port:
+            # GW-SB-003: a malformed PORT used to raise a bare ValueError with
+            # no hint that PORT was the culprit. Catch it, name the variable and
+            # the expected range, and exit 2 (usage error).
+            try:
+                port_num = int(port)
+            except ValueError:
+                print(
+                    f"Invalid PORT={port!r}: must be an integer 1-65535",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            if not 1 <= port_num <= 65535:
+                print(
+                    f"Invalid PORT={port!r}: must be an integer 1-65535",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
             host = os.environ.get("HOST", "127.0.0.1")
             print(f"Transport: streamable-http on {host}:{port}", file=sys.stderr)
-            _run_http(int(port))
+            _run_http(port_num)
         else:
             print("Transport: stdio", file=sys.stderr)
             mcp.run()

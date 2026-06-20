@@ -294,7 +294,7 @@ ollama pull nomic-embed-text
 ### Index Not Found
 
 ```bash
-python gateway.py --sync
+tool-compass sync
 ```
 
 ## Related Projects

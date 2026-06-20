@@ -882,25 +882,26 @@ def _cmd_sync(args: argparse.Namespace) -> int:
         if rc != 0 or result is None:
             return rc
 
-        # Summary lines — colored highlights of the key counts. Falls back to
-        # the raw JSON if the result shape changes underneath us so users
-        # never see "(none)" misleading output.
-        added = result.get("tools_added", 0)
-        updated = result.get("tools_updated", 0)
-        removed = result.get("tools_removed", 0)
-        duration = result.get("duration_seconds") or result.get("duration", "?")
-        errors = result.get("errors") or []
+        # Summary line — honest count straight from the real full_sync
+        # contract (status / tools_indexed / backends_synced /
+        # connected_backends / failed_backends / build_result). The prior
+        # version read tools_added/updated/removed/duration_seconds, none of
+        # which full_sync emits, so it always printed "+0 ~0 -0". We report
+        # the indexed count instead — the one number full_sync guarantees.
+        tools_indexed = result.get("tools_indexed", 0)
+        failed_backends = result.get("failed_backends") or []
 
-        _print_success(out_console, f"Sync complete in {duration}s.")
-        out_console.print(
-            f"  [{_C_SUCCESS}]+{added}[/{_C_SUCCESS}] added  "
-            f"[{_C_DIM}]~{updated}[/{_C_DIM}] updated  "
-            f"[{_C_WARN}]-{removed}[/{_C_WARN}] removed"
+        _print_success(
+            out_console, f"Sync complete — {tools_indexed} tools indexed."
         )
-        if errors:
+        if failed_backends:
+            # cli-ux-002: configured backends that failed to connect this pass.
+            # The old `if errors:` branch read a key full_sync never returns,
+            # so partial failures were reported as unqualified success.
             _print_warn(
                 err_console,
-                f"{len(errors)} backend error(s) — see compass logs",
+                f"{len(failed_backends)} backend(s) failed to connect: "
+                f"{', '.join(failed_backends)}",
                 hint="Run `tool-compass doctor` to inspect backend health.",
             )
         return rc
@@ -1027,6 +1028,20 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         out_console.print(
             f"  [{_C_DIM}]backends:[/{_C_DIM}] {backend_count} configured"
         )
+        # cli-ux-005: surface unresolved ${VAR} references in text mode too
+        # (JSON mode already carries them via config_unresolved_vars). An
+        # unresolved var means a backend command/url still contains a literal
+        # ${NAME} that never got an env value — a common silent misconfig.
+        unresolved_vars = payload.get("config_unresolved_vars") or []
+        if unresolved_vars:
+            _print_warn(
+                out_console,
+                f"unresolved config vars: {', '.join(unresolved_vars)}",
+                hint=(
+                    "Set these env vars or hard-code values in "
+                    "compass_config.json."
+                ),
+            )
         if ollama_ok:
             _print_success(out_console, f"ollama reachable at {ollama_url}")
         else:
