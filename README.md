@@ -39,14 +39,6 @@ Savings: 95%
 
 Tool Compass uses **semantic search** to find relevant tools from a natural language description. Instead of loading all tools, Claude calls `compass()` with an intent and gets back only the relevant tools.
 
-<!--
-## Demo
-
-<p align="center">
-  <img src="docs/assets/demo.gif" alt="Tool Compass Demo" width="600">
-</p>
--->
-
 ## Quick Start
 
 📖 **Full documentation:** See the [Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) for installation, configuration, and architecture deep-dives.
@@ -130,20 +122,20 @@ docker-compose --profile with-ollama up
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     TOOL COMPASS                            │
+│                       TOOL COMPASS                          │
 │                                                             │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐  │
-│  │   Ollama     │    │   hnswlib    │    │   SQLite     │  │
-│  │   Embedder   │───▶│    HNSW      │◀───│   Metadata   │  │
-│  │  (nomic)     │    │   Index      │    │   Store      │  │
-│  └──────────────┘    └──────────────┘    └──────────────┘  │
+│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
+│  │   Ollama     │    │   hnswlib    │    │   SQLite     │   │
+│  │   Embedder   │───▶│    HNSW      │◀───│   Metadata   │   │
+│  │  (nomic)     │    │   Index      │    │   Store      │   │
+│  └──────────────┘    └──────────────┘    └──────────────┘   │
 │                              │                              │
 │                              ▼                              │
-│                    ┌──────────────────┐                    │
-│                    │  Gateway (9 tools)│                   │
-│                    │  compass, describe│                   │
-│                    │  execute, etc.    │                   │
-│                    └──────────────────┘                    │
+│                    ┌───────────────────┐                    │
+│                    │ Gateway (9 tools)  │                   │
+│                    │ compass, describe  │                   │
+│                    │ execute, etc.      │                   │
+│                    └───────────────────┘                    │
 └─────────────────────────────────────────────────────────────┘
 ```
 

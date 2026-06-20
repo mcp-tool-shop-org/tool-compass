@@ -33,48 +33,62 @@ The runtime wires together five long-lived singletons. `Gateway` is the
 top-level coordinator that every MCP tool call passes through; it delegates
 to the index/backend/analytics subsystems.
 
-```mermaid
-graph TD
-    Embedder[Embedder<br/>nomic-embed-text]
-    Index[CompassIndex<br/>HNSW + SQLite]
-    Sync[SyncManager]
-    Backends[BackendManager]
-    Chains[ChainIndexer]
-    Analytics[CompassAnalytics]
-    Gateway[Gateway<br/>MCP entrypoint]
-
-    Embedder --> Index
-    Backends --> Sync
-    Sync --> Index
-    Index --> Gateway
-    Backends --> Gateway
-    Chains --> Gateway
-    Analytics --> Gateway
+```
+   ┌──────────────────────┐
+   │       Embedder       │
+   │   nomic-embed-text   │
+   └──────────┬───────────┘
+              │
+   ┌──────────────────────┐        ┌──────────────────────┐
+   │   BackendManager     │───────▶│     SyncManager      │
+   └──────────┬───────────┘        └──────────┬───────────┘
+              │                               │
+              │                               ▼
+              │                    ┌──────────────────────┐
+              │                    │    CompassIndex      │◀── Embedder
+              │                    │   (HNSW + SQLite)    │
+              │                    └──────────┬───────────┘
+              │                               │
+              ▼                               ▼
+   ┌──────────────────────────────────────────────────────┐
+   │                       Gateway                         │
+   │                   (MCP entrypoint)                    │
+   └──────────────────────────────────────────────────────┘
+              ▲                  ▲
+              │                  │
+   ┌──────────┴───────┐  ┌───────┴──────────┐
+   │   ChainIndexer   │  │ CompassAnalytics │
+   └──────────────────┘  └──────────────────┘
 ```
 
-> If your Starlight renderer doesn't have Mermaid wired, the block above
-> renders as plain text — the labels still read as a component list.
+Flow: `Embedder` and `BackendManager` feed `CompassIndex` (via
+`SyncManager`); `Gateway` is the MCP entrypoint that the index, backends,
+`ChainIndexer`, and `CompassAnalytics` all report into.
 
 ## Request sequence
 
 What actually happens when a client calls `compass("generate an image")`:
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Gateway
-    participant Index as CompassIndex
-    participant Embed as Embedder
-    participant Ollama
-
-    Client->>Gateway: compass(intent)
-    Gateway->>Index: search(intent, top_k)
-    Index->>Embed: embed_query(intent)
-    Embed->>Ollama: POST /api/embeddings
-    Ollama-->>Embed: 768-dim vector
-    Embed-->>Index: vector
-    Index-->>Gateway: top-k tool matches
-    Gateway-->>Client: {tools: [...], confidence: ...}
+```
+ Client      Gateway       CompassIndex      Embedder        Ollama
+   │            │                │               │              │
+   │ compass(intent)             │               │              │
+   ├───────────▶│                │               │              │
+   │            │ search(intent, top_k)          │              │
+   │            ├───────────────▶│               │              │
+   │            │                │ embed_query(intent)          │
+   │            │                ├──────────────▶│              │
+   │            │                │               │ POST /api/embeddings
+   │            │                │               ├─────────────▶│
+   │            │                │               │  768-dim vector
+   │            │                │               │◀─────────────┤
+   │            │                │   vector      │              │
+   │            │                │◀──────────────┤              │
+   │            │ top-k matches  │               │              │
+   │            │◀───────────────┤               │              │
+   │ {tools: [...], confidence}  │               │              │
+   │◀───────────┤                │               │              │
+   │            │                │               │              │
 ```
 
 ## How it works

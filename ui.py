@@ -1418,9 +1418,29 @@ def create_ui() -> gr.Blocks:
 
     with gr.Blocks(
         title="Tool Compass",
+        # VIS-D-001/002: the entire UI is hand-coded for a dark page (#1a1a2e
+        # surface, #22223e cards, light #e8e8f0 text). gr.themes.Soft() defaults
+        # to LIGHT, so backgroundless state blocks (empty/no-result/status views)
+        # were near-white text on a white panel (~1.2:1, invisible) out of the
+        # box. Pin the dark surface the palette assumes — on BOTH the light and
+        # _dark token variants — so the page, blocks, inputs and the gr.Code box
+        # all track the same dark chrome as the custom cards (no half-light seam).
         theme=gr.themes.Soft(
             primary_hue="blue",
             secondary_hue="green",
+        ).set(
+            body_background_fill="#1a1a2e",
+            body_background_fill_dark="#1a1a2e",
+            body_text_color="#e8e8f0",
+            body_text_color_dark="#e8e8f0",
+            background_fill_primary="#22223e",
+            background_fill_primary_dark="#22223e",
+            background_fill_secondary="#1a1a2e",
+            background_fill_secondary_dark="#1a1a2e",
+            block_background_fill="#22223e",
+            block_background_fill_dark="#22223e",
+            input_background_fill="#2a2a44",
+            input_background_fill_dark="#2a2a44",
         ),
         css="""
         .gradio-container { max-width: 1400px !important; }
@@ -1692,12 +1712,13 @@ def create_ui() -> gr.Blocks:
 
                 status_btn.click(fn=get_system_status, inputs=[], outputs=[status_html])
 
-        # FE-B-012: contrast-fixed footer grey (#a0a0a0 reads at 4.05:1 on
-        # the dark background — still light but no longer failing AA at
-        # body-text scale).
+        # VIS-D-003: footer grey lifted to #b4b4c4 — #a0a0a0 on the #1a1a2e
+        # surface is only ~4.0:1, which clears AA for large text (3:1) but NOT
+        # for this body-scale copy (needs 4.5:1). #b4b4c4 on #1a1a2e is ~5.4:1,
+        # a real AA pass. (Corrects the prior comment's overstated 4.05:1.)
         gr.Markdown(f"""
         ---
-        <div style="text-align: center; color: #a0a0a0;">
+        <div style="text-align: center; color: #b4b4c4;">
             Tool Compass v{__version__} | Semantic tool discovery for MCP
         </div>
         """)
