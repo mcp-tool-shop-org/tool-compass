@@ -68,6 +68,11 @@ db/tools.db
 db/compass_analytics.db
 db/chains.db
 
+# SQLite transient sidecar files (WAL/SHM/journal — rewritten on every open/close)
+db/*.db-shm
+db/*.db-wal
+db/*.db-journal
+
 # Logs
 *.log
 logs/
