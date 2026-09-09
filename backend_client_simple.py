@@ -31,6 +31,7 @@ Connection lifecycle (NOT keep-alive — see SimpleBackendManager for that):
 """
 
 import asyncio
+import contextvars
 import json
 import logging
 import os
@@ -90,6 +91,29 @@ STDOUT_READ_IDLE_TICK = 30.0  # Read-loop idle tick (used to notice shutdown).
 PER_REQUEST_TIMEOUT = 30.0  # Per-pending-future deadline.
 # Backwards-compat alias for callers that imported the old name.
 STDOUT_READ_TIMEOUT = PER_REQUEST_TIMEOUT
+
+# F-c0d80e5e: execute_tool publishes the resolved deadline here so
+# _send_request / HttpBackendConnection.call_tool honour tool_timeouts
+# above PER_REQUEST_TIMEOUT without changing the call_tool(name, args)
+# positional contract.
+_call_timeout: contextvars.ContextVar[Optional[float]] = contextvars.ContextVar(
+    "tool_compass_call_timeout", default=None
+)
+
+
+def _effective_request_timeout(explicit: Optional[float] = None) -> float:
+    """Resolved per-request deadline.
+
+    Precedence: explicit argument > execute_tool's inherited timeout >
+    PER_REQUEST_TIMEOUT. Configured tool_timeouts of 60–120s must not be
+    silently capped by the inner 30s wait_for.
+    """
+    if explicit is not None:
+        return explicit
+    inherited = _call_timeout.get()
+    if inherited is not None:
+        return inherited
+    return PER_REQUEST_TIMEOUT
 
 # BR-B-006: bound the in-flight queue per backend so a slow-loris backend
 # cannot accumulate unbounded Future objects. Pick a value comfortably above
@@ -201,6 +225,15 @@ class BackendProtocolError(RuntimeError):
             super().__init__(f"[code={code}] {message}")
         else:
             super().__init__(message)
+
+
+class ToolCallTimeoutError(asyncio.TimeoutError):
+    """Timeout already recorded on ConnectionStats by call_tool.
+
+    execute_tool catches this to return the timeout envelope without
+    recording OUTCOME_TIMEOUT a second time (double-counting failed_calls).
+    Still a TimeoutError subclass so direct call_tool callers keep working.
+    """
 
 
 def make_error_envelope(
@@ -567,6 +600,10 @@ class SimpleBackendConnection:
         if self._connected and self._process and self._process.returncode is None:
             return True
 
+        # disconnect() flips this; a new spawn (including MAX_RETRIES on the
+        # same object) must be able to send initialize.
+        self._shutting_down = False
+
         timeout = timeout or CONNECTION_TIMEOUT
 
         try:
@@ -642,7 +679,7 @@ class SimpleBackendConnection:
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
                     "clientInfo": {"name": "tool-compass", "version": __version__}
-                }),
+                }, timeout=timeout),
                 timeout=timeout
             )
 
@@ -667,7 +704,7 @@ class SimpleBackendConnection:
 
             # Get tools list
             tools_result = await asyncio.wait_for(
-                self._send_request("tools/list", {}),
+                self._send_request("tools/list", {}, timeout=timeout),
                 timeout=timeout
             )
 
@@ -688,6 +725,17 @@ class SimpleBackendConnection:
             logger.error(f"Failed to connect to {self.name}: {e}")
             await self.disconnect()
             return False
+        except BaseException:
+            # CancelledError is a BaseException on 3.9+; an MCP-request cancel
+            # or outer wait_for during the pre-initialize sleep / initialize /
+            # list_tools must still reap the child and reader tasks.
+            try:
+                await self.disconnect()
+            except Exception:
+                logger.debug(
+                    f"Disconnect after cancelled connect to {self.name} failed"
+                )
+            raise
 
     async def disconnect(self):
         """Close the connection gracefully.
@@ -896,7 +944,12 @@ class SimpleBackendConnection:
         except Exception as e:
             logger.debug(f"Stderr reader error for {self.name}: {e}")
 
-    async def _send_request(self, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
+    async def _send_request(
+        self,
+        method: str,
+        params: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Send a JSON-RPC request and wait for its response.
 
         Concurrency model:
@@ -909,6 +962,8 @@ class SimpleBackendConnection:
           arrives asynchronously via the read loop, so N concurrent calls to
           the same backend run in parallel on the read side.
         - ``_shutting_down`` is re-checked at every boundary.
+        - ``timeout`` is the pending-future deadline (explicit arg, else the
+          execute_tool-inherited value, else PER_REQUEST_TIMEOUT).
         """
         self._ensure_async_primitives()
         assert self._inflight_sem is not None and self._write_lock is not None
@@ -979,9 +1034,11 @@ class SimpleBackendConnection:
 
             # Now wait for the read loop to resolve our future. We don't
             # hold the write lock here, so other callers can send their own
-            # requests in parallel.
+            # requests in parallel. Honour the resolved deadline so a
+            # tool_timeouts entry of 60s is not silently capped at 30s.
+            deadline = _effective_request_timeout(timeout)
             try:
-                return await asyncio.wait_for(fut, timeout=PER_REQUEST_TIMEOUT)
+                return await asyncio.wait_for(fut, timeout=deadline)
             except asyncio.TimeoutError:
                 if self._shutting_down:
                     raise BackendShuttingDownError(
@@ -990,7 +1047,7 @@ class SimpleBackendConnection:
                     )
                 raise asyncio.TimeoutError(
                     f"Backend {self.name} did not respond within "
-                    f"{PER_REQUEST_TIMEOUT}s"
+                    f"{deadline}s"
                 )
         finally:
             # Whether we succeeded or timed out, don't leak an entry.
@@ -1058,7 +1115,12 @@ class SimpleBackendConnection:
             ))
         return tools
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Call a tool on this backend.
 
         Returns a structured envelope (BR-B-001 / BR-B-012):
@@ -1087,7 +1149,7 @@ class SimpleBackendConnection:
             result = await self._send_request("tools/call", {
                 "name": tool_name,
                 "arguments": arguments,
-            })
+            }, timeout=timeout)
 
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
 
@@ -1193,12 +1255,16 @@ class SimpleBackendConnection:
             if self._process and self._process.returncode is not None:
                 self._connected = False
             raise
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             self._stats.record_call(
                 latency_ms=latency_ms, outcome=OUTCOME_TIMEOUT
             )
-            raise
+            # Distinct type so execute_tool does not record OUTCOME_TIMEOUT
+            # a second time. Still a TimeoutError for direct callers.
+            raise ToolCallTimeoutError(
+                f"Backend {self.name} tool call timed out"
+            ) from e
         except (BrokenPipeError, ConnectionResetError):
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             self._stats.record_call(
@@ -1462,6 +1528,17 @@ class HttpBackendConnection:
             logger.error(f"Failed to connect to HTTP backend {self.name}: {e}")
             await self.disconnect()
             return False
+        except BaseException:
+            # CancelledError is a BaseException on 3.9+; a cancel during
+            # enter_async_context / initialize / list_tools must still
+            # aclose the partially-entered exit stack.
+            try:
+                await self.disconnect()
+            except Exception:
+                logger.debug(
+                    f"Disconnect after cancelled HTTP connect to {self.name} failed"
+                )
+            raise
 
     async def disconnect(self) -> None:
         """Close the session by unwinding the AsyncExitStack. Idempotent.
@@ -1501,24 +1578,31 @@ class HttpBackendConnection:
             ))
         return tools
 
-    async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Call a tool over the HTTP session.
 
         Returns the SAME structured envelope as
         :meth:`SimpleBackendConnection.call_tool` (BR-B-001 / BR-B-012), built
         with :func:`make_error_envelope` and recording the SAME outcome
         taxonomy into :class:`ConnectionStats`. Wrapped in ``asyncio.wait_for``
-        with ``PER_REQUEST_TIMEOUT`` so a hung session cannot pin the caller
-        indefinitely (the manager's outer deadline still applies on top).
+        with the resolved deadline (explicit / execute_tool-inherited /
+        PER_REQUEST_TIMEOUT) so a hung session cannot pin the caller
+        indefinitely and configured timeouts above 30s are honoured.
         """
         if not self._connected or self._session is None:
             raise BackendNotConnectedError(self.name)
 
         start_time = asyncio.get_event_loop().time()
+        deadline = _effective_request_timeout(timeout)
         try:
             res = await asyncio.wait_for(
                 self._session.call_tool(tool_name, arguments),
-                timeout=PER_REQUEST_TIMEOUT,
+                timeout=deadline,
             )
 
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
@@ -1571,12 +1655,14 @@ class HttpBackendConnection:
                 data=getattr(err, "data", None),
                 retryable=False,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as e:
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             self._stats.record_call(
                 latency_ms=latency_ms, outcome=OUTCOME_TIMEOUT
             )
-            raise
+            raise ToolCallTimeoutError(
+                f"HTTP backend {self.name} tool call timed out"
+            ) from e
         except (
             httpx.TransportError,
             httpx.HTTPStatusError,
@@ -1722,6 +1808,10 @@ class SimpleBackendManager:
         # BR-B-005: lazy lock construction; bound to running loop on first
         # use rather than at __init__ time.
         self._lock: Optional[asyncio.Lock] = None
+        # F-47ef65da: single-flight slot per backend. Concurrent
+        # ensure_connected / connect_backend waiters await this instead of
+        # spawning a sibling subprocess / HTTP session.
+        self._connecting: Dict[str, "asyncio.Future[bool]"] = {}
 
     def _ensure_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -1735,84 +1825,133 @@ class SimpleBackendManager:
         snapshots (read backend config, swap in the new connection); the
         long-lived ``disconnect`` and ``connect`` awaits run OUTSIDE the
         lock so a sick backend cannot starve siblings.
+
+        F-47ef65da: a per-backend connecting future makes spawn single-flight.
+        Waiters await the in-flight connect instead of spawning a sibling.
+        On swap, a different live occupant wins and the extra is disconnected.
         """
         lock = self._ensure_lock()
+        waiter: Optional["asyncio.Future[bool]"] = None
+        slot: Optional["asyncio.Future[bool]"] = None
+        old_conn = None
+        backend = None
+        reject_reason: Optional[str] = None
 
         async with lock:
             # Check if already connected (cheap registry read).
             if name in self._backends and self._backends[name].is_connected:
                 return True
 
-            backend = self.config.backends.get(name)
-            if not backend:
+            inflight = self._connecting.get(name)
+            if inflight is not None and not inflight.done():
+                waiter = inflight
+            else:
+                slot = asyncio.get_running_loop().create_future()
+                self._connecting[name] = slot
+
+                backend = self.config.backends.get(name)
+                if not backend:
+                    reject_reason = "unknown"
+                elif not isinstance(backend, (StdioBackend, HttpBackend)):
+                    reject_reason = "unsupported"
+                else:
+                    # Pop the old broken connection out of the registry under
+                    # lock so concurrent callers see "not connected"
+                    # immediately, but actually disconnect / connect outside
+                    # the lock.
+                    old_conn = self._backends.pop(name, None)
+                    stale_keys = [
+                        k for k, v in self._tool_index.items() if v == name
+                    ]
+                    for k in stale_keys:
+                        self._tool_index.pop(k, None)
+
+        if waiter is not None:
+            return await waiter
+
+        extra = None
+        result = False
+        try:
+            if reject_reason == "unknown":
                 logger.error(f"Unknown backend: {name}")
                 return False
-
-            # INT-01: route by transport type. The old code hard-rejected
-            # anything that was not a StdioBackend; now StdioBackend spawns a
-            # subprocess connection and HttpBackend wraps the MCP SDK's
-            # Streamable HTTP client. ImportBackend (and any future type)
-            # still falls through to the reject. The connection factory runs
-            # OUTSIDE this lock (below); here we only validate the type so a
-            # misconfigured backend fails fast without touching the registry.
-            if not isinstance(backend, (StdioBackend, HttpBackend)):
+            if reject_reason == "unsupported":
                 logger.error(
                     f"Unsupported backend type for {name}: {type(backend).__name__}"
                 )
                 return False
 
-            # Pop the old broken connection out of the registry under lock
-            # so concurrent callers see "not connected" immediately, but
-            # actually disconnect / connect outside the lock.
-            old_conn = self._backends.pop(name, None)
-            # Remove any tool-index entries that pointed at this backend so
-            # the index is consistent during the reconnect window.
-            stale_keys = [
-                k for k, v in self._tool_index.items() if v == name
-            ]
-            for k in stale_keys:
-                self._tool_index.pop(k, None)
+            # Async work outside the manager lock.
+            if old_conn is not None:
+                try:
+                    await old_conn.disconnect()
+                except Exception as e:
+                    logger.debug(f"Old-connection disconnect for {name}: {e}")
 
-        # Async work outside the manager lock.
-        if old_conn is not None:
+            # INT-01: transport factory. Both connection classes expose the
+            # same duck-typed contract the manager relies on
+            # (connect / is_connected / get_tools / disconnect / call_tool /
+            # active_probe / stats / _abandoned_pids), so everything
+            # downstream of this line — the retry loop, the registry swap,
+            # execute_tool — is transport-agnostic.
+            if isinstance(backend, StdioBackend):
+                conn: Any = SimpleBackendConnection(name, backend)
+            else:
+                # isinstance(backend, HttpBackend) — guaranteed by the type
+                # gate under the lock above.
+                conn = HttpBackendConnection(name, backend)
+            connected = False
+            for attempt in range(MAX_RETRIES + 1):
+                success = await conn.connect(timeout=timeout)
+                if success:
+                    connected = True
+                    break
+                if attempt < MAX_RETRIES:
+                    logger.warning(
+                        f"Retry {attempt + 1}/{MAX_RETRIES} for backend {name}"
+                    )
+                    await asyncio.sleep(0.5)
+
+            if not connected:
+                return False
+
+            # Swap the new connection back into the registry under the lock.
+            # Occupancy check: if another live conn is already stored, keep
+            # it and disconnect this extra so we never orphan a process.
+            async with lock:
+                existing = self._backends.get(name)
+                if (
+                    existing is not None
+                    and existing is not conn
+                    and existing.is_connected
+                ):
+                    extra = conn
+                    result = True
+                else:
+                    if existing is not None and existing is not conn:
+                        extra = existing
+                    self._backends[name] = conn
+                    for tool in conn.get_tools():
+                        self._tool_index[tool.qualified_name] = name
+                    result = True
+            return result
+        except BaseException:
+            result = False
+            raise
+        finally:
             try:
-                await old_conn.disconnect()
-            except Exception as e:
-                logger.debug(f"Old-connection disconnect for {name}: {e}")
-
-        # INT-01: transport factory. Both connection classes expose the same
-        # duck-typed contract the manager relies on
-        # (connect / is_connected / get_tools / disconnect / call_tool /
-        # active_probe / stats / _abandoned_pids), so everything downstream of
-        # this line — the retry loop, the registry swap, execute_tool — is
-        # transport-agnostic.
-        if isinstance(backend, StdioBackend):
-            conn: Any = SimpleBackendConnection(name, backend)
-        else:
-            # isinstance(backend, HttpBackend) — guaranteed by the type gate
-            # under the lock above.
-            conn = HttpBackendConnection(name, backend)
-        connected = False
-        for attempt in range(MAX_RETRIES + 1):
-            success = await conn.connect(timeout=timeout)
-            if success:
-                connected = True
-                break
-            if attempt < MAX_RETRIES:
-                logger.warning(
-                    f"Retry {attempt + 1}/{MAX_RETRIES} for backend {name}"
-                )
-                await asyncio.sleep(0.5)
-
-        if not connected:
-            return False
-
-        # Swap the new connection back into the registry under the lock.
-        async with lock:
-            self._backends[name] = conn
-            for tool in conn.get_tools():
-                self._tool_index[tool.qualified_name] = name
-        return True
+                if extra is not None:
+                    try:
+                        await extra.disconnect()
+                    except Exception as e:
+                        logger.debug(
+                            f"Extra-connection disconnect for {name}: {e}"
+                        )
+            finally:
+                if slot is not None and not slot.done():
+                    slot.set_result(result)
+                if self._connecting.get(name) is slot:
+                    self._connecting.pop(name, None)
 
     def is_backend_connected(self, name: str) -> bool:
         """Check if a backend is currently connected."""
@@ -1863,6 +2002,11 @@ class SimpleBackendManager:
             conns = list(self._backends.items())
             self._backends.clear()
             self._tool_index.clear()
+            connecting = list(self._connecting.values())
+            self._connecting.clear()
+        for fut in connecting:
+            if not fut.done():
+                fut.set_result(False)
 
         if not conns:
             return {"disconnected": [], "laggards": [], "timed_out": False}
@@ -2042,19 +2186,33 @@ class SimpleBackendManager:
                 )
         timeout = resolved_timeout or TOOL_CALL_TIMEOUT
 
+        # Publish the resolved deadline so _send_request /
+        # HttpBackendConnection.call_tool use it instead of the hardcoded
+        # 30s inner cap. call_tool(name, args) positional contract is
+        # unchanged (tests assert that).
+        timeout_token = _call_timeout.set(timeout)
         try:
             return await asyncio.wait_for(
                 conn.call_tool(tool_name, arguments),
                 timeout=timeout,
             )
+        except ToolCallTimeoutError:
+            # call_tool already recorded OUTCOME_TIMEOUT. Do not record again.
+            logger.error(
+                f"Tool execution timed out after {timeout}s: {qualified_name}"
+            )
+            return make_error_envelope(
+                error_kind=OUTCOME_TIMEOUT,
+                error=f"Tool execution timed out after {timeout}s",
+                backend=server_name,
+                retryable=True,
+            )
         except asyncio.TimeoutError:
             logger.error(
                 f"Tool execution timed out after {timeout}s: {qualified_name}"
             )
-            # BR-B-009: record the timeout in connection stats so
-            # success_rate reflects it. (call_tool may have already recorded
-            # if its inner per-request deadline tripped first; recording
-            # twice is harmless under the new taxonomy.)
+            # Outer wait_for cancelled a hanging call_tool that did not
+            # itself record (e.g. a mock). Record here — the only layer.
             try:
                 conn_for_stats = self._backends.get(server_name)
                 if conn_for_stats is not None:
@@ -2133,6 +2291,16 @@ class SimpleBackendManager:
                             retry_conn.call_tool(tool_name, arguments),
                             timeout=timeout,
                         )
+                    except ToolCallTimeoutError:
+                        return make_error_envelope(
+                            error_kind=OUTCOME_TIMEOUT,
+                            error=(
+                                f"Tool execution timed out after {timeout}s "
+                                "on retry"
+                            ),
+                            backend=server_name,
+                            retryable=False,
+                        )
                     except asyncio.TimeoutError:
                         try:
                             retry_conn.stats.record_call(
@@ -2171,6 +2339,8 @@ class SimpleBackendManager:
                 backend=server_name,
                 retryable=False,
             )
+        finally:
+            _call_timeout.reset(timeout_token)
 
     def get_stats(self) -> Dict[str, Any]:
         """Get connection statistics for all backends.

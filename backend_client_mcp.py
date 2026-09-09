@@ -147,6 +147,16 @@ class BackendConnection:
             logger.error(f"Failed to connect to {self.name}: {e}")
             await self.disconnect()
             return False
+        except BaseException:
+            # CancelledError is a BaseException on 3.9+; a cancel during
+            # enter_async_context / initialize must still aclose the stack.
+            try:
+                await self.disconnect()
+            except Exception:
+                logger.debug(
+                    f"Disconnect after cancelled connect to {self.name} failed"
+                )
+            raise
 
     async def disconnect(self):
         """Close the connection."""
@@ -213,6 +223,13 @@ class BackendManager:
         self.config = config or load_config()
         self._backends: Dict[str, BackendConnection] = {}
         self._tool_index: Dict[str, str] = {}  # qualified_name -> server_name
+        self._lock: Optional[asyncio.Lock] = None
+        self._connecting: Dict[str, "asyncio.Future[bool]"] = {}
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def connect_all(self, timeout: Optional[float] = None) -> Dict[str, bool]:
         """
@@ -266,35 +283,102 @@ class BackendManager:
         """
         Connect to a specific backend.
 
+        Single-flight per backend (sibling of F-47ef65da): waiters await the
+        in-flight connect instead of spawning a sibling session. On swap, a
+        different live occupant wins and the extra is disconnected.
+
         Args:
             name: Backend name to connect to.
             timeout: Connection timeout in seconds. Defaults to CONNECTION_TIMEOUT.
         """
-        if name in self._backends and self._backends[name].is_connected:
-            return True
+        lock = self._ensure_lock()
+        waiter: Optional["asyncio.Future[bool]"] = None
+        slot: Optional["asyncio.Future[bool]"] = None
+        backend = None
+        reject = False
 
-        backend = self.config.backends.get(name)
-        if not backend:
-            logger.error(f"Unknown backend: {name}")
-            return False
+        async with lock:
+            if name in self._backends and self._backends[name].is_connected:
+                return True
+            inflight = self._connecting.get(name)
+            if inflight is not None and not inflight.done():
+                waiter = inflight
+            else:
+                slot = asyncio.get_running_loop().create_future()
+                self._connecting[name] = slot
+                backend = self.config.backends.get(name)
+                if not backend or not isinstance(backend, StdioBackend):
+                    reject = True
 
-        if isinstance(backend, StdioBackend):
+        if waiter is not None:
+            return await waiter
+
+        extra = None
+        result = False
+        try:
+            if reject:
+                if not backend:
+                    logger.error(f"Unknown backend: {name}")
+                else:
+                    logger.error(
+                        f"Unsupported backend type for {name}: {type(backend)}"
+                    )
+                return False
+
             conn = BackendConnection(name, backend)
             success = await conn.connect(timeout=timeout)
-            if success:
-                self._backends[name] = conn
-                for tool in conn.get_tools():
-                    self._tool_index[tool.qualified_name] = name
-            return success
+            if not success:
+                return False
 
-        return False
+            async with lock:
+                existing = self._backends.get(name)
+                if (
+                    existing is not None
+                    and existing is not conn
+                    and existing.is_connected
+                ):
+                    extra = conn
+                    result = True
+                else:
+                    if existing is not None and existing is not conn:
+                        extra = existing
+                    self._backends[name] = conn
+                    for tool in conn.get_tools():
+                        self._tool_index[tool.qualified_name] = name
+                    result = True
+            return result
+        except BaseException:
+            result = False
+            raise
+        finally:
+            try:
+                if extra is not None:
+                    try:
+                        await extra.disconnect()
+                    except Exception as e:
+                        logger.debug(
+                            f"Extra-connection disconnect for {name}: {e}"
+                        )
+            finally:
+                if slot is not None and not slot.done():
+                    slot.set_result(result)
+                if self._connecting.get(name) is slot:
+                    self._connecting.pop(name, None)
 
     async def disconnect_all(self):
         """Disconnect from all backends."""
-        for conn in self._backends.values():
+        lock = self._ensure_lock()
+        async with lock:
+            conns = list(self._backends.values())
+            self._backends.clear()
+            self._tool_index.clear()
+            connecting = list(self._connecting.values())
+            self._connecting.clear()
+        for fut in connecting:
+            if not fut.done():
+                fut.set_result(False)
+        for conn in conns:
             await conn.disconnect()
-        self._backends.clear()
-        self._tool_index.clear()
 
     def get_all_tools(self) -> List[ToolInfo]:
         """Get all tools from all connected backends."""
