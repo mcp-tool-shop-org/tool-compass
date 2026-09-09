@@ -164,7 +164,30 @@ class SyncManager:
         except sqlite3.Error as e:
             logger.debug(f"_mark_backends_synced failed: {e}")
 
-    def _compute_tool_hash(self, tools: List[Any]) -> str:
+    def _resolved_policy(
+        self, backend_name: Optional[str]
+    ) -> tuple[List[str], List[str]]:
+        """Return sorted (allow_tools, deny_tools) for a backend.
+
+        F-302f6853: these globs are part of the stored fingerprint so a
+        policy-only edit (deny_tools / allow_tools) is a detected change even
+        when the live tool list is identical. Unknown / missing backends
+        resolve to empty lists so callers without a name keep the historical
+        hash (tools-only).
+        """
+        if not backend_name:
+            return [], []
+        backends = getattr(self.config, "backends", None) or {}
+        backend = backends.get(backend_name)
+        if backend is None:
+            return [], []
+        allow = sorted(str(p) for p in (getattr(backend, "allow_tools", None) or []))
+        deny = sorted(str(p) for p in (getattr(backend, "deny_tools", None) or []))
+        return allow, deny
+
+    def _compute_tool_hash(
+        self, tools: List[Any], backend_name: Optional[str] = None
+    ) -> str:
         """
         Compute deterministic hash of tool list for change detection.
 
@@ -176,9 +199,25 @@ class SyncManager:
         serialized with ``json.dumps(..., sort_keys=True)`` so dict key
         ordering can't cause spurious hash churn (two byte-different but
         structurally-identical schemas hash the same).
+
+        F-302f6853: when ``backend_name`` is given, non-empty allow_tools /
+        deny_tools globs are mixed into the fingerprint so a policy change
+        triggers rebuild. Empty policy is omitted so the tools-only hash
+        matches callers that pass no backend name.
+
+        F-ec226cba: an empty tool list still hashes (sentinel ``b"empty"``,
+        or that sentinel mixed with policy) rather than being skipped.
         """
+        allow, deny = self._resolved_policy(backend_name)
+        policy = {"allow_tools": allow, "deny_tools": deny} if (allow or deny) else None
+
         if not tools:
-            return hashlib.sha256(b"empty").hexdigest()[:32]
+            if policy is None:
+                return hashlib.sha256(b"empty").hexdigest()[:32]
+            content = json.dumps(
+                {"tools": "empty", **policy}, sort_keys=True
+            )
+            return hashlib.sha256(content.encode()).hexdigest()[:32]
 
         # Per-tool fingerprint: (qualified_name, description, canonical schema).
         # sort_keys canonicalizes nested dicts so key reordering is a no-op.
@@ -193,7 +232,12 @@ class SyncManager:
         # Sort the tuples for deterministic ordering independent of the
         # backend's tool-list ordering.
         fingerprints.sort()
-        content = json.dumps(fingerprints, sort_keys=True)
+        if policy is None:
+            content = json.dumps(fingerprints, sort_keys=True)
+        else:
+            content = json.dumps(
+                {"tools": fingerprints, **policy}, sort_keys=True
+            )
         return hashlib.sha256(content.encode()).hexdigest()[:32]
 
     async def get_stored_hash(self, backend_name: str) -> Optional[str]:
@@ -219,12 +263,12 @@ class SyncManager:
                 )
                 return False
 
-        # Get current tools
-        tools = self.backends.get_backend_tools(backend_name)
-        if not tools:
-            return False
-
-        current_hash = self._compute_tool_hash(tools)
+        # Get current tools. F-ec226cba: an empty live list is still hashed
+        # and compared to the stored fingerprint — a backend that previously
+        # indexed N tools and now publishes zero must rebuild (and drop the
+        # stale rows). The empty sentinel already exists in _compute_tool_hash.
+        tools = self.backends.get_backend_tools(backend_name) or []
+        current_hash = self._compute_tool_hash(tools, backend_name)
         stored_hash = await self.get_stored_hash(backend_name)
 
         changed = current_hash != stored_hash
@@ -462,14 +506,21 @@ class SyncManager:
         staged_backends: List[str] = []
 
         for backend_name in backend_names:
-            tools = self.backends.get_backend_tools(backend_name)
-            if not tools:
-                continue
+            # F-ec226cba: do not skip an empty live list — still diff against
+            # old_names so vanished tools are remove_tool'd, and still store
+            # the empty hash so the next poll sees a stable fingerprint.
+            tools = self.backends.get_backend_tools(backend_name) or []
+
+            # Convert first so new_names is the post-filter (FEAT-06) set.
+            # F-302f6853: denied tools must not stay in new_names or they
+            # survive the incremental remove pass.
+            definitions = self._tool_infos_to_definitions(tools)
 
             # Diff: old names in this backend vs. new names — anything
-            # that vanished is removed from the index (IDX-FT-004).
+            # that vanished (or is now denied) is removed from the index
+            # (IDX-FT-004 + F-302f6853).
             old_names = self._get_backend_tool_names(backend_name)
-            new_names = {t.qualified_name for t in tools}
+            new_names = {d.name for d in definitions}
             removed = old_names - new_names
             removed_count = 0
             for name in removed:
@@ -486,12 +537,14 @@ class SyncManager:
 
             # Convert to ToolDefinition format (BE-COMPACT-001: shared helper
             # so the compaction full-set path below uses identical semantics).
-            all_tools.extend(self._tool_infos_to_definitions(tools))
+            all_tools.extend(definitions)
 
             # DEG-02: write an interim 'rebuilding' state (not 'synced') with
             # the fresh count/hash. The terminal 'synced' is written only once
             # the index rebuild below actually succeeds.
-            tool_hash = self._compute_tool_hash(tools)
+            # F-302f6853: hash includes allow/deny so a policy-only edit is
+            # a detected change. tool_count is the post-filter (indexed) size.
+            tool_hash = self._compute_tool_hash(tools, backend_name)
             db.execute(
                 """
                 INSERT INTO backend_sync_state (backend_name, tool_count, tool_hash, last_sync_at, sync_status)
@@ -502,7 +555,7 @@ class SyncManager:
                     last_sync_at = CURRENT_TIMESTAMP,
                     sync_status = 'rebuilding'
             """,
-                (backend_name, len(tools), tool_hash),
+                (backend_name, len(definitions), tool_hash),
             )
 
         db.commit()
@@ -681,13 +734,19 @@ class SyncManager:
                     logger.warning(f"Skipping {backend_name} - not connected")
                     continue
 
-                tools = self.backends.get_backend_tools(backend_name)
-                if not tools:
-                    continue
+                tools = self.backends.get_backend_tools(backend_name) or []
+                # F-ec226cba sibling: an empty live list is still hashed and
+                # staged. build_index is a full replace so the stale rows drop
+                # with the rebuild; skipping here left the stored hash on the
+                # previous non-empty fingerprint.
+
+                # Convert first so new_names is the post-filter set
+                # (F-302f6853 sibling of the incremental path).
+                definitions = self._tool_infos_to_definitions(tools)
 
                 # Diff this backend's old vs. new names.
                 old_names = self._get_backend_tool_names(backend_name)
-                new_names = {t.qualified_name for t in tools}
+                new_names = {d.name for d in definitions}
                 diff_stats[backend_name] = {
                     "added": len(new_names - old_names),
                     "updated": len(new_names & old_names),
@@ -698,11 +757,11 @@ class SyncManager:
                 # inherits identical semantics: FEAT-01 raw_schema fidelity and
                 # FEAT-06 allow/deny filtering (previously this path had its own
                 # inline copy that dropped the schema and ignored the filters).
-                all_tools.extend(self._tool_infos_to_definitions(tools))
+                all_tools.extend(definitions)
 
                 # DEG-02: interim 'rebuilding' state; promoted to 'synced'
                 # only after build_index succeeds below.
-                tool_hash = self._compute_tool_hash(tools)
+                tool_hash = self._compute_tool_hash(tools, backend_name)
                 db.execute(
                     """
                     INSERT INTO backend_sync_state (backend_name, tool_count, tool_hash, last_sync_at, sync_status)
@@ -713,7 +772,7 @@ class SyncManager:
                         last_sync_at = CURRENT_TIMESTAMP,
                         sync_status = 'rebuilding'
                 """,
-                    (backend_name, len(tools), tool_hash),
+                    (backend_name, len(definitions), tool_hash),
                 )
                 staged_backends.append(backend_name)
 
