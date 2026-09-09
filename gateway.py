@@ -47,7 +47,7 @@ from _version import __version__
 
 # MCP imports
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP, Context
 except ImportError:
     import sys as _sys
 
@@ -67,7 +67,7 @@ from config import (
     _redact_structural,
 )
 # Use simple backend client to avoid anyio conflicts when nested inside another MCP server
-from backend_client_simple import SimpleBackendManager as BackendManager
+from backend_client_simple import SimpleBackendManager as BackendManager, TOOL_CALL_TIMEOUT
 from analytics import CompassAnalytics, get_analytics
 from sync_manager import SyncManager, get_sync_manager
 from chain_indexer import ChainIndexer, get_chain_indexer
@@ -193,6 +193,9 @@ _ERROR_CODES = {
     "execute_unhandled_exception",
     # FEAT-06: tool blocked by the resolving backend's allow/deny policy.
     "tool_denied",
+    "chain_not_found",
+    "resource_not_found",
+    "prompt_not_found",
 }
 
 
@@ -1320,6 +1323,210 @@ def _tool_denied_by_policy(
     return True
 
 
+async def _report_progress(
+    ctx: Optional["Context"],
+    progress: float,
+    total: float = 100.0,
+    message: Optional[str] = None,
+) -> None:
+    """F-2084dd0f: best-effort FastMCP progress. Degrades if ctx is absent."""
+    if ctx is None:
+        return
+    reporter = getattr(ctx, "report_progress", None)
+    if reporter is None:
+        return
+    try:
+        await reporter(progress, total, message)
+    except Exception as e:
+        logger.debug(f"report_progress failed: {e}")
+
+
+_JSON_TYPE_MAP = {
+    "string": str,
+    "number": (int, float),
+    "integer": int,
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+    "null": type(None),
+}
+
+
+def _json_type_matches(value: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        return any(_json_type_matches(value, t) for t in expected)
+    if not isinstance(expected, str):
+        return True
+    py = _JSON_TYPE_MAP.get(expected)
+    if py is None:
+        return True
+    if expected == "number" and isinstance(value, bool):
+        return False
+    if expected == "integer" and isinstance(value, bool):
+        return False
+    return isinstance(value, py)
+
+
+def _validate_arguments_against_schema(
+    arguments: Dict[str, Any], schema: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Small required/type/enum checker. jsonschema is not a dependency."""
+    errors: List[Dict[str, Any]] = []
+    if not isinstance(schema, dict) or not arguments and schema is None:
+        return errors
+    if not isinstance(schema, dict):
+        return errors
+    required = schema.get("required") or []
+    if not isinstance(required, list):
+        required = []
+    properties = schema.get("properties") or {}
+    if not isinstance(properties, dict):
+        properties = {}
+    args = arguments if isinstance(arguments, dict) else {}
+    for key in required:
+        if not isinstance(key, str):
+            continue
+        if key not in args:
+            errors.append({"path": key, "error": "required"})
+    additional = schema.get("additionalProperties", True)
+    for key, value in args.items():
+        prop = properties.get(key)
+        if not isinstance(prop, dict):
+            if additional is False:
+                errors.append({"path": key, "error": "unexpected"})
+            continue
+        expected_type = prop.get("type")
+        if expected_type is not None and not _json_type_matches(value, expected_type):
+            errors.append({
+                "path": key,
+                "error": "type",
+                "expected": expected_type,
+                "actual": type(value).__name__,
+            })
+        enum = prop.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            errors.append({"path": key, "error": "enum", "expected": enum})
+    return errors
+
+
+def _lookup_tool_schema(
+    tool_name: str,
+    index: Optional[Any] = None,
+    manager: Optional[Any] = None,
+    trace_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Load input schema from the index (preferred) or a live backend cache.
+
+    Does NOT connect a backend — execute() validates before connect.
+    """
+    if index is not None:
+        full = _load_raw_schema(index, tool_name, trace_id)
+        if isinstance(full, dict) and full:
+            return full
+        if getattr(index, "db", None):
+            try:
+                row = index.db.execute(
+                    "SELECT parameters FROM tools WHERE name = ?",
+                    (tool_name,),
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            if row and row["parameters"]:
+                try:
+                    params = json.loads(row["parameters"])
+                except (json.JSONDecodeError, TypeError):
+                    params = None
+                if isinstance(params, dict) and params:
+                    if "type" in params or "properties" in params or "required" in params:
+                        return params
+                    return {"type": "object", "properties": params}
+    if manager is not None:
+        try:
+            info = manager.get_tool_schema(tool_name)
+        except Exception:
+            info = None
+        if isinstance(info, dict):
+            schema = info.get("input_schema") or info.get("schema") or info.get("inputSchema")
+            if isinstance(schema, dict) and schema:
+                return schema
+    return None
+
+
+def _resolve_json_pointer(doc: Any, pointer: str) -> Any:
+    """RFC 6901 JSON Pointer plus dotted-path convenience."""
+    if pointer in ("", "/", "."):
+        return doc
+    if pointer.startswith("/"):
+        parts = [p.replace("~1", "/").replace("~0", "~") for p in pointer.split("/")[1:]]
+    else:
+        parts = [p for p in pointer.lstrip(".").split(".") if p]
+    cur = doc
+    for part in parts:
+        if isinstance(cur, dict):
+            if part not in cur:
+                return None
+            cur = cur[part]
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+    return cur
+
+
+def _resolve_chain_ref(expr: Any, prev: Any, steps: List[Dict[str, Any]]) -> Any:
+    """Resolve $prev / $steps[n] (optional JSON Pointer) in chain arg_map."""
+    if not isinstance(expr, str):
+        if isinstance(expr, dict):
+            return {k: _resolve_chain_ref(v, prev, steps) for k, v in expr.items()}
+        if isinstance(expr, list):
+            return [_resolve_chain_ref(v, prev, steps) for v in expr]
+        return expr
+    if expr == "$prev":
+        return prev
+    if expr.startswith("$prev"):
+        rest = expr[5:]
+        return _resolve_json_pointer(prev, rest)
+    if expr.startswith("$steps["):
+        close = expr.find("]")
+        if close == -1:
+            return expr
+        try:
+            idx = int(expr[7:close])
+        except ValueError:
+            return expr
+        if idx < 0 or idx >= len(steps):
+            return None
+        rest = expr[close + 1:]
+        return _resolve_json_pointer(steps[idx], rest)
+    return expr
+
+
+def _hop_arguments(
+    hop_index: int,
+    arguments: Optional[Dict[str, Any]],
+    arg_map: Optional[Any],
+    prev: Any,
+    steps: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Best-effort argument plumbing for compass_chains(action='run')."""
+    template: Any = None
+    if isinstance(arg_map, list) and hop_index < len(arg_map):
+        template = arg_map[hop_index]
+    elif isinstance(arg_map, dict) and hop_index == 0:
+        template = arg_map
+    elif hop_index == 0:
+        template = arguments
+    if template is None:
+        return dict(arguments or {}) if hop_index == 0 else {}
+    resolved = _resolve_chain_ref(template, prev, steps)
+    if isinstance(resolved, dict):
+        return resolved
+    return {"value": resolved}
+
+
 # =============================================================================
 # MCP TOOLS - The Gateway Interface
 # =============================================================================
@@ -1333,6 +1540,7 @@ async def compass(
     server: Optional[str] = None,
     min_confidence: float = 0.3,
     include_chains: bool = True,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
     Find tools by describing what you want to accomplish.
@@ -1383,7 +1591,9 @@ async def compass(
     )
 
     # Check for sync on first call
+    await _report_progress(ctx, 5, 100, "startup sync")
     await maybe_startup_sync()
+    await _report_progress(ctx, 20, 100, "searching")
 
     # GW-A-001: get_index() raises RuntimeError on cold start (no baked index
     # AND Ollama unreachable). Surface that as the structured
@@ -1578,7 +1788,11 @@ async def compass(
     ):
         # Chain is the best match
         chain_name = chain_matches[0]["name"]
-        hint = f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). Tools: {' → '.join(chain_matches[0]['tools'])}"
+        hint = (
+            f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). "
+            f"Tools: {' → '.join(chain_matches[0]['tools'])}. "
+            f"Use compass_chains(action='run', chain_name='{chain_name}') to execute."
+        )
     elif not matches:
         # GW-COMPOSED-001: matches is empty but chains exist and none of them
         # scored above the (0) tool threshold — e.g. a single chain matched at
@@ -1587,7 +1801,11 @@ async def compass(
         # (violating BE-B-004: handlers return a structured payload, never
         # raise). Produce a chains-only hint instead of touching matches[0].
         chain_name = chain_matches[0]["name"]
-        hint = f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). Tools: {' → '.join(chain_matches[0]['tools'])}"
+        hint = (
+            f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). "
+            f"Tools: {' → '.join(chain_matches[0]['tools'])}. "
+            f"Use compass_chains(action='run', chain_name='{chain_name}') to execute."
+        )
     elif len(matches) == 1:
         tool_name = matches[0]["tool"]
         if config.progressive_disclosure:
@@ -1780,7 +1998,10 @@ async def describe(tool_name: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def execute(
-    tool_name: str, arguments: Optional[Dict[str, Any]] = None
+    tool_name: str,
+    arguments: Optional[Dict[str, Any]] = None,
+    dry_run: bool = False,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
     Execute a tool on its backend server.
@@ -1791,17 +2012,20 @@ async def execute(
     Args:
         tool_name: The tool to execute (e.g., "bridge:read_file" or "comfy:comfy_generate")
         arguments: Tool arguments as a dictionary. Check describe() for required parameters.
+        dry_run: If True, validate arguments and return {would_call, server, policy,
+            timeout, schema_errors} without connecting to the backend.
 
     Returns:
         The tool's response or an error message.
     """
     start_time = time.time()
     trace_id = uuid.uuid4().hex[:8]
-    logger.info(f"[execute] [{trace_id}] tool_name={tool_name!r}")
+    logger.info(f"[execute] [{trace_id}] tool_name={tool_name!r} dry_run={dry_run}")
 
     if arguments is None:
         arguments = {}
 
+    await _report_progress(ctx, 5, 100, "resolving")
     manager = await get_backends()
     analytics = None
     try:
@@ -1867,11 +2091,79 @@ async def execute(
         envelope["success"] = False
         return _augment_with_health(envelope)
 
+    # F-65618c94: validate required/type/enum from describe schema BEFORE
+    # connect so LLM argument mistakes do not pay CONNECTION_TIMEOUT.
+    # Use the already-loaded index only — do not cold-start get_index()/Ollama
+    # just to validate arguments.
+    schema = _lookup_tool_schema(
+        tool_name, index=_compass_index, manager=manager, trace_id=trace_id
+    )
+    schema_errors = _validate_arguments_against_schema(arguments, schema)
+
+    server_name = tool_name.split(":", 1)[0] if ":" in tool_name else None
+    cfg_backend = None
+    try:
+        cfg_backend = manager.config.backends.get(server_name) if server_name else None
+    except Exception:
+        cfg_backend = None
+    resolved_timeout = TOOL_CALL_TIMEOUT
+    if cfg_backend is not None:
+        timeouts = getattr(cfg_backend, "tool_timeouts", None)
+        default_t = getattr(cfg_backend, "default_timeout", None)
+        if isinstance(timeouts, dict) and timeouts.get(_bare_tool) is not None:
+            resolved_timeout = timeouts.get(_bare_tool)
+        elif isinstance(default_t, (int, float)):
+            resolved_timeout = default_t
+    policy = "denied" if _tool_denied_by_policy(_policy_backend, _bare_tool) else "allowed"
+
+    if schema_errors and not dry_run:
+        latency_ms = (time.time() - start_time) * 1000
+        if analytics:
+            try:
+                await analytics.record_tool_call(
+                    tool_name,
+                    success=False,
+                    latency_ms=latency_ms,
+                    error_message="invalid_argument: schema validation failed",
+                )
+            except Exception as rec_err:
+                logger.debug(f"analytics record failed: {rec_err}")
+        envelope = _error_envelope(
+            code="invalid_argument",
+            title="Invalid tool arguments",
+            detail=f"Arguments for {tool_name!r} failed schema validation.",
+            category="validation",
+            retryable=False,
+            trace_id=trace_id,
+            schema_errors=schema_errors,
+            suggestions=[
+                f"Use describe('{tool_name}') to inspect required parameters.",
+                "Fix missing/typed/enum fields and retry; do not reconnect yet.",
+            ],
+        )
+        envelope["success"] = False
+        envelope["schema_errors"] = schema_errors
+        return _augment_with_health(envelope)
+
+    if dry_run:
+        return _augment_with_health({
+            "success": True,
+            "dry_run": True,
+            "would_call": tool_name,
+            "server": server_name,
+            "policy": policy,
+            "timeout": resolved_timeout,
+            "schema_errors": schema_errors,
+            "schema": schema,
+            "trace_id": trace_id,
+        })
+
     # Connect to backend if needed
     if ":" in tool_name:
         server_name = tool_name.split(":")[0]
         if not manager.is_backend_connected(server_name):
             logger.info(f"Connecting to backend: {server_name}")
+            await _report_progress(ctx, 25, 100, f"connecting {server_name}")
             success = await manager.connect_backend(server_name)
             if not success:
                 # Record failed call
@@ -1889,13 +2181,18 @@ async def execute(
                 logger.warning(
                     f"[execute] [{trace_id}] backend connect failed: {server_name}"
                 )
+                retry_after = 5.0
+                try:
+                    retry_after = manager._stats_for(server_name).breaker_retry_after() or 5.0
+                except Exception:
+                    retry_after = 5.0
                 envelope = _error_envelope(
                     code="backend_connect_failed",
                     title="Backend connect failed",
                     detail=f"Failed to connect to backend: {server_name}",
                     category="service_unavailable",
                     retryable=True,
-                    retry_after_seconds=5.0,
+                    retry_after_seconds=retry_after,
                     trace_id=trace_id,
                     suggestions=[
                         "Check that the backend server is configured correctly.",
@@ -1912,8 +2209,26 @@ async def execute(
     # backend client doesn't propagate a Python traceback through the MCP
     # JSON-RPC envelope. The MCP spec requires tool handlers to return a
     # structured payload, never raise unhandled.
+    async def _forward_progress(progress, total=None, message=None):
+        # Backend progress is 0..total; map into the latter half of our bar.
+        try:
+            frac = float(progress)
+            if total:
+                frac = (frac / float(total)) * 50.0
+            else:
+                frac = min(frac, 50.0)
+            await _report_progress(ctx, 45 + frac, 100, message or "calling")
+        except Exception:
+            await _report_progress(ctx, 50, 100, message or "calling")
+
+    await _report_progress(ctx, 45, 100, "calling")
     try:
-        result = await manager.execute_tool(tool_name, arguments)
+        if ctx is not None:
+            result = await manager.execute_tool(
+                tool_name, arguments, progress_callback=_forward_progress
+            )
+        else:
+            result = await manager.execute_tool(tool_name, arguments)
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         error_text = f"{type(e).__name__}: {e}"
@@ -1986,7 +2301,9 @@ async def execute(
             logger.info(
                 f"[execute] [{trace_id}] tool={tool_name!r} ok in {latency_ms:.1f}ms"
             )
+        await _report_progress(ctx, 100, 100, "done")
         return _augment_with_health(result)
+    await _report_progress(ctx, 100, 100, "done")
     return result
 
 
@@ -2059,6 +2376,10 @@ async def compass_status(active: bool = False) -> Dict[str, Any]:
     try:
         manager = await get_backends()
         response["backends"] = manager.get_stats()
+        if isinstance(response["backends"], dict):
+            response["last_notification_at"] = response["backends"].get(
+                "last_notification_at"
+            )
         # FEAT-03: fold active-probe results into the backends block on request.
         # Guarded independently so a probe failure never aborts the status
         # response — it degrades to "no probes" and records the error.
@@ -2233,18 +2554,24 @@ async def compass_chains(
     chain_name: Optional[str] = None,
     tools: Optional[List[str]] = None,
     description: Optional[str] = None,
+    arguments: Optional[Dict[str, Any]] = None,
+    arg_map: Optional[Any] = None,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
-    List and manage tool chains (workflows).
+    List, manage, and run tool chains (workflows).
 
     Tool chains are sequences of tools that commonly go together.
     They're auto-detected from usage patterns or can be manually defined.
 
     Args:
-        action: "list" to see all chains, "create" to add a new chain, "detect" to find patterns
-        chain_name: Name for new chain (required for "create")
+        action: "list", "create", "detect", or "run"
+        chain_name: Name for new chain (required for "create") or chain to run
         tools: List of tool names for new chain (required for "create")
         description: Description for new chain (optional for "create")
+        arguments: Arguments for hop 0 when action='run'
+        arg_map: Per-hop argument templates. Values may be literals or
+            $prev / $prev.result / $steps[n] JSON Pointers.
 
     Returns:
         Chain information based on action
@@ -2420,6 +2747,97 @@ async def compass_chains(
             trace_id=trace_id,
         ))
 
+    elif action == "run":
+        if not chain_name:
+            return _augment_with_health(_error_envelope(
+                code="invalid_argument",
+                title="Missing required arguments",
+                detail="chain_name is required for run.",
+                category="validation",
+                retryable=False,
+                trace_id=trace_id,
+                suggestions=[
+                    "compass_chains(action='run', chain_name='my_workflow', "
+                    "arguments={...})",
+                ],
+            ))
+        chain = await chain_indexer.get_chain(chain_name)
+        if chain is None:
+            return _augment_with_health(_error_envelope(
+                code="chain_not_found",
+                title="Chain not found",
+                detail=f"No chain named {chain_name!r}.",
+                category="not_found",
+                retryable=False,
+                trace_id=trace_id,
+                suggestions=["Use compass_chains(action='list') to see workflows."],
+            ))
+        hop_tools = list(chain.tools or [])
+        steps: List[Dict[str, Any]] = []
+        prev: Any = None
+        overall_success = True
+        await _report_progress(ctx, 5, 100, f"running {chain_name}")
+        for i, hop_tool in enumerate(hop_tools):
+            hop_args = _hop_arguments(i, arguments, arg_map, prev, steps)
+            hop_start = time.time()
+            await _report_progress(
+                ctx,
+                10 + (80 * i / max(len(hop_tools), 1)),
+                100,
+                f"hop {i + 1}/{len(hop_tools)}: {hop_tool}",
+            )
+            try:
+                hop_result = await execute(
+                    hop_tool, hop_args, dry_run=False, ctx=ctx
+                )
+            except Exception as hop_err:
+                hop_result = _error_envelope(
+                    code="execute_unhandled_exception",
+                    title="Chain hop failed",
+                    detail=f"{type(hop_err).__name__}: {hop_err}",
+                    category="backend_error",
+                    retryable=False,
+                    trace_id=trace_id,
+                )
+                hop_result["success"] = False
+            hop_ms = (time.time() - hop_start) * 1000
+            hop_ok = bool(isinstance(hop_result, dict) and hop_result.get("success"))
+            step = {
+                "tool": hop_tool,
+                "success": hop_ok,
+                "latency_ms": round(hop_ms, 1),
+            }
+            if hop_ok:
+                step["result"] = hop_result.get("result") if isinstance(hop_result, dict) else hop_result
+                if isinstance(hop_result, dict) and hop_result.get("content"):
+                    step["content"] = hop_result["content"]
+            else:
+                step["error"] = (
+                    hop_result.get("error") if isinstance(hop_result, dict) else str(hop_result)
+                )
+                overall_success = False
+            steps.append(step)
+            prev = hop_result
+            if not hop_ok:
+                break
+        if overall_success:
+            try:
+                await chain_indexer.record_chain_use(chain_name)
+            except Exception as rec_err:
+                logger.debug(f"record_chain_use failed: {rec_err}")
+        await _report_progress(ctx, 100, 100, "done")
+        return _augment_with_health({
+            "success": overall_success,
+            "chain": chain_name,
+            "steps": steps,
+            "trace_id": trace_id,
+            "hint": (
+                f"Chain '{chain_name}' completed."
+                if overall_success
+                else f"Chain '{chain_name}' stopped at hop {len(steps)}."
+            ),
+        })
+
     else:
         return _augment_with_health(_error_envelope(
             code="invalid_action",
@@ -2428,12 +2846,12 @@ async def compass_chains(
             category="validation",
             retryable=False,
             trace_id=trace_id,
-            valid_actions=["list", "create", "detect"],
+            valid_actions=["list", "create", "detect", "run"],
         ))
 
 
 @mcp.tool()
-async def compass_sync(force: bool = False) -> Dict[str, Any]:
+async def compass_sync(force: bool = False, ctx: Optional[Context] = None) -> Dict[str, Any]:
     """
     Check for backend changes and sync the index.
 
@@ -2482,16 +2900,113 @@ async def compass_sync(force: bool = False) -> Dict[str, Any]:
             trace_id=trace_id,
         ))
 
+    await _report_progress(ctx, 10, 100, "sync starting")
     if force:
+        await _report_progress(ctx, 40, 100, "full sync")
         result = await sync_manager.full_sync()
-        return _augment_with_health({"action": "full_sync", "result": result})
+        await _report_progress(ctx, 100, 100, "sync done")
+        return _augment_with_health({"action": "full_sync", "result": result, "trace_id": trace_id})
     else:
+        await _report_progress(ctx, 40, 100, "sync if needed")
         results = await sync_manager.sync_if_needed()
+        await _report_progress(ctx, 100, 100, "sync done")
         return _augment_with_health({
             "action": "sync_if_needed",
             "backends": results,
+            "trace_id": trace_id,
             "hint": "Use force=True to rebuild the entire index",
         })
+
+
+@mcp.tool()
+async def compass_resources(
+    server: Optional[str] = None,
+    uri: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> Dict[str, Any]:
+    """
+    List or read MCP resources from live backends (no HNSW index).
+
+    Args:
+        server: Optional backend name to list. Omit to list every connected backend.
+        uri: Qualified ``server:uri`` (or a raw uri when ``server`` is set) to read.
+    """
+    trace_id = uuid.uuid4().hex[:8]
+    manager = await get_backends()
+    await _report_progress(ctx, 20, 100, "resources")
+    if uri:
+        qualified = uri if ":" in uri and server is None else (
+            f"{server}:{uri}" if server and not uri.startswith(f"{server}:") else uri
+        )
+        result = await manager.read_resource(qualified)
+        if isinstance(result, dict):
+            result.setdefault("trace_id", trace_id)
+        await _report_progress(ctx, 100, 100, "done")
+        return _augment_with_health(result)
+    result = await manager.list_resources(server)
+    result["trace_id"] = trace_id
+    result["hint"] = "Use compass_resources(uri='server:uri') or read_resource(uri) to fetch contents."
+    await _report_progress(ctx, 100, 100, "done")
+    return _augment_with_health(result)
+
+
+@mcp.tool()
+async def compass_prompts(
+    server: Optional[str] = None,
+    name: Optional[str] = None,
+    arguments: Optional[Dict[str, Any]] = None,
+    ctx: Optional[Context] = None,
+) -> Dict[str, Any]:
+    """
+    List or get MCP prompts from live backends (no HNSW index).
+
+    Args:
+        server: Optional backend name to list.
+        name: Qualified ``server:prompt`` (or a raw name when ``server`` is set) to get.
+        arguments: Prompt arguments for get.
+    """
+    trace_id = uuid.uuid4().hex[:8]
+    manager = await get_backends()
+    await _report_progress(ctx, 20, 100, "prompts")
+    if name:
+        qualified = name if ":" in name and server is None else (
+            f"{server}:{name}" if server and not name.startswith(f"{server}:") else name
+        )
+        result = await manager.get_prompt(qualified, arguments)
+        if isinstance(result, dict):
+            result.setdefault("trace_id", trace_id)
+        await _report_progress(ctx, 100, 100, "done")
+        return _augment_with_health(result)
+    result = await manager.list_prompts(server)
+    result["trace_id"] = trace_id
+    result["hint"] = "Use compass_prompts(name='server:prompt') to fill a template."
+    await _report_progress(ctx, 100, 100, "done")
+    return _augment_with_health(result)
+
+
+@mcp.tool()
+async def read_resource(uri: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
+    """Read an MCP resource qualified as server:uri (F-e126a298)."""
+    trace_id = uuid.uuid4().hex[:8]
+    manager = await get_backends()
+    await _report_progress(ctx, 30, 100, f"reading {uri}")
+    result = await manager.read_resource(uri)
+    if isinstance(result, dict):
+        result.setdefault("trace_id", trace_id)
+        if result.get("success") is False and not result.get("error_envelope"):
+            envelope = _error_envelope(
+                code="resource_not_found",
+                title="Resource read failed",
+                detail=str(result.get("error") or "read failed"),
+                category="not_found",
+                retryable=False,
+                trace_id=trace_id,
+            )
+            envelope.update({k: v for k, v in result.items() if k not in envelope})
+            await _report_progress(ctx, 100, 100, "done")
+            return _augment_with_health(envelope)
+    await _report_progress(ctx, 100, 100, "done")
+    return _augment_with_health(result if isinstance(result, dict) else {"result": result, "trace_id": trace_id})
 
 
 @mcp.tool()
@@ -3181,6 +3696,8 @@ def build_http_app():
         lines.append("# TYPE tool_compass_backend_up gauge")
         lines.append("# HELP tool_compass_backend_call_total Backend tool-call counter, labelled by status.")
         lines.append("# TYPE tool_compass_backend_call_total counter")
+        lines.append("# HELP tool_compass_backend_breaker Per-backend circuit breaker state (1 = current).")
+        lines.append("# TYPE tool_compass_backend_breaker gauge")
         try:
             mgr = _backend_manager
             if mgr is not None:
@@ -3202,6 +3719,24 @@ def build_http_app():
                     lines.append(
                         f'tool_compass_backend_call_total{{name="{label}",status="error"}} {_int_fmt(failed)}'
                     )
+                    breaker_state = str(entry.get("breaker_state") or "closed")
+                    lines.append(
+                        f'tool_compass_backend_breaker{{name="{label}",state="{_escape_label(breaker_state)}"}} 1'
+                    )
+                    for trans_key, trans_count in (
+                        (entry.get("breaker_transitions") or {})
+                        if isinstance(entry.get("breaker_transitions"), dict)
+                        else {}
+                    ).items():
+                        try:
+                            from_s, to_s = str(trans_key).split("->", 1)
+                        except ValueError:
+                            continue
+                        lines.append(
+                            f'tool_compass_circuit_breaker_transitions_total'
+                            f'{{from="{_escape_label(from_s)}",to="{_escape_label(to_s)}",'
+                            f'breaker="backend:{label}"}} {_int_fmt(trans_count)}'
+                        )
         except Exception as e:
             logger.debug(f"metrics: backend stats failed: {e}")
 
