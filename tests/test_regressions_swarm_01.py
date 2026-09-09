@@ -189,6 +189,11 @@ class TestIDXA002EmptyIndexSearch:
         finally:
             await index.close()
 
+    @pytest.mark.xfail(
+        reason="F-607117d6: embed_query still runs before the empty-index guard",
+        strict=True,
+        raises=RuntimeError,
+    )
     @pytest.mark.asyncio
     async def test_search_empty_index_down_embedder_returns_list(
         self, temp_index_path, temp_db_path, down_embedder
