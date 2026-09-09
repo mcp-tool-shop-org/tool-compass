@@ -380,22 +380,30 @@ def create_provider(
 ) -> EmbeddingProvider:
     """Factory: build the EmbeddingProvider for ``provider``.
 
-    An unknown provider name warns and falls back to the default (ollama) so a
-    typo in config degrades gracefully to working behavior rather than
-    crashing the embed path — mirroring CompassConfig.validate_and_clamp's
-    "warn + fall back" discipline.
+    None/blank resolves to ``DEFAULT_PROVIDER``. An unknown name warns and
+    raises ValueError listing ``known_providers()`` — a typo must not
+    silently POST Ollama's ``/api/embed`` at a non-Ollama URL (F-83e9d70d).
     """
-    key = (provider or DEFAULT_PROVIDER).strip().lower()
+    if provider is None or not str(provider).strip():
+        key = DEFAULT_PROVIDER
+    else:
+        key = str(provider).strip().lower()
     cls = _PROVIDER_REGISTRY.get(key)
     if cls is None:
+        known = ", ".join(known_providers())
         logger.warning(
-            "Unknown embedding_provider %r; falling back to %r. "
-            "Known providers: %s",
+            "Unknown embedding_provider %r; refusing to instantiate a "
+            "fallback protocol. Known providers: %s",
             provider,
-            DEFAULT_PROVIDER,
-            ", ".join(known_providers()),
+            known,
         )
-        cls = _PROVIDER_REGISTRY[DEFAULT_PROVIDER]
+        raise ValueError(
+            f"Unknown embedding_provider {provider!r}. "
+            f"Known providers: {known}. "
+            f"Refusing to construct {DEFAULT_PROVIDER} against a possibly "
+            f"non-Ollama base_url (that would POST /api/embed at the wrong "
+            f"daemon). Set embedding_provider to one of the known names."
+        )
     return cls(
         base_url=base_url,
         model=model,
@@ -448,7 +456,7 @@ class Embedder:
         Provider seam (BE-FT-PE-001 — all optional, default to the legacy
         Ollama behavior so a bare ``Embedder()`` is unchanged):
             provider: backend name ('ollama' [default] / 'openai' /
-                'openai-compatible'). Unknown -> warn + fall back to ollama.
+                'openai-compatible'). Unknown names raise ValueError.
             api_key: secret for OpenAI-compatible auth (Authorization: Bearer).
             query_prefix / document_prefix: override the retrieval prefix
                 convention. None -> the provider's default (nomic search_* for
@@ -462,9 +470,9 @@ class Embedder:
         self.model = model
         self.timeout = timeout
 
-        # Build the provider behind the orchestration layer. An unknown name
-        # warns + falls back to ollama (graceful degradation, not a crash).
-        self.provider_name = (provider or DEFAULT_PROVIDER).strip().lower()
+        # Build the provider behind the orchestration layer. Unknown names
+        # raise (F-83e9d70d) — do not silently POST the Ollama protocol.
+        self.provider_name = (provider or DEFAULT_PROVIDER).strip().lower() or DEFAULT_PROVIDER
         self._provider = create_provider(
             provider=provider,
             base_url=base_url,
@@ -474,8 +482,7 @@ class Embedder:
             document_prefix=document_prefix,
             embedding_dim=embedding_dim,
         )
-        # Reflect the actually-resolved provider name (post fallback) so
-        # callers/metrics report the truth, not the requested-but-unknown name.
+        # Reflect the registered name (aliases like openai-compatible → openai).
         self.provider_name = self._provider.name
 
         self._breaker_failure_threshold = (
@@ -729,8 +736,56 @@ class Embedder:
         else:
             br["state"] = new_state
 
+    def _embed_target(self) -> str:
+        """provider_name + base_url + endpoint for operator-facing errors."""
+        path = ""
+        provider = getattr(self, "_provider", None)
+        if provider is not None:
+            path = getattr(provider, "endpoint_path", "") or ""
+        return f"{self.provider_name} {self.base_url}{path}"
+
+    def _circuit_breaker_error(self, situation: str) -> RuntimeError:
+        """Fast-fail with the active provider, not a hardcoded Ollama brand."""
+        return RuntimeError(
+            f"{self.provider_name} circuit breaker {situation} "
+            f"({self._embed_target()}). "
+            f"Wait {self._breaker_open_seconds:.0f}s then retry; "
+            f"check the configured embed URL."
+        )
+
+    def _classify_embed_http_error(self, response: httpx.Response) -> str:
+        """Build a truncated, status-classified embed HTTP error string.
+
+        4xx bodies are capped like 5xx (200 chars). 401/403 hint at the API
+        key, 404 at endpoint_path vs provider, 429 at rate-limit + Retry-After.
+        Every string includes provider_name and status (F-618aa08e).
+        """
+        status = response.status_code
+        body = (response.text or "")[:200]
+        target = self._embed_target()
+        if status in (401, 403):
+            hint = "check embedding API key"
+        elif status == 404:
+            path = getattr(self._provider, "endpoint_path", "")
+            hint = (
+                f"wrong embed path {path} for provider {self.provider_name}"
+            )
+        elif status == 429:
+            retry_after = response.headers.get("Retry-After")
+            hint = "rate limited"
+            if retry_after:
+                hint = f"{hint}; Retry-After={retry_after}"
+        else:
+            hint = None
+        msg = f"Embedding failed ({status}) via {target}"
+        if hint:
+            msg = f"{msg}: {hint}"
+        if body:
+            msg = f"{msg}: {body}"
+        return msg
+
     def _breaker_check(self) -> None:
-        """Raise fast if the Ollama circuit breaker is open (IDX-B-002 + BE-B-006).
+        """Raise fast if the embed circuit breaker is open (IDX-B-002 + BE-B-006).
 
         Three-state machine: closed | half_open | open.
         - closed: requests flow normally.
@@ -752,12 +807,14 @@ class Embedder:
                     self._set_breaker_state("half_open")
                     return
                 # Cooldown elapsed but another probe is racing — fast fail.
-                raise RuntimeError("Ollama circuit breaker half-open (probe in flight)")
-            raise RuntimeError("Ollama circuit breaker open")
+                raise self._circuit_breaker_error(
+                    "half-open (probe in flight)"
+                )
+            raise self._circuit_breaker_error("open")
         if state == "half_open":
             # Probe already in flight — sibling requests fast-fail to avoid
             # the Hystrix anti-pattern of concurrent probes during recovery.
-            raise RuntimeError("Ollama circuit breaker half-open (probe in flight)")
+            raise self._circuit_breaker_error("half-open (probe in flight)")
 
     def _record_success(self, latency_ms: float) -> None:
         """Reset breaker failure count and log latency sample.
@@ -902,24 +959,27 @@ class Embedder:
                 )
                 if response.status_code >= 500:
                     # Transient server error — retry.
-                    err = f"HTTP {response.status_code}: {response.text[:200]}"
+                    err = (
+                        f"{self.provider_name} HTTP {response.status_code} "
+                        f"at {self.base_url}{endpoint}: {response.text[:200]}"
+                    )
                     self._record_failure()
                     last_exc = RuntimeError(err)
                     if attempt < attempts:
                         # backoffs has `attempts - 1` entries by convention.
                         wait = backoffs[min(attempt - 1, len(backoffs) - 1)]
                         logger.warning(
-                            f"Ollama embed retry {attempt}/{attempts} "
-                            f"after {wait}s: {err}"
+                            f"{self.provider_name} embed retry "
+                            f"{attempt}/{attempts} after {wait}s "
+                            f"at {self.base_url}{endpoint}: {err}"
                         )
                         await asyncio.sleep(wait)
                         continue
                     raise last_exc
                 if response.status_code != 200:
-                    # 4xx — don't retry, don't count toward breaker (not Ollama's fault).
-                    raise RuntimeError(
-                        f"Embedding failed ({response.status_code}): {response.text}"
-                    )
+                    # 4xx — don't retry, don't count toward breaker
+                    # (client/config error, not the backend's fault).
+                    raise RuntimeError(self._classify_embed_http_error(response))
                 return response
             except (httpx.TransportError, httpx.TimeoutException) as e:
                 self._record_failure()
@@ -927,8 +987,9 @@ class Embedder:
                 if attempt < attempts:
                     wait = backoffs[min(attempt - 1, len(backoffs) - 1)]
                     logger.warning(
-                        f"Ollama embed retry {attempt}/{attempts} "
-                        f"after {wait}s: {e}"
+                        f"{self.provider_name} embed retry "
+                        f"{attempt}/{attempts} after {wait}s "
+                        f"at {self.base_url}{endpoint}: {e}"
                     )
                     await asyncio.sleep(wait)
                     continue
@@ -975,7 +1036,9 @@ class Embedder:
             # the canonical _breaker_check would falsely reject it, so we
             # only guard the closed→open transition during the queue wait.
             if self._ollama_breaker["state"] == "open":
-                raise RuntimeError("Ollama circuit breaker re-opened during queue wait")
+                raise self._circuit_breaker_error(
+                    "re-opened during queue wait"
+                )
 
             # SC-003: count the LOGICAL embed exactly once here, regardless
             # of how many retry attempts _post_embed_with_retry makes or
