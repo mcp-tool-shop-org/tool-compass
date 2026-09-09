@@ -283,8 +283,8 @@ def _build_parser() -> argparse.ArgumentParser:
             "\n"
             "JSON fields: version, python_version, platform, config_path,\n"
             "config, base_path, data_dir, index_path, index_exists,\n"
-            "index_size_bytes, analytics_db_path, ollama_url,\n"
-            "ollama_reachable, deprecated_tools."
+            "index_size_bytes, analytics_db_path, embedding_provider,\n"
+            "ollama_url, ollama_reachable, deprecated_tools."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1495,6 +1495,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         ollama_url = payload.get("ollama_url", "(unset)")
         ollama_ok = payload.get("ollama_reachable", False)
         index_exists = payload.get("index_exists", False)
+        # F-3b85ec27: default missing embedding_provider to ollama so legacy
+        # doctor dumps (and tests that omit the field) keep the Ollama hint.
+        # Do not load_config() here — tests mock doctor() without patching
+        # the live config, and a real openai provider would hide the lines
+        # they assert on.
+        embed_provider = _embedding_provider_from_payload(payload)
 
         out_console.print(f"[bold]tool-compass {version}[/bold]")
         out_console.print(f"  [{_C_DIM}]config:[/{_C_DIM}] {config_path}")
@@ -1522,14 +1528,36 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
                     "compass_config.json."
                 ),
             )
-        if ollama_ok:
-            _print_success(out_console, f"ollama reachable at {ollama_url}")
+        if embed_provider == "ollama":
+            if ollama_ok:
+                _print_success(out_console, f"ollama reachable at {ollama_url}")
+            else:
+                _print_warn(
+                    out_console,
+                    f"ollama unreachable at {ollama_url}",
+                    hint="Run `ollama serve` or set OLLAMA_URL.",
+                )
         else:
-            _print_warn(
-                out_console,
-                f"ollama unreachable at {ollama_url}",
-                hint="Run `ollama serve` or set OLLAMA_URL.",
-            )
+            embed_url = payload.get("embedding_base_url") or ollama_url
+            embed_ok = payload.get("embedding_reachable")
+            if embed_ok:
+                _print_success(
+                    out_console, f"{embed_provider} reachable at {embed_url}"
+                )
+            elif embed_ok is False:
+                _print_warn(
+                    out_console,
+                    f"{embed_provider} unreachable at {embed_url}",
+                    hint=(
+                        "Set embedding_base_url to your embedding server — "
+                        "not OLLAMA_URL. `ollama serve` is not required."
+                    ),
+                )
+            else:
+                out_console.print(
+                    f"  [{_C_DIM}]embeddings:[/{_C_DIM}] {embed_provider} "
+                    f"(Ollama probe skipped)"
+                )
         if index_exists:
             _print_success(out_console, "tool index present")
         else:
@@ -1579,32 +1607,100 @@ def _maybe_suggest_sync(err_console) -> None:
 
 
 def _dump_json(payload: Any) -> int:
-    """Print JSON to stdout with the same shape `doctor --json` uses."""
+    """Print JSON to stdout. Exit 1 when the payload is an error envelope.
+
+    F-0aa8e487: status/categories/audit/analytics/chains --json used to dump
+    via this helper and return 0 before any error check. Scripts branching
+    on the CLI exit code (the way ``execute --json`` already does) could not
+    tell a gateway error from a successful empty report. Print the JSON
+    either way so ``jq`` still sees the envelope; return 1 on error.
+    """
     print(json.dumps(payload, indent=2, default=str))
-    return 0
+    return 1 if _is_error_envelope(payload) else 0
 
 
 def _is_error_envelope(payload: Any) -> bool:
     """True when ``payload`` looks like a compass error envelope.
 
-    The gateway returns ``{"error": {"code": "...", "title": "...", ...}}``
-    when a feature is disabled or a subsystem is down. We unwrap that into
-    a `_print_error` line so the CLI surface looks consistent across calls.
+    Gateway shapes (BE-B-001 + execute) that must all count as failure:
+
+    - ``{"error": {"code": "...", ...}}`` (structured dict error)
+    - ``{"error": {"title": "...}}`` (dict error, code optional)
+    - ``{"error": "detail string", "error_envelope": {...}}`` (current
+      ``gateway._error_envelope`` — ``error`` is the legacy string)
+    - ``{"error": "detail string"}`` (legacy string error)
+    - ``{"success": False, ...}`` (execute / backend envelopes)
     """
-    return (
-        isinstance(payload, dict)
-        and isinstance(payload.get("error"), dict)
-        and "code" in payload["error"]
-    )
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("success") is False:
+        return True
+    error = payload.get("error")
+    if isinstance(error, str) and error:
+        return True
+    if error is True:
+        return True
+    if isinstance(error, dict) and error:
+        return True
+    env = payload.get("error_envelope")
+    if isinstance(env, dict) and (
+        env.get("code") or env.get("title") or env.get("detail")
+    ):
+        return True
+    return False
 
 
 def _print_envelope_error(err_console, payload: dict) -> int:
     """Render a gateway error envelope as a single colored error line."""
-    err = payload["error"]
-    title = err.get("title") or err.get("detail") or "Operation failed"
-    suggestions = err.get("suggestions") or []
-    hint = suggestions[0] if suggestions else None
-    return _print_error(err_console, title, hint=hint, exit_code=1)
+    err = payload.get("error")
+    structured = err if isinstance(err, dict) else None
+    if structured is None:
+        env = payload.get("error_envelope")
+        if isinstance(env, dict):
+            structured = env
+    if isinstance(structured, dict):
+        title = (
+            structured.get("title")
+            or structured.get("detail")
+            or "Operation failed"
+        )
+        suggestions = structured.get("suggestions") or []
+        hint = suggestions[0] if suggestions else None
+        return _print_error(err_console, title, hint=hint, exit_code=1)
+    if isinstance(err, str) and err:
+        return _print_error(err_console, err, exit_code=1)
+    return _print_error(err_console, "Operation failed", exit_code=1)
+
+
+def _embedding_provider_from_payload(payload: Any) -> str:
+    """Read embedding_provider from a doctor/status dump, default ollama.
+
+    Looks at the top-level field first, then ``payload['config']``. Missing
+    or empty values default to ``ollama`` (legacy dumps and tests).
+    """
+    if not isinstance(payload, dict):
+        return "ollama"
+    provider = payload.get("embedding_provider")
+    if not (isinstance(provider, str) and provider.strip()):
+        cfg_block = payload.get("config")
+        if isinstance(cfg_block, dict):
+            provider = cfg_block.get("embedding_provider")
+    if isinstance(provider, str) and provider.strip():
+        return provider.strip().lower()
+    return "ollama"
+
+
+def _configured_embedding_provider() -> str:
+    """Live config embedding_provider for commands whose payload omits it."""
+    try:
+        from config import load_config
+
+        provider = load_config().embedding_provider
+        if isinstance(provider, str) and provider.strip():
+            return provider.strip().lower()
+    except Exception:
+        pass
+    return "ollama"
 
 
 def _cmd_ui(args: argparse.Namespace) -> int:
@@ -1726,11 +1822,24 @@ def _cmd_status(args: argparse.Namespace) -> int:
             hint="Check `tool-compass doctor` for details.",
         )
 
-    if health.get("ollama_available"):
-        _print_success(out_console, "ollama reachable")
+    # F-3b85ec27: gateway health still reports ollama_available even when
+    # embeddings come from OpenAI / openai-compatible. Don't tell that
+    # operator to `ollama serve`. Payload config omits embedding_provider
+    # (gateway is a sibling domain), so fall back to the live config.
+    embed_provider = _embedding_provider_from_payload(payload)
+    if embed_provider == "ollama":
+        embed_provider = _configured_embedding_provider()
+    if embed_provider == "ollama":
+        if health.get("ollama_available"):
+            _print_success(out_console, "ollama reachable")
+        else:
+            _print_warn(out_console, "ollama unreachable",
+                        hint="Run `ollama serve` or set OLLAMA_URL.")
     else:
-        _print_warn(out_console, "ollama unreachable",
-                    hint="Run `ollama serve` or set OLLAMA_URL.")
+        out_console.print(
+            f"  [{_C_DIM}]embeddings:[/{_C_DIM}] {embed_provider} "
+            f"(Ollama not required)"
+        )
     if not health.get("index_available", True):
         _print_warn(out_console, "index in degraded mode",
                     hint="Run `tool-compass sync` to rebuild.")
