@@ -18,7 +18,7 @@ Default config directories by platform:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Literal
+from typing import Any, Dict, List, Optional, Literal
 from pathlib import Path
 import json
 import logging
@@ -338,6 +338,14 @@ class CompassConfig:
                     # FEAT-06: tool filters (import backends carry no timeout).
                     allow_tools=backend_data.get("allow_tools", []),
                     deny_tools=backend_data.get("deny_tools", []),
+                )
+            else:
+                # F-22079b2a: unknown type (typo 'htttp', 'sse', …) used to
+                # miss every branch and silently drop the backend — fail-open.
+                # Colon-in-name already raises; type must refuse load too.
+                raise ValueError(
+                    f"Backend {name!r} has unknown type {backend_type!r}; "
+                    f"expected one of 'stdio', 'http', 'import'."
                 )
 
         # Other settings
@@ -1218,13 +1226,42 @@ def _ollama_reachable(url: str, timeout: float = 2.0) -> bool:
         return False
 
 
+def _http_reachable(url: str, timeout: float = 2.0) -> bool:
+    """Generic HTTP reachability: any response means the host answered.
+
+    Used by doctor() for non-Ollama embedding providers so we probe the
+    resolved ``embedding_base_url`` instead of the Ollama-only ``/api/tags``
+    contract. Connection/timeout failures return False; HTTP 4xx/5xx still
+    count as reachable (the server is up, just not the path we GET).
+    """
+    if not url:
+        return False
+    try:
+        import httpx  # local import — keeps module-level imports stable
+    except ImportError:
+        return False
+    try:
+        with httpx.Client(timeout=timeout, follow_redirects=True) as client:
+            client.get(url.rstrip("/"))
+            return True
+    except Exception:
+        return False
+
+
 def doctor() -> dict:
     """Produce a JSON-serializable diagnostic dump.
 
     MCC-B-004: one-shot environment snapshot for bug reports. Captures
-    version, platform, resolved paths, file sizes, and an Ollama reachability
-    probe. Secrets are redacted defensively on field-name match. Ollama probe
-    has a hard 2s timeout so `python config.py` never hangs on a dead server.
+    version, platform, resolved paths, file sizes, and an embedding
+    reachability probe. Secrets are redacted defensively on field-name
+    match. The probe has a hard 2s timeout so `python config.py` never
+    hangs on a dead server.
+
+    F-3b85ec27: the Ollama ``/api/tags`` probe runs only when
+    ``embedding_provider`` is ``ollama``. Other providers probe the
+    resolved ``embedding_base_url`` (and dump ``embedding_provider``) so
+    an OpenAI / openai-compatible operator is not diagnosed as
+    "ollama unreachable".
     """
     # Local imports to avoid polluting the module namespace with rarely-used
     # stdlib paths and to keep import-time cost low on the hot path.
@@ -1300,7 +1337,17 @@ def doctor() -> dict:
     except Exception as e:
         logger.debug(f"doctor(): could not read analytics health: {e}")
 
-    return {
+    provider = cfg.embedding_provider
+    if isinstance(provider, str) and provider.strip():
+        provider = provider.strip().lower()
+    else:
+        provider = "ollama"
+
+    # F-3b85ec27: only hit the Ollama /api/tags contract when the configured
+    # provider is ollama. Otherwise probe the resolved embedding_base_url
+    # (any HTTP response = reachable) and leave ollama_reachable as None so
+    # CLI doctor --text does not tell an OpenAI operator to `ollama serve`.
+    dump: Dict[str, Any] = {
         "version": __version__,
         "python_version": sys.version,
         "platform": _platform.platform(),
@@ -1327,9 +1374,17 @@ def doctor() -> dict:
         # it lands in a pasteable bug-report dump. The reachability probe below
         # still uses the raw cfg value (it returns only a bool, not the URL).
         "ollama_url": redact_url_credentials(cfg.ollama_url),
-        "ollama_reachable": _ollama_reachable(cfg.ollama_url),
+        "embedding_provider": provider,
         "deprecated_tools": deprecated_tools_count,
     }
+    if provider == "ollama":
+        dump["ollama_reachable"] = _ollama_reachable(cfg.ollama_url)
+    else:
+        resolved = cfg.resolved_embedding_base_url()
+        dump["ollama_reachable"] = None
+        dump["embedding_base_url"] = redact_url_credentials(resolved)
+        dump["embedding_reachable"] = _http_reachable(resolved)
+    return dump
 
 
 if __name__ == "__main__":
