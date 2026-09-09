@@ -257,7 +257,10 @@ def _error_envelope(
     if trace_id is not None:
         payload["instance"] = trace_id
     if retry_after_seconds is not None:
-        payload["retry_after_seconds"] = float(retry_after_seconds)
+        try:
+            payload["retry_after_seconds"] = float(retry_after_seconds)
+        except (TypeError, ValueError):
+            payload["retry_after_seconds"] = 5.0
     if nearest_tools:
         payload["nearest_tools"] = nearest_tools
     if suggestions:
@@ -2183,8 +2186,10 @@ async def execute(
                 )
                 retry_after = 5.0
                 try:
-                    retry_after = manager._stats_for(server_name).breaker_retry_after() or 5.0
-                except Exception:
+                    retry_after = float(
+                        manager._stats_for(server_name).breaker_retry_after() or 5.0
+                    )
+                except (TypeError, ValueError, AttributeError):
                     retry_after = 5.0
                 envelope = _error_envelope(
                     code="backend_connect_failed",

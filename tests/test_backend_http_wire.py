@@ -246,7 +246,7 @@ class JsonRpcClientSession:
         ]
         return ListToolsResult(tools=tools, nextCursor=result.get("nextCursor"))
 
-    async def call_tool(self, name: str, arguments: Dict[str, Any]):
+    async def call_tool(self, name: str, arguments: Dict[str, Any], **kwargs):
         result = await self._rpc(
             "tools/call", {"name": name, "arguments": arguments}
         )

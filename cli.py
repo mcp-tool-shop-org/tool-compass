@@ -38,6 +38,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from rich.markup import escape
+
 
 # =============================================================================
 # Stage D polish helpers — color, output, error
@@ -1425,7 +1427,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
     out_console.print("[bold]Next steps[/bold]")
     out_console.print(
         f"  [{_C_DIM}]1.[/{_C_DIM}] Edit [bold]backends[/bold] in "
-        f"{config_path} to point at your MCP servers."
+        f"{escape(str(config_path))} to point at your MCP servers."
     )
     out_console.print(
         f"  [{_C_DIM}]2.[/{_C_DIM}] Run [bold]tool-compass sync[/bold] to "
@@ -1436,23 +1438,20 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "start the MCP gateway."
     )
     out_console.print()
-    out_console.print(
-        "[bold]Register with an MCP client[/bold] "
-        f"[{_C_DIM}](npx -y {_NPX_PACKAGE} serve; backends stay in "
-        "compass_config.json):[/{_C_DIM}]"
+    print(
+        "Register with an MCP client "
+        f"(npx -y {_NPX_PACKAGE} serve; backends stay in compass_config.json):"
     )
-    # Print snippets via plain print so Rich never reflows / styles the
-    # JSON — the user must be able to copy it byte-for-byte.
+    # Snippets via plain print so Rich never reflows / styles the JSON
+    # or treats @scope/package as markup.
     for client_id in selected_ids:
         label = _MCP_CLIENT_LABELS.get(client_id, client_id)
         hint = _MCP_CLIENT_PASTE_HINTS.get(client_id, "")
-        out_console.print()
+        print()
         if hint:
-            out_console.print(
-                f"[bold]{label}[/bold] [{_C_DIM}]({hint}):[/{_C_DIM}]"
-            )
+            print(f"{label} ({hint}):")
         else:
-            out_console.print(f"[bold]{label}[/bold]")
+            print(f"{label}:")
         print(json.dumps(clients[client_id], indent=2))
     return 0
 

@@ -319,8 +319,8 @@ class TestIndexBuilding:
 
         await chain_indexer.build_chain_index(chains)
 
-        # Embedder should have been called
-        mock_embedder.embed.assert_called()
+        # Embedder should have been called (native batch path).
+        assert mock_embedder.embed_batch.called or mock_embedder.embed.called
 
     @pytest.mark.asyncio
     async def test_build_chain_index_refreshes_cache(

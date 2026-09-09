@@ -2141,14 +2141,16 @@ class HttpBackendConnection:
         deadline = _effective_request_timeout(timeout)
         self._progress_callback = progress_callback
         try:
-            res = await asyncio.wait_for(
-                self._session.call_tool(
-                    tool_name,
-                    arguments,
-                    progress_callback=progress_callback,
-                ),
-                timeout=deadline,
-            )
+            call_kw = {}
+            if progress_callback is not None:
+                call_kw["progress_callback"] = progress_callback
+            try:
+                call = self._session.call_tool(
+                    tool_name, arguments, **call_kw
+                )
+            except TypeError:
+                call = self._session.call_tool(tool_name, arguments)
+            res = await asyncio.wait_for(call, timeout=deadline)
 
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
             content_list = list(res.content) if res.content else []

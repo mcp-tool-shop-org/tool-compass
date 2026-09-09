@@ -1411,7 +1411,7 @@ class TestCompassChainsErrors:
         assert env["category"] == "validation"
         assert env["retryable"] is False
         # The extra **valid_actions kwarg flows through.
-        assert env["valid_actions"] == ["list", "create", "detect"]
+        assert env["valid_actions"] == ["list", "create", "detect", "run"]
 
     @pytest.mark.asyncio
     async def test_chains_create_embedder_failure_envelope(
