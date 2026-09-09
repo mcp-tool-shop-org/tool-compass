@@ -12,9 +12,10 @@ Covers ``ui.py`` without launching a real Gradio server. Strategy:
 * Async dependencies (`embedder.health_check`, `index.search`,
   `analytics.get_analytics_summary`, `chain_indexer.search_chains`,
   `chain_indexer.load_chains_from_db`) are mocked with `AsyncMock`.
-* The Gradio Blocks construction in `create_ui` is NOT exercised here —
-  the handler functions it wires up are tested directly so coverage
-  measures the actual business logic, not the layout calls.
+* ``create_ui()`` is constructed once under stubs (no ``demo.launch``, no
+  Ollama, no index/analytics I/O). Theme, tab labels, heading hierarchy,
+  custom CSS, and shell ``elem_id`` / chrome JS are asserted against the
+  Blocks object. Handler functions remain tested directly below.
 
 Each test has at least one meaningful assert; no test launches a
 network call, real Ollama, or a real Gradio server.
@@ -24,7 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import sqlite3
+import warnings
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -1618,3 +1622,204 @@ class TestRunAsync:
             return ui.run_async(inner())
 
         assert asyncio.run(driver()) == "ok"
+
+
+# =============================================================================
+# create_ui — Gradio Blocks construction (F-210f4466)
+# =============================================================================
+# Constructs the shell without demo.launch(). Index / analytics / embedder
+# are stubbed so construction does not touch disk, network, or Ollama.
+# Gradio 6 stores theme/css passed to Blocks() on _deprecated_* (moved to
+# launch()); Gradio 5 kept them on .theme / .css. Helpers accept both.
+
+
+def _blocks_theme(demo):
+    """Theme actually attached by create_ui (Gradio 5 `.theme` or 6 `_deprecated_theme`)."""
+    return getattr(demo, "theme", None) or getattr(demo, "_deprecated_theme", None)
+
+
+def _blocks_css(demo):
+    """Custom CSS actually attached by create_ui."""
+    return getattr(demo, "css", None) or getattr(demo, "_deprecated_css", None)
+
+
+def _block_values_as_text(demo) -> str:
+    chunks = []
+    for block in demo.blocks.values():
+        value = getattr(block, "value", None)
+        if isinstance(value, str):
+            chunks.append(value)
+    return "\n".join(chunks)
+
+
+def _markdown_heading_snapshot(demo) -> list[tuple[int, str]]:
+    """Ordered (level, text) headings from Markdown components only."""
+    headings: list[tuple[int, str]] = []
+    for block in demo.blocks.values():
+        if type(block).__name__ != "Markdown":
+            continue
+        value = getattr(block, "value", None)
+        if not isinstance(value, str):
+            continue
+        for raw in value.splitlines():
+            line = raw.strip()
+            match = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+            if match:
+                headings.append((len(match.group(1)), match.group(2)))
+    return headings
+
+
+def _tab_blocks(demo):
+    return [b for b in demo.blocks.values() if type(b).__name__ == "Tab"]
+
+
+@pytest.fixture(scope="class")
+def created_ui():
+    """Build create_ui() once with I/O stubs. demo.launch must not run."""
+    idx = MagicMock()
+    idx.get_stats.return_value = {
+        "total_tools": 7,
+        "core_tools": 0,
+        "by_server": {"seed": 7},
+        "by_category": {"file": 7},
+    }
+    env = {**os.environ, "GRADIO_ANALYTICS_ENABLED": "False"}
+    with patch.dict(os.environ, env, clear=True), \
+         patch.object(ui, "get_filter_choices",
+                      return_value=(["All", "seed"], ["All", "file"])), \
+         patch.object(ui, "get_index", return_value=idx), \
+         patch.object(ui, "_check_ollama_banner", return_value=""), \
+         patch.object(ui, "filter_tools", return_value="<p>stub-browser</p>"), \
+         patch.object(ui, "get_analytics_dashboard",
+                      return_value="<p>stub-analytics</p>"), \
+         patch.object(ui, "get_chains_view",
+                      return_value="<p>stub-chains</p>"), \
+         patch.object(ui, "get_system_status",
+                      return_value="<p>stub-status</p>"), \
+         patch.object(ui, "get_analytics_instance",
+                      return_value=MagicMock(_hot_cache={})), \
+         patch.object(ui, "get_chain_indexer_instance", return_value=None), \
+         patch.object(ui, "load_config", return_value=MagicMock(
+             ollama_url="http://localhost:11434",
+             embedding_model="nomic-embed-text",
+             chain_indexing_enabled=False,
+             backends={},
+         )), \
+         patch("embedder.Embedder") as mock_embedder, \
+         patch.object(ui.gr.Blocks, "launch") as launch_mock:
+        fake_embedder = MagicMock()
+        fake_embedder.health_check = AsyncMock(return_value=True)
+        fake_embedder.close = AsyncMock()
+        mock_embedder.return_value = fake_embedder
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            demo = ui.create_ui()
+        launch_mock.assert_not_called()
+        yield demo
+        launch_mock.assert_not_called()
+
+
+class TestCreateUi:
+    """F-210f4466: Blocks construction, theme, tabs, chrome — no server."""
+
+    def test_returns_blocks_without_launching(self, created_ui):
+        assert isinstance(created_ui, ui.gr.Blocks)
+        assert created_ui is not None
+
+    def test_page_title_is_tool_compass(self, created_ui):
+        assert created_ui.title == "Tool Compass"
+
+    def test_dark_soft_theme(self, created_ui):
+        theme = _blocks_theme(created_ui)
+        assert theme is not None
+        assert type(theme).__name__ == "Soft"
+        assert getattr(theme, "name", None) == "soft"
+        # VIS-D-001/002: create_ui pins the dark surface the hand-coded
+        # cards assume, on both the light and _dark token variants.
+        assert theme.body_background_fill == "#1a1a2e"
+        assert theme.body_background_fill_dark == "#1a1a2e"
+        assert theme.body_text_color == "#e8e8f0"
+        assert theme.body_text_color_dark == "#e8e8f0"
+        assert theme.background_fill_primary == "#22223e"
+        assert theme.background_fill_primary_dark == "#22223e"
+        assert theme.block_background_fill == "#22223e"
+        assert theme.block_background_fill_dark == "#22223e"
+        assert theme.input_background_fill == "#2a2a44"
+        assert theme.input_background_fill_dark == "#2a2a44"
+
+    def test_custom_css_attached(self, created_ui):
+        css = _blocks_css(created_ui)
+        assert css is not None
+        assert ".gradio-container" in css
+        assert "max-width: 1400px" in css
+        assert ".tool-result" in css
+
+    def test_tab_labels_and_ids_match_ia(self, created_ui):
+        # Labels and ids copied from ui.create_ui — do not invent tabs.
+        tabs = _tab_blocks(created_ui)
+        assert [t.label for t in tabs] == [
+            "🔍 Search",
+            "📦 Browser",
+            "📊 Analytics",
+            "🔗 Workflows",
+            "⚙️ Status",
+        ]
+        assert [t.id for t in tabs] == [
+            "search",
+            "browser",
+            "analytics",
+            "chains",
+            "status",
+        ]
+
+    def test_heading_hierarchy_snapshot(self, created_ui):
+        headings = _markdown_heading_snapshot(created_ui)
+        assert headings, "create_ui must render a page-level Markdown heading"
+        assert headings[0] == (1, "🧭 Tool Compass")
+        # Shell chrome uses h1 then h3 section titles; no h2 in the layout.
+        assert (3, "🔗 Workflow Search") in headings
+        assert (3, "🔎 Tool Details") in headings
+        levels = [level for level, _text in headings]
+        assert 2 not in levels
+        page_md = "\n".join(
+            b.value for b in created_ui.blocks.values()
+            if type(b).__name__ == "Markdown"
+            and isinstance(getattr(b, "value", None), str)
+        )
+        assert "7 MCP tools" in page_md
+
+    def test_shell_elem_ids(self, created_ui):
+        elem_ids = {
+            b.elem_id for b in created_ui.blocks.values()
+            if getattr(b, "elem_id", None)
+        }
+        assert "tc-search-input" in elem_ids
+        assert "tc-search-btn" in elem_ids
+        assert "search-results-region-wrap" in elem_ids
+        # search-results-count is not a Gradio elem_id — it is rendered into
+        # search_tools HTML and focused by the chrome JS below.
+
+    def test_results_region_and_combobox_chrome(self, created_ui):
+        blob = _block_values_as_text(created_ui)
+        assert 'id="search-results-region"' in blob
+        assert 'aria-live="polite"' in blob
+        assert 'aria-label="Search results"' in blob
+        # FE-B-004: JS focuses #search-results-count after results land.
+        assert "search-results-count" in blob
+        assert "focusResultsCount" in blob
+        # FE-B-006 / FE-SB-004: combobox wiring targets #tc-search-input.
+        assert "tc-search-input" in blob
+        assert "combobox" in blob
+        assert "search-results-list" in blob
+        assert "aria-controls" in blob
+        assert "enhanceTabs" in blob
+
+    def test_no_logo_image_component(self, created_ui):
+        # create_ui does not wire gr.Image / a logo path; the brand mark is
+        # the Markdown h1 emoji. Do not invent a logo assertion.
+        image_blocks = [
+            b for b in created_ui.blocks.values()
+            if type(b).__name__ == "Image"
+        ]
+        assert image_blocks == []
+
