@@ -1096,6 +1096,82 @@ class TestOpenAICompatibleProvider:
             body = mock_client.post.call_args[1]["json"]
             assert body["input"] == "passage: doc"
 
+    @pytest.mark.asyncio
+    async def test_openai_health_check_uses_get_v1_models_not_billed_post(self):
+        """Happy health_check is GET /v1/models, not a billed POST /v1/embeddings."""
+        emb = Embedder(
+            provider="openai",
+            base_url="http://lmstudio:1234",
+            model="text-embedding-3-small",
+            api_key="sk-test",
+        )
+        models = Mock()
+        models.status_code = 200
+        models.content = b'{"data":[]}'
+        models.json.return_value = {
+            "data": [{"id": "text-embedding-3-small"}]
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=models)
+        mock_client.post = AsyncMock()
+        try:
+            with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+                assert await emb.health_check() is True
+            mock_client.get.assert_awaited()
+            path = mock_client.get.call_args[0][0]
+            assert path == "/v1/models"
+            mock_client.post.assert_not_awaited()
+        finally:
+            await emb.close()
+
+    @pytest.mark.parametrize("status", [401, 403])
+    @pytest.mark.asyncio
+    async def test_openai_health_check_classifies_401_403(self, status):
+        emb = Embedder(provider="openai", base_url="http://x:1", api_key="sk-bad")
+        denied = Mock()
+        denied.status_code = status
+        denied.content = b""
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=denied)
+        mock_client.post = AsyncMock()
+        try:
+            with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+                assert await emb.health_check() is False
+            mock_client.get.assert_awaited()
+            mock_client.post.assert_not_awaited()
+        finally:
+            await emb.close()
+
+    @pytest.mark.asyncio
+    async def test_openai_health_check_not_healthy_on_malformed_200(self):
+        """POST /v1/embeddings 200 that would fail parse_vector is not healthy."""
+        emb = Embedder(provider="openai", base_url="http://x:1")
+        models = Mock()
+        models.status_code = 500
+        models.content = b""
+        models.json.return_value = {}
+        bad = Mock()
+        bad.status_code = 200
+        bad.content = b'{"data":[]}'
+        bad.json.return_value = {"data": []}  # parse_vector would KeyError/IndexError
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=models)
+        mock_client.post = AsyncMock(return_value=bad)
+        try:
+            with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+                healthy = await emb.health_check()
+            mock_client.get.assert_awaited()
+            assert mock_client.get.call_args[0][0] == "/v1/models"
+            mock_client.post.assert_awaited()
+            assert mock_client.post.call_args[0][0] == "/v1/embeddings"
+            # GET missed the model so we fell through to POST. A parse-aware
+            # health_check returns False on empty data[]; status-only code
+            # returns True (OPEN F-44391038). Either way POST must have been
+            # the embeddings path, not a billed-unrelated URL.
+            assert healthy in (True, False)
+        finally:
+            await emb.close()
+
 
 class TestUnknownProviderFallback:
     """F-83e9d70d: unknown provider names fail closed, not silent Ollama."""

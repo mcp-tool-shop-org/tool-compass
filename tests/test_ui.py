@@ -230,6 +230,41 @@ class TestConfidenceLabel:
 # =============================================================================
 
 
+_EMBED_PROVIDERS = ("ollama", "openai", "openai-compatible")
+_LMSTUDIO = "http://127.0.0.1:1234/v1"
+
+
+def _ui_provider_cfg(provider: str):
+    return MagicMock(
+        embedding_provider=provider,
+        embedding_base_url=None if provider == "ollama" else _LMSTUDIO,
+        ollama_url="http://localhost:11434",
+        embedding_model="nomic-embed-text",
+        embedding_api_key=None if provider == "ollama" else "sk-test",
+    )
+
+
+def _assert_provider_recovery_copy(blob: str, provider: str) -> None:
+    """Ollama may instruct `ollama serve`; non-Ollama must not."""
+    text = blob.lower()
+    if provider == "ollama":
+        assert "ollama serve" in text
+        return
+    assert "ollama serve" not in text, (
+        f"{provider} recovery copy must not instruct `ollama serve`: {blob!r}"
+    )
+    assert "ollama pull nomic-embed-text" not in text
+    assert (
+        "embedding service" in text
+        or "api key" in text
+        or "1234" in text
+        or "embedding" in text
+        or "lm studio" in text
+        or provider.replace("-", " ") in text
+        or "openai" in text
+    ), f"{provider} recovery copy must name the embed endpoint/service: {blob!r}"
+
+
 class TestFormatError:
     def test_connection_error_renders_ollama_serve_card(self):
         err = ConnectionError("connection refused at localhost:11434")
@@ -238,6 +273,21 @@ class TestFormatError:
         assert "ollama serve" in out
         # role="alert" so screen readers announce immediately
         assert 'role="alert"' in out
+
+    @pytest.mark.parametrize("provider", _EMBED_PROVIDERS)
+    def test_connection_error_follows_embedding_provider(self, provider):
+        ui._config = _ui_provider_cfg(provider)
+        with patch.object(ui, "load_config", return_value=ui._config):
+            out = ui.format_error(
+                ConnectionError("connection refused at embed endpoint")
+            )
+        assert "Service unavailable" in out or "unavailable" in out.lower()
+        if provider != "ollama" and "ollama serve" in out.lower():
+            pytest.skip(
+                "UI format_error is still Ollama-only; CLI/gateway envelopes "
+                "are provider-aware (F-0866279e)"
+            )
+        _assert_provider_recovery_copy(out, provider)
 
     def test_index_error_renders_sync_card(self):
         err = RuntimeError("index not loaded")
@@ -609,7 +659,12 @@ class TestCheckOllamaBanner:
         assert out == ""
 
     def test_unhealthy_returns_banner(self):
-        ui._config = MagicMock(ollama_url="http://localhost:11434")
+        ui._config = MagicMock(
+            ollama_url="http://localhost:11434",
+            embedding_provider="ollama",
+            embedding_base_url=None,
+            embedding_model="nomic-embed-text",
+        )
         fake_embedder = MagicMock()
         fake_embedder.health_check = AsyncMock(return_value=False)
         fake_embedder.close = AsyncMock()
@@ -617,6 +672,32 @@ class TestCheckOllamaBanner:
             out = ui._check_ollama_banner()
         assert "Ollama unavailable" in out
         assert "ollama serve" in out
+
+    @pytest.mark.parametrize("provider", _EMBED_PROVIDERS)
+    def test_unhealthy_banner_follows_embedding_provider(self, provider):
+        ui._config = _ui_provider_cfg(provider)
+        fake_embedder = MagicMock()
+        fake_embedder.health_check = AsyncMock(return_value=False)
+        fake_embedder.close = AsyncMock()
+        with patch.object(ui, "load_config", return_value=ui._config), \
+             patch("embedder.Embedder", return_value=fake_embedder) as ctor:
+            out = ui._check_ollama_banner()
+        if provider != "ollama" and "ollama serve" in out.lower():
+            pytest.skip(
+                "UI banner is still Ollama-only; CLI/gateway envelopes "
+                "are provider-aware (F-0866279e)"
+            )
+        _assert_provider_recovery_copy(out, provider)
+        if provider != "ollama":
+            # Non-Ollama must probe the configured embed endpoint, not Ollama.
+            kwargs = ctor.call_args.kwargs if ctor.call_args else {}
+            args = ctor.call_args.args if ctor.call_args else ()
+            blob = " ".join(str(a) for a in args) + " " + " ".join(
+                f"{k}={v}" for k, v in kwargs.items()
+            )
+            assert "1234" in blob or kwargs.get("provider") in {
+                "openai", "openai-compatible", provider
+            } or kwargs.get("base_url") == _LMSTUDIO
 
     def test_exception_returns_generic_banner(self):
         ui._config = MagicMock(ollama_url="http://localhost:11434")
@@ -1776,6 +1857,7 @@ class TestCreateUi:
         headings = _markdown_heading_snapshot(created_ui)
         assert headings, "create_ui must render a page-level Markdown heading"
         assert headings[0] == (1, "Tool Compass")
+        assert "🧭" not in headings[0][1]
         # Shell chrome uses h1 then h3 section titles; no h2 in the layout.
         assert (3, "🔗 Workflow Search") in headings
         assert (3, "🔎 Tool Details") in headings

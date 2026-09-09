@@ -1274,6 +1274,27 @@ class TestCmdSearchExtended:
         # A keyword/degraded notice is emitted (adjacent to results).
         assert "keyword" in (captured.out + captured.err).lower()
 
+    @pytest.mark.parametrize("provider", ["ollama", "openai", "openai-compatible"])
+    def test_search_fallback_copy_follows_embedding_provider(
+        self, monkeypatch, capsys, provider
+    ):
+        idx = _stub_index_with_db(
+            [("bridge:read_file", "read a file", "file", "bridge")],
+            search_raises=ConnectionError("embed endpoint refused"),
+        )
+        monkeypatch.setattr(cli, "_load_index", lambda: idx)
+        monkeypatch.setattr(cli, "_configured_embedding_provider", lambda: provider)
+        rc = cli.main(["search", "read"])
+        captured = capsys.readouterr()
+        blob = (captured.out + captured.err).lower()
+        assert rc == 0
+        assert "bridge:read_file" in captured.out
+        if provider == "ollama":
+            assert "ollama" in blob or "keyword" in blob
+        else:
+            assert "ollama serve" not in blob
+            assert "ollama pull nomic-embed-text" not in blob
+
     def test_search_os_error_falls_back_to_keyword(self, monkeypatch, capsys):
         """cli-ui-001: OSError from the embedder also degrades to keyword
         results + exit 0 (was exit 1 with a dead hint before the fix)."""
@@ -1693,6 +1714,7 @@ class TestCmdDoctorExtended:
             "config_path": "x",
             "backends": [],
             "ollama_url": "http://localhost:11434",
+            "embedding_provider": "ollama",
             "ollama_reachable": False,
             "index_exists": False,
         }
@@ -1705,6 +1727,37 @@ class TestCmdDoctorExtended:
         # Warnings for ollama-unreachable + index-missing
         assert "unreachable" in out.lower()
         assert "missing" in out.lower()
+        assert "ollama serve" in out.lower()
+
+    @pytest.mark.parametrize(
+        "provider", ["ollama", "openai", "openai-compatible"]
+    )
+    def test_doctor_text_recovery_follows_embedding_provider(
+        self, monkeypatch, capsys, provider
+    ):
+        payload = {
+            "version": "2.3.0",
+            "config_path": "x",
+            "backends": {},
+            "ollama_url": "http://localhost:11434",
+            "embedding_provider": provider,
+            "embedding_base_url": "http://127.0.0.1:1234/v1",
+            "ollama_reachable": False if provider == "ollama" else None,
+            "embedding_reachable": False,
+            "index_exists": True,
+        }
+        import config
+
+        monkeypatch.setattr(config, "doctor", lambda: payload)
+        rc = cli.main(["doctor", "--text"])
+        out = capsys.readouterr().out.lower()
+        assert rc == 0
+        if provider == "ollama":
+            assert "ollama serve" in out
+        else:
+            assert "ollama serve" not in out
+            assert "ollama pull nomic-embed-text" not in out
+            assert provider in out or "embedding" in out or "1234" in out
 
     def test_doctor_text_backends_unknown_shape(self, monkeypatch, capsys):
         """backend_count falls back to 0 when backends is neither list/dict."""

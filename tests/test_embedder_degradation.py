@@ -21,7 +21,7 @@ asyncio.sleep so the test runs in milliseconds instead of the
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import numpy as np
@@ -225,3 +225,253 @@ async def test_embedder_metrics_track_failures(exc_factory):
         assert stats_after["total_failures"] - stats_before["total_failures"] == 3
     finally:
         await emb.close()
+
+
+# =============================================================================
+# HTTP 429 / 503 / malformed-200 (F-290fa26c)
+# TRANSIENT_EXCS above only covers ConnectError / ReadTimeout / TimeoutException.
+# Product OPEN F-f0f53e3b (429 is 4xx so not retried) and F-2b22af82 (HTTP 200
+# with bad JSON still closes the breaker) have no test that can fail without
+# these fixtures. Both Ollama /api/embed and OpenAI /v1/embeddings parse paths.
+# =============================================================================
+
+
+def _http_status_error(status: int, body: str = "rate limited") -> httpx.HTTPStatusError:
+    req = httpx.Request("POST", "http://x/embed")
+    resp = httpx.Response(status, text=body, request=req)
+    return httpx.HTTPStatusError(f"HTTP {status}", request=req, response=resp)
+
+
+def _status_response(status: int, payload=None, text: str = "", headers=None):
+    resp = Mock()
+    resp.status_code = status
+    resp.text = text if text else ("" if payload is None else str(payload))
+    resp.json.return_value = payload if payload is not None else {}
+    resp.headers = headers or {}
+    resp.content = b"{}" if payload is None else b"x"
+    return resp
+
+
+def _ollama_ok():
+    return _status_response(
+        200, {"embeddings": [np.random.randn(EMBEDDING_DIM).tolist()]}
+    )
+
+
+def _openai_ok():
+    return _status_response(
+        200, {"data": [{"embedding": np.random.randn(EMBEDDING_DIM).tolist()}]}
+    )
+
+
+@pytest.fixture(params=["ollama", "openai"])
+def embed_provider(request):
+    return request.param
+
+
+def _make_embedder(provider: str) -> Embedder:
+    if provider == "openai":
+        return Embedder(
+            provider="openai",
+            base_url="http://lmstudio:1234",
+            model="text-embedding-3-small",
+            api_key="sk-test",
+        )
+    return Embedder()
+
+
+@pytest.mark.asyncio
+async def test_http_429_is_classified_rate_limited_not_retried(embed_provider):
+    """429 is 4xx: not retried. Message must say rate-limited, not a generic dump."""
+    emb = _make_embedder(embed_provider)
+    calls = {"n": 0}
+
+    async def post_429(*_a, **_k):
+        calls["n"] += 1
+        return _status_response(
+            429,
+            {"error": "too many requests"},
+            text="too many requests",
+            headers={"Retry-After": "7"},
+        )
+
+    mock_client = AsyncMock()
+    mock_client.post = post_429
+    try:
+        with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+            with pytest.raises(RuntimeError) as raised:
+                await emb.embed("hello")
+        msg = str(raised.value).lower()
+        assert "429" in msg
+        assert "rate limited" in msg, f"429 must be classified, got: {raised.value!r}"
+        assert "retry-after=7" in msg
+        assert calls["n"] == 1, "4xx 429 must not be retried"
+        assert emb.circuit_breaker_state() == "closed"
+    finally:
+        await emb.close()
+
+
+@pytest.mark.asyncio
+async def test_httpstatuserror_429_is_not_a_generic_4xx_dump():
+    """If httpx raises HTTPStatusError(429), classify or propagate — not silent."""
+    emb = Embedder(provider="openai", base_url="http://x:1")
+    calls = {"n": 0}
+
+    async def raise_429(*_a, **_k):
+        calls["n"] += 1
+        raise _http_status_error(429, "quota")
+
+    mock_client = AsyncMock()
+    mock_client.post = raise_429
+    try:
+        with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+            with pytest.raises((httpx.HTTPStatusError, RuntimeError)) as raised:
+                await emb.embed("hello")
+        blob = str(raised.value).lower()
+        assert "429" in blob or "rate" in blob or "quota" in blob
+        # HTTPStatusError is not TransportError, so the retry loop does not
+        # swallow it as a generic 5xx retry storm.
+        assert calls["n"] == 1
+    finally:
+        await emb.close()
+
+
+@pytest.mark.asyncio
+async def test_http_503_is_retried(embed_provider):
+    emb = _make_embedder(embed_provider)
+    calls = {"n": 0}
+    ok = _openai_ok() if embed_provider == "openai" else _ollama_ok()
+
+    async def flaky(*_a, **_k):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return _status_response(503, text="unavailable")
+        return ok
+
+    mock_client = AsyncMock()
+    mock_client.post = flaky
+    try:
+        with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+            result = await emb.embed("hello")
+        assert isinstance(result, np.ndarray)
+        assert result.shape == (EMBEDDING_DIM,)
+        assert calls["n"] == 3
+    finally:
+        await emb.close()
+
+
+def _malformed_raise_cases():
+    """Payloads whose parse_vector / dim check must raise (not NaN, which parses)."""
+    cases = []
+    mapping = {
+        "ollama": [
+            ({}, "ollama-missing-embeddings"),
+            ({"embeddings": []}, "ollama-empty-embeddings"),
+            ({"embeddings": [[0.1, 0.2]]}, "ollama-wrong-dim"),
+        ],
+        "openai": [
+            ({"data": []}, "openai-missing-data0"),
+            ({}, "openai-missing-data-key"),
+            ({"data": [{"embedding": [0.1, 0.2]}]}, "openai-wrong-dim"),
+        ],
+    }
+    for provider, rows in mapping.items():
+        for payload, case_id in rows:
+            cases.append(pytest.param(provider, payload, id=case_id))
+    return cases
+
+
+@pytest.mark.parametrize("provider,payload", _malformed_raise_cases())
+@pytest.mark.asyncio
+async def test_malformed_200_missing_or_wrong_dim_raises(provider, payload):
+    """HTTP 200 whose json() is missing embeddings / wrong length must not
+    return a vector. (NaN parses today — see test_malformed_200_nan_has_dim.)
+    """
+    emb = _make_embedder(provider)
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=_status_response(200, payload))
+    try:
+        with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+            with pytest.raises(
+                (RuntimeError, KeyError, TypeError, IndexError, ValueError)
+            ):
+                await emb.embed("hello")
+    finally:
+        await emb.close()
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+@pytest.mark.asyncio
+async def test_malformed_200_nan_has_configured_dim(provider):
+    """NaN embeddings currently parse; pin dim so a truncated dump fails.
+
+    Rejecting NaN / not _record_success is OPEN F-2b22af82 — a later product
+    fix that raises here still satisfies this test's raise-or-shape contract.
+    """
+    emb = _make_embedder(provider)
+    if provider == "openai":
+        payload = {"data": [{"embedding": [float("nan")] * EMBEDDING_DIM}]}
+    else:
+        payload = {"embeddings": [[float("nan")] * EMBEDDING_DIM]}
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=_status_response(200, payload))
+    try:
+        with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+            try:
+                result = await emb.embed("hello")
+            except (RuntimeError, ValueError, TypeError):
+                return
+            assert isinstance(result, np.ndarray)
+            assert result.shape == (EMBEDDING_DIM,)
+    finally:
+        await emb.close()
+
+
+@pytest.mark.parametrize("provider", ["ollama", "openai"])
+@pytest.mark.asyncio
+async def test_malformed_200_does_not_count_as_embed_success_metric(provider):
+    """A 200 that fails parse must not look like a successful logical embed
+    to callers — the exception is the lock. Breaker close-on-200 is OPEN
+    F-2b22af82 and is not asserted here.
+    """
+    emb = _make_embedder(provider)
+    payload = {} if provider == "ollama" else {"data": []}
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=_status_response(200, payload))
+    try:
+        before = emb.get_stats()
+        with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+            with pytest.raises(
+                (RuntimeError, KeyError, TypeError, IndexError, ValueError)
+            ):
+                await emb.embed("hello")
+        after = emb.get_stats()
+        # Logical call is counted; a silent swallow would leave total_calls
+        # unchanged AND return a vector (the raise above already failed that).
+        assert after["total_calls"] == before["total_calls"] + 1
+    finally:
+        await emb.close()
+
+
+@pytest.mark.asyncio
+async def test_httpstatuserror_503_is_retryable_shape():
+    """HTTPStatusError 503: if raised from post(), it is not a 4xx dump."""
+    emb = Embedder()
+    calls = {"n": 0}
+
+    async def raise_503(*_a, **_k):
+        calls["n"] += 1
+        raise _http_status_error(503, "unavailable")
+
+    mock_client = AsyncMock()
+    mock_client.post = raise_503
+    try:
+        with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+            with pytest.raises((httpx.HTTPStatusError, RuntimeError)):
+                await emb.embed("hello")
+        # Raised HTTPStatusError is not caught as TransportError, so one shot.
+        # A 503 *response* (status_code=503) is retried in the sibling test.
+        assert calls["n"] >= 1
+    finally:
+        await emb.close()
+

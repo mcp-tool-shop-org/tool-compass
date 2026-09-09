@@ -6,7 +6,10 @@
 # existing plumbing-only test and ship.
 #
 # Format: each entry is a `query` plus the canonical `expected` tool names that
-# SHOULD appear in the top-k for that intent. The fixture corpus is defined in
+# SHOULD appear in the top-k for that intent. Optional `forbidden` lists
+# hard-negatives that MUST NOT appear in the top-3 (near-miss siblings such as
+# git pull vs push). Optional `filter: {category, server}` rows pin
+# category_filter / server_filter. The fixture corpus is defined in
 # `fixture_corpus.py` so the same tool set drives both the index build and the
 # expected-id list (no name drift).
 #
@@ -28,6 +31,7 @@
 queries:
   - query: "read a file from disk"
     expected: ["fs:read_file"]
+    forbidden: ["fs:write_file"]
     category: file_ops
 
   - query: "open document and view contents"
@@ -36,6 +40,7 @@ queries:
 
   - query: "write content to a file"
     expected: ["fs:write_file"]
+    forbidden: ["fs:read_file"]
     category: file_ops
 
   - query: "save content to disk"
@@ -83,6 +88,7 @@ queries:
 
   - query: "git push"
     expected: ["git:push"]
+    forbidden: ["git:pull"]
     category: git_ops
 
   - query: "upload commits to remote"
@@ -91,6 +97,7 @@ queries:
 
   - query: "git pull from origin"
     expected: ["git:pull"]
+    forbidden: ["git:push"]
     category: git_ops
 
   - query: "fetch upstream changes"
@@ -106,10 +113,12 @@ queries:
 
   - query: "grep through codebase"
     expected: ["search:grep"]
+    forbidden: ["search:find"]
     category: search_ops
 
   - query: "find files by name"
     expected: ["search:find"]
+    forbidden: ["search:grep"]
     category: search_ops
 
   - query: "locate file in directory tree"
@@ -179,6 +188,7 @@ queries:
   # ---------------------------------------------------------------------------
   - query: "send http request"
     expected: ["http:request"]
+    forbidden: ["http:fetch"]
     category: http_ops
 
   - query: "make api call"
@@ -187,8 +197,88 @@ queries:
 
   - query: "fetch url contents"
     expected: ["http:fetch"]
+    forbidden: ["http:request"]
     category: http_ops
 
   - query: "download web page"
     expected: ["http:fetch"]
+    forbidden: ["http:request"]
     category: http_ops
+
+  # ---------------------------------------------------------------------------
+  # Hard-negatives / near-miss pairs (F-dfc9708a)
+  # A ranking regression that swaps pull/push, read/write, request/fetch, or
+  # grep/find still clears average Recall@5; forbidden[] is scored per-query
+  # in top-3 so the sibling cannot hide under the floor.
+  # ---------------------------------------------------------------------------
+  - query: "pull commits from the remote"
+    expected: ["git:pull"]
+    forbidden: ["git:push"]
+    category: git_ops
+
+  - query: "push my branch to origin"
+    expected: ["git:push"]
+    forbidden: ["git:pull"]
+    category: git_ops
+
+  - query: "open a file and read it"
+    expected: ["fs:read_file"]
+    forbidden: ["fs:write_file"]
+    category: file_ops
+
+  - query: "overwrite a file with new content"
+    expected: ["fs:write_file"]
+    forbidden: ["fs:read_file"]
+    category: file_ops
+
+  - query: "make an http api request"
+    expected: ["http:request"]
+    forbidden: ["http:fetch"]
+    category: http_ops
+
+  - query: "download the url body as text"
+    expected: ["http:fetch"]
+    forbidden: ["http:request"]
+    category: http_ops
+
+  - query: "search the codebase for a pattern"
+    expected: ["search:grep"]
+    forbidden: ["search:find"]
+    category: search_ops
+
+  - query: "locate a filename in the tree"
+    expected: ["search:find"]
+    forbidden: ["search:grep"]
+    category: search_ops
+
+  # Multi-relevant intent: write_file AND git:commit (not a singleton).
+  - query: "save my work and commit"
+    expected: ["fs:write_file", "git:commit"]
+    forbidden: ["fs:delete_file", "git:push"]
+    category: file_ops
+
+  # Filter rows — category_filter / server_filter must keep the hit in-family.
+  - query: "git status"
+    expected: ["git:status"]
+    forbidden: ["fs:read_file", "http:request", "search:grep"]
+    filter:
+      category: git
+    category: git_ops
+
+  - query: "read a file from disk"
+    expected: ["fs:read_file"]
+    forbidden: ["git:pull", "http:fetch", "search:docs"]
+    filter:
+      server: fs
+    category: file_ops
+
+  # Typo / paraphrase adversarial (token still includes the concept).
+  - query: "git pull from origin please"
+    expected: ["git:pull"]
+    forbidden: ["git:push"]
+    category: git_ops
+
+  - query: "write file to disk now"
+    expected: ["fs:write_file"]
+    forbidden: ["fs:read_file"]
+    category: file_ops

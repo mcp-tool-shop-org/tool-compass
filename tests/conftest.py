@@ -556,8 +556,17 @@ def _reset_gateway_globals():
 
 
 def pytest_configure(config):
-    """Register custom markers."""
+    """Register custom markers.
+
+    ``golden`` is also listed in pyproject.toml; registering it here too so
+    ``--strict-markers`` collection cannot fail if a runner loads conftest
+    without the ini markers (F-51b39f48 / F-dfc9708a).
+    """
     config.addinivalue_line(
         "markers", "integration: marks tests requiring external services (Ollama)"
     )
     config.addinivalue_line("markers", "slow: marks tests that take a long time to run")
+    config.addinivalue_line(
+        "markers",
+        "golden: frozen golden-set retrieval benchmark (hard-negatives + filters)",
+    )
