@@ -299,14 +299,57 @@ class TestChangeDetection:
         sync_manager.backends.connect_backend.assert_called_once_with("backend1")
 
     @pytest.mark.asyncio
-    async def test_check_backend_changes_no_tools(self, sync_manager):
-        """Should return False when backend has no tools."""
+    async def test_check_backend_changes_no_tools_first_seen(self, sync_manager):
+        """Empty live list with no stored hash is a change (first sync)."""
         sync_manager.backends.is_backend_connected = Mock(return_value=True)
         sync_manager.backends.get_backend_tools = Mock(return_value=[])
 
         result = await sync_manager.check_backend_changes("backend1")
 
+        assert result is True
+
+    @pytest.mark.asyncio
+    async def test_check_backend_changes_no_tools_still_empty(self, sync_manager):
+        """Empty live list matching the empty sentinel is unchanged."""
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
+        sync_manager.backends.get_backend_tools = Mock(return_value=[])
+        empty_hash = sync_manager._compute_tool_hash([], "backend1")
+        db = sync_manager._get_db()
+        db.execute(
+            """
+            INSERT INTO backend_sync_state (backend_name, tool_count, tool_hash, last_sync_at, sync_status)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'synced')
+            """,
+            ("backend1", 0, empty_hash),
+        )
+        db.commit()
+
+        result = await sync_manager.check_backend_changes("backend1")
+
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_check_backend_changes_n_to_zero_is_change(self, sync_manager):
+        """F-ec226cba: previously indexed N tools, now publishes zero → rebuild."""
+        sync_manager.backends.is_backend_connected = Mock(return_value=True)
+        sync_manager.backends.get_backend_tools = Mock(return_value=[])
+        prior = [
+            ToolInfo("tool1", "backend1:tool1", "Tool 1", "backend1", {}),
+        ]
+        prior_hash = sync_manager._compute_tool_hash(prior, "backend1")
+        db = sync_manager._get_db()
+        db.execute(
+            """
+            INSERT INTO backend_sync_state (backend_name, tool_count, tool_hash, last_sync_at, sync_status)
+            VALUES (?, ?, ?, CURRENT_TIMESTAMP, 'synced')
+            """,
+            ("backend1", 1, prior_hash),
+        )
+        db.commit()
+
+        result = await sync_manager.check_backend_changes("backend1")
+
+        assert result is True
 
     @pytest.mark.asyncio
     async def test_check_backend_changes_first_sync(self, sync_manager):
