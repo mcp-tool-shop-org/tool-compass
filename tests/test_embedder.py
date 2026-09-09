@@ -1098,35 +1098,15 @@ class TestOpenAICompatibleProvider:
 
 
 class TestUnknownProviderFallback:
-    """An unknown provider name warns and falls back to ollama, preserving the
-    embed path rather than crashing on a typo."""
+    """F-83e9d70d: unknown provider names fail closed, not silent Ollama."""
 
-    def test_unknown_provider_falls_back_to_ollama(self, caplog):
-        import logging
+    def test_unknown_provider_raises(self):
+        with pytest.raises(ValueError, match="Known providers"):
+            Embedder(provider="totally-made-up", base_url="http://x:1")
 
-        with caplog.at_level(logging.WARNING):
-            emb = Embedder(provider="totally-made-up", base_url="http://x:1")
-        assert emb.provider_name == "ollama"
-        assert any(
-            "Unknown embedding_provider" in r.message for r in caplog.records
-        )
-
-    @pytest.mark.asyncio
-    async def test_unknown_provider_still_embeds_via_ollama_path(self):
-        emb = Embedder(provider="nope")
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "embeddings": [np.random.randn(EMBEDDING_DIM).tolist()]
-        }
-        with patch.object(emb, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_get_client.return_value = mock_client
-
-            await emb.embed("text")
-
-            assert mock_client.post.call_args[0][0] == "/api/embed"
+    def test_unknown_provider_does_not_construct_ollama(self):
+        with pytest.raises(ValueError, match="Refusing to construct ollama"):
+            Embedder(provider="nope")
 
 
 class TestProviderRegistry:

@@ -418,10 +418,12 @@ class TestEnvelopeHelpers:
         ) is True
 
     def test_is_error_envelope_no_code(self):
-        assert cli._is_error_envelope({"error": {"title": "missing code"}}) is False
+        # F-0aa8e487: a dict error without `code` is still an error envelope.
+        assert cli._is_error_envelope({"error": {"title": "missing code"}}) is True
 
     def test_is_error_envelope_non_dict_error(self):
-        assert cli._is_error_envelope({"error": "string not dict"}) is False
+        # F-0aa8e487: gateway may return error as a string.
+        assert cli._is_error_envelope({"error": "string not dict"}) is True
 
     def test_is_error_envelope_non_dict_payload(self):
         assert cli._is_error_envelope("not even a dict") is False
