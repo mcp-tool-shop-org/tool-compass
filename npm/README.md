@@ -2,7 +2,7 @@
   <a href="README.ja.md">日本語</a> | <a href="README.zh.md">中文</a> | <a href="README.es.md">Español</a> | <a href="README.fr.md">Français</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.it.md">Italiano</a> | <a href="README.pt-BR.md">Português (BR)</a>
 </p>
 
-<p align="center"><img src="logo-lockup.png" alt="Tool Compass Logo" width="800"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="800"></p>
 
 <p align="center">
   <strong>Semantic navigator for MCP tools — find the right tool by intent, not memory.</strong>
