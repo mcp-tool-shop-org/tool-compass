@@ -3,7 +3,7 @@ Tool Compass - Configuration Schema
 Defines how backends are configured and connected.
 
 Environment Variables:
-    TOOL_COMPASS_BASE_PATH: Base path for the project (default: parent of tool_compass)
+    TOOL_COMPASS_BASE_PATH: Base path for the project (default: directory containing config.py)
     TOOL_COMPASS_PYTHON: Path to Python executable (default: auto-detect from venv)
     TOOL_COMPASS_CONFIG: Path to config file (default: <user_config_dir>/compass_config.json)
     TOOL_COMPASS_DATA_DIR: Override user data directory (default: platform-specific)
@@ -183,15 +183,21 @@ class CompassConfig:
     def from_file(cls, path: Path) -> "CompassConfig":
         """Load config from JSON file with variable substitution.
 
-        On corrupt/unreadable config (MCC-B-001 + BE-A-006), MOVES the bad
-        file aside (rather than copy) so repeated load_config() calls don't
-        spawn a new .bak.<ts> on every restart. The user gets a single,
-        durable rescue copy and an actionable log line.
+        On corrupt/unreadable config (MCC-B-001 + BE-A-006 + F-b05932d4),
+        MOVES the bad file aside (rather than copy) so repeated load_config()
+        calls don't spawn a new .bak.<ts> on every restart. The user gets a
+        single, durable rescue copy and an actionable log line.
+
+        FAIL CLOSED: a file that exists but cannot be parsed must not boot
+        with ``get_default_config()`` (empty backends, ``gateway_auth_token``
+        None). That would silently disable HTTP auth if the bearer token lived
+        only in the JSON. After the .bak rescue, raise ValueError so the
+        process refuses to start until the file is fixed or deleted.
         """
         try:
             with open(path) as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError, ValueError, TypeError) as e:
             # BE-A-006: use a deterministic sentinel name (single .bak suffix)
             # so the backup count stays at 1 regardless of restart count. We
             # only stamp a timestamp if the .bak slot is already taken (to
@@ -217,15 +223,21 @@ class CompassConfig:
                     except OSError:
                         pass
             except OSError:
-                # If even the backup fails (e.g. path vanished), still fall
-                # back rather than crash — the user needs a working tool.
+                # Rescue copy is best-effort; failing to back up must still
+                # refuse to start (do not substitute unauthenticated defaults).
                 backup_path = None
             logger.error(
                 f"Config file at {path} is corrupt: {e}.\n"
                 f"Backup saved to {backup_path}.\n"
-                f"Falling back to default config. Edit {path} or delete it to reset."
+                f"Refusing to start with default config (would drop "
+                f"gateway_auth_token and backends). Fix the backup or delete "
+                f"{path} to use defaults."
             )
-            return get_default_config()
+            raise ValueError(
+                f"Config file at {path} is corrupt and cannot be loaded: {e}. "
+                f"Backup saved to {backup_path}. Fix the file or delete it "
+                f"to start with defaults."
+            ) from e
 
         # Get defaults for variable substitution
         defaults = data.get("defaults", {})
@@ -836,18 +848,19 @@ class CompassConfig:
 
 def get_base_path() -> Path:
     """
-    Get the base path for the project.
+    Get the base path for the project (the directory that contains config.py).
 
     Resolution order:
     1. TOOL_COMPASS_BASE_PATH environment variable
-    2. Parent of tool_compass directory (typical install)
+    2. Directory containing this module (flat layout: config.py at
+       repo / site-packages root). The previous default walked one extra
+       ``.parent`` leftover from a nested ``tool_compass/`` package.
     """
     env_path = os.environ.get("TOOL_COMPASS_BASE_PATH")
     if env_path:
         return Path(env_path).resolve()
 
-    # Default: parent of tool_compass directory
-    return Path(__file__).parent.parent.resolve()
+    return Path(__file__).parent.resolve()
 
 
 def get_python_executable() -> str:
@@ -1095,6 +1108,11 @@ CONFIG_PATH = get_config_path()
 
 def load_config() -> CompassConfig:
     """Load config from file or return defaults.
+
+    A missing file returns ``get_default_config()``. A file that exists but
+    cannot be parsed FAILS CLOSED (F-b05932d4): ``CompassConfig.from_file``
+    raises rather than substituting defaults that would drop
+    ``gateway_auth_token`` and backends.
 
     CFGDOC-01: env overrides (TOOL_COMPASS_ANALYTICS_DISABLED /
     TOOL_COMPASS_HOT_CACHE_SIZE) are applied on top of the file-loaded config

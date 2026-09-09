@@ -653,21 +653,32 @@ class CompassAnalytics:
             )
         return total_deleted
 
-    async def refresh_hot_cache(self, embedder=None, index=None):
+    async def refresh_hot_cache(self):
         """
         Update the hot cache with top N most used tools.
-        Optionally load embeddings and schemas if embedder/index provided.
+
+        Embeddings and schemas are loaded from the persisted ``hot_tools``
+        table when present. A corrupt blob or schema_json skips that row
+        (same guards as ``load_hot_cache_from_db``) rather than raising
+        out of ``record_tool_call``.
         """
         if self._degraded:
             return []
         try:
-            return await self._refresh_hot_cache_impl(embedder, index)
-        except sqlite3.Error as e:
+            return await self._refresh_hot_cache_impl()
+        except (json.JSONDecodeError, ValueError, TypeError, sqlite3.Error) as e:
+            # MCC-B-005 / F-367b20a6: np.frombuffer and json.loads raise
+            # ValueError/JSONDecodeError, not sqlite3.Error. Degrade instead
+            # of breaking the analytics write path.
             self._note_degraded("refresh_hot_cache", e)
             return []
 
-    async def _refresh_hot_cache_impl(self, embedder=None, index=None):
-        """Inner implementation; raises sqlite3.Error — caller wraps."""
+    async def _refresh_hot_cache_impl(self):
+        """Inner implementation; per-row corrupt blobs are skipped.
+
+        sqlite3.Error on the outer query still raises — caller wraps and
+        degrades.
+        """
         db = self._get_db()
 
         # Get top tools by call count
@@ -684,67 +695,91 @@ class CompassAnalytics:
         top_tools = cursor.fetchall()
 
         new_cache = {}
+        skipped = 0
         with self._lock:
             for rank, row in enumerate(top_tools, 1):
                 tool_name = row["tool_name"]
+                try:
+                    # Try to get existing embedding from hot_tools table
+                    existing = db.execute(
+                        "SELECT embedding, schema_json, description FROM hot_tools WHERE tool_name = ?",
+                        (tool_name,),
+                    ).fetchone()
 
-                # Try to get existing embedding from hot_tools table
-                existing = db.execute(
-                    "SELECT embedding, schema_json, description FROM hot_tools WHERE tool_name = ?",
-                    (tool_name,),
-                ).fetchone()
+                    embedding = None
+                    schema = None
+                    description = ""
 
-                embedding = None
-                schema = None
-                description = ""
+                    if existing:
+                        if existing["embedding"]:
+                            blob = existing["embedding"]
+                            # Same length guard as load_hot_cache_from_db /
+                            # indexer._cache_get: float32 is 4 bytes/element.
+                            if len(blob) % 4 != 0:
+                                raise ValueError(
+                                    f"corrupt embedding blob for {tool_name}: "
+                                    f"{len(blob)} bytes not a multiple of 4"
+                                )
+                            embedding = np.frombuffer(blob, dtype=np.float32)
+                        if existing["schema_json"]:
+                            schema = json.loads(existing["schema_json"])
+                        description = existing["description"] or ""
 
-                if existing:
-                    if existing["embedding"]:
-                        embedding = np.frombuffer(existing["embedding"], dtype=np.float32)
-                    if existing["schema_json"]:
-                        schema = json.loads(existing["schema_json"])
-                    description = existing["description"] or ""
+                    entry = HotToolEntry(
+                        tool_name=tool_name,
+                        rank=rank,
+                        call_count=row["call_count"],
+                        embedding=embedding,
+                        schema=schema,
+                        description=description,
+                        last_called_at=row["last_called_at"],
+                    )
+                    new_cache[tool_name] = entry
 
-                entry = HotToolEntry(
-                    tool_name=tool_name,
-                    rank=rank,
-                    call_count=row["call_count"],
-                    embedding=embedding,
-                    schema=schema,
-                    description=description,
-                    last_called_at=row["last_called_at"],
-                )
-                new_cache[tool_name] = entry
+                    # Persist to DB
+                    embedding_blob = (
+                        embedding.tobytes() if embedding is not None else None
+                    )
+                    schema_json = json.dumps(schema) if schema else None
 
-                # Persist to DB
-                embedding_blob = embedding.tobytes() if embedding is not None else None
-                schema_json = json.dumps(schema) if schema else None
-
-                db.execute(
-                    """
-                    INSERT INTO hot_tools (tool_name, rank, call_count, embedding, schema_json, description)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(tool_name) DO UPDATE SET
-                        rank = excluded.rank,
-                        call_count = excluded.call_count,
-                        embedding = COALESCE(excluded.embedding, embedding),
-                        schema_json = COALESCE(excluded.schema_json, schema_json),
-                        updated_at = CURRENT_TIMESTAMP
-                """,
-                    (
-                        tool_name,
-                        rank,
-                        row["call_count"],
-                        embedding_blob,
-                        schema_json,
-                        description,
-                    ),
-                )
+                    db.execute(
+                        """
+                        INSERT INTO hot_tools (tool_name, rank, call_count, embedding, schema_json, description)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(tool_name) DO UPDATE SET
+                            rank = excluded.rank,
+                            call_count = excluded.call_count,
+                            embedding = COALESCE(excluded.embedding, embedding),
+                            schema_json = COALESCE(excluded.schema_json, schema_json),
+                            updated_at = CURRENT_TIMESTAMP
+                    """,
+                        (
+                            tool_name,
+                            rank,
+                            row["call_count"],
+                            embedding_blob,
+                            schema_json,
+                            description,
+                        ),
+                    )
+                except (json.JSONDecodeError, ValueError, TypeError, sqlite3.Error) as e:
+                    # F-367b20a6: skip the bad row; a single corrupt blob must
+                    # not abort the refresh (or record_tool_call every 100
+                    # calls). Match load_hot_cache_from_db's skip set.
+                    skipped += 1
+                    logger.warning(
+                        f"Skipping corrupt hot_tools row '{tool_name}': {e}"
+                    )
+                    self._note_degraded("refresh_hot_cache", e)
+                    continue
 
             db.commit()
         self._hot_cache = new_cache
 
-        logger.info(f"Refreshed hot cache with {len(new_cache)} tools")
+        logger.info(
+            f"Refreshed hot cache with {len(new_cache)} tools"
+            + (f" ({skipped} corrupt row(s) skipped)" if skipped else "")
+        )
         return list(new_cache.keys())
 
     def get_hot_tool(self, tool_name: str) -> Optional[HotToolEntry]:
