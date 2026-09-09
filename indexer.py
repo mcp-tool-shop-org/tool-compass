@@ -109,16 +109,20 @@ class CompassIndex:
         # immediately as before.
         self._deferred_cache_ops: Optional[List[tuple]] = None
 
-        # BE-A-003: serialize DB writes across threads. search_sync() dispatches
-        # search() to a worker thread via ThreadPoolExecutor when called from
-        # inside a running event loop (Gradio, nested MCP). The sqlite3
-        # connection is opened with check_same_thread=False (below in _init_db)
-        # so cross-thread access is permitted, but concurrent writes would
-        # still race; this lock guards mutating execs and commits.
+        # BE-A-003 + F-acb311bc: serialize EVERY use of self.db (SELECT and
+        # write) across threads. search_sync() dispatches search() to a worker
+        # thread via ThreadPoolExecutor when called from inside a running
+        # event loop (Gradio, nested MCP). The sqlite3 connection is opened
+        # with check_same_thread=False (below in _init_db) so cross-thread
+        # access is permitted, but that is not a substitute for a lock —
+        # concurrent use of one connection is sqlite3 recursive-use-of-connection.
         # F-5ce336e7: search() also takes this lock around knn_query +
         # tools-table reads so a rebuild's DELETE+INSERT is never visible
         # mid-transaction, and hnswlib add_items/knn_query are serialized.
-        self._db_write_lock = threading.Lock()
+        # RLock: nested helpers (_cache_get → _delete_cache_row, search →
+        # _get_tool_by_id, build_index → _load_id_mapping) re-enter on the
+        # same thread. Do not await while holding this lock.
+        self._db_write_lock = threading.RLock()
 
         # Ensure db directory exists
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,38 +206,43 @@ class CompassIndex:
         """
         if self.db is None:
             return None
-        try:
-            row = self.db.execute(
-                "SELECT vector, dim FROM embedding_cache WHERE text_hash = ?",
-                (text_hash,),
-            ).fetchone()
-        except sqlite3.OperationalError:
-            # Table may not exist yet on a freshly-opened legacy DB.
-            return None
-        if row is None:
-            return None
-        dim = int(row["dim"])
-        expected_dim = self._embedding_dim()
-        if dim != expected_dim:
-            # Stale entry from a different-dim model — drop and miss.
-            self._delete_cache_row(text_hash)
-            return None
-        # SC-002: the column-dim check above is NOT sufficient. A row whose
-        # dim==expected but whose BLOB byte length is inconsistent
-        # (truncated / corrupt write) makes reshape(dim) raise ValueError.
-        # Because _cache_get runs inside build_index's BEGIN IMMEDIATE txn,
-        # an uncaught ValueError there rolls back and re-raises EVERY rebuild
-        # forever, defeating the documented self-heal. Validate the actual
-        # byte length (float32 == 4 bytes/element) before reshape; on
-        # mismatch, treat as a miss and delete the bad row (mirroring the
-        # column-dim-mismatch branch above) so the next pass re-populates it.
-        blob = row["vector"]
-        if blob is None or len(blob) != dim * 4:
-            self._delete_cache_row(text_hash)
-            return None
-        vector = np.frombuffer(blob, dtype=np.float32).reshape(dim)
-        # frombuffer returns a read-only view; copy so hnswlib can use it.
-        return vector.copy()
+        # F-acb311bc: SELECT on the shared check_same_thread=False connection
+        # must take _db_write_lock. search_sync holds that lock on a worker
+        # thread for the whole tools-table read; an unlocked cache lookup on
+        # the event loop is sqlite3 recursive-use-of-connection.
+        with self._db_write_lock:
+            try:
+                row = self.db.execute(
+                    "SELECT vector, dim FROM embedding_cache WHERE text_hash = ?",
+                    (text_hash,),
+                ).fetchone()
+            except sqlite3.OperationalError:
+                # Table may not exist yet on a freshly-opened legacy DB.
+                return None
+            if row is None:
+                return None
+            dim = int(row["dim"])
+            expected_dim = self._embedding_dim()
+            if dim != expected_dim:
+                # Stale entry from a different-dim model — drop and miss.
+                self._delete_cache_row(text_hash)
+                return None
+            # SC-002: the column-dim check above is NOT sufficient. A row whose
+            # dim==expected but whose BLOB byte length is inconsistent
+            # (truncated / corrupt write) makes reshape(dim) raise ValueError.
+            # Because _cache_get runs inside build_index's BEGIN IMMEDIATE txn,
+            # an uncaught ValueError there rolls back and re-raises EVERY rebuild
+            # forever, defeating the documented self-heal. Validate the actual
+            # byte length (float32 == 4 bytes/element) before reshape; on
+            # mismatch, treat as a miss and delete the bad row (mirroring the
+            # column-dim-mismatch branch above) so the next pass re-populates it.
+            blob = row["vector"]
+            if blob is None or len(blob) != dim * 4:
+                self._delete_cache_row(text_hash)
+                return None
+            vector = np.frombuffer(blob, dtype=np.float32).reshape(dim)
+            # frombuffer returns a read-only view; copy so hnswlib can use it.
+            return vector.copy()
 
     def _delete_cache_row(self, text_hash: str) -> None:
         """Self-heal delete of a bad embedding_cache row (IDX-COMPOSED-002).
@@ -326,9 +335,10 @@ class CompassIndex:
         size = 0
         if self.db is not None:
             try:
-                row = self.db.execute(
-                    "SELECT COUNT(*) AS c FROM embedding_cache"
-                ).fetchone()
+                with self._db_write_lock:
+                    row = self.db.execute(
+                        "SELECT COUNT(*) AS c FROM embedding_cache"
+                    ).fetchone()
                 size = int(row["c"]) if row else 0
             except sqlite3.OperationalError:
                 size = 0
@@ -344,12 +354,13 @@ class CompassIndex:
     def _init_db(self):
         """Initialize SQLite database for tool metadata."""
         # BE-A-003: check_same_thread=False allows the connection to be used
-        # from worker threads (search_sync ThreadPoolExecutor path). Cross-
-        # thread mutations are still serialized via self._db_write_lock.
-        self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
-        self.db.row_factory = sqlite3.Row
-
+        # from worker threads (search_sync ThreadPoolExecutor path).
+        # F-acb311bc: connect + DDL take _db_write_lock; check_same_thread=False
+        # is not a substitute for serializing this connection.
         with self._db_write_lock:
+            self.db = sqlite3.connect(str(self.db_path), check_same_thread=False)
+            self.db.row_factory = sqlite3.Row
+
             self.db.executescript("""
                 CREATE TABLE IF NOT EXISTS tools (
                     id INTEGER PRIMARY KEY,
@@ -406,8 +417,9 @@ class CompassIndex:
 
     def _load_id_mapping(self):
         """Load ID to name mapping from database."""
-        cursor = self.db.execute("SELECT id, name FROM tools")
-        self._id_to_name = {row["id"]: row["name"] for row in cursor.fetchall()}
+        with self._db_write_lock:
+            cursor = self.db.execute("SELECT id, name FROM tools")
+            self._id_to_name = {row["id"]: row["name"] for row in cursor.fetchall()}
 
     async def build_index(
         self,
@@ -699,10 +711,11 @@ class CompassIndex:
             self._load_id_mapping()
 
             # Pre-load integrity check: read persisted dim/M from index_meta.
-            cursor = self.db.execute(
-                "SELECT key, value FROM index_meta WHERE key IN ('embedding_dim', 'hnsw_m')"
-            )
-            meta = {row["key"]: row["value"] for row in cursor.fetchall()}
+            with self._db_write_lock:
+                cursor = self.db.execute(
+                    "SELECT key, value FROM index_meta WHERE key IN ('embedding_dim', 'hnsw_m')"
+                )
+                meta = {row["key"]: row["value"] for row in cursor.fetchall()}
             saved_dim = meta.get("embedding_dim")
             expected_dim = self._embedding_dim()
             if saved_dim is not None:
@@ -755,15 +768,15 @@ class CompassIndex:
 
     def _get_tool_by_id(self, tool_id: int) -> Optional[ToolDefinition]:
         """Retrieve tool definition by ID."""
-        cursor = self.db.execute(
-            """
-            SELECT name, description, category, server, parameters, examples, is_core
-            FROM tools WHERE id = ?
-        """,
-            (tool_id,),
-        )
-
-        row = cursor.fetchone()
+        with self._db_write_lock:
+            cursor = self.db.execute(
+                """
+                SELECT name, description, category, server, parameters, examples, is_core
+                FROM tools WHERE id = ?
+            """,
+                (tool_id,),
+            )
+            row = cursor.fetchone()
         if row is None:
             return None
 
@@ -907,32 +920,39 @@ class CompassIndex:
 
         stats = {}
 
-        # Tool counts
-        cursor = self.db.execute("SELECT COUNT(*) as count FROM tools")
-        stats["total_tools"] = cursor.fetchone()["count"]
+        # F-acb311bc: all tools-table / index_meta reads take _db_write_lock.
+        # Do not call embedder.get_stats() while holding it (may await-path).
+        with self._db_write_lock:
+            # Tool counts
+            cursor = self.db.execute("SELECT COUNT(*) as count FROM tools")
+            stats["total_tools"] = cursor.fetchone()["count"]
 
-        cursor = self.db.execute(
-            "SELECT COUNT(*) as count FROM tools WHERE is_core = 1"
-        )
-        stats["core_tools"] = cursor.fetchone()["count"]
+            cursor = self.db.execute(
+                "SELECT COUNT(*) as count FROM tools WHERE is_core = 1"
+            )
+            stats["core_tools"] = cursor.fetchone()["count"]
 
-        # Category breakdown
-        cursor = self.db.execute(
-            "SELECT category, COUNT(*) as count FROM tools GROUP BY category"
-        )
-        stats["by_category"] = {
-            row["category"]: row["count"] for row in cursor.fetchall()
-        }
+            # Category breakdown
+            cursor = self.db.execute(
+                "SELECT category, COUNT(*) as count FROM tools GROUP BY category"
+            )
+            stats["by_category"] = {
+                row["category"]: row["count"] for row in cursor.fetchall()
+            }
 
-        # Server breakdown
-        cursor = self.db.execute(
-            "SELECT server, COUNT(*) as count FROM tools GROUP BY server"
-        )
-        stats["by_server"] = {row["server"]: row["count"] for row in cursor.fetchall()}
+            # Server breakdown
+            cursor = self.db.execute(
+                "SELECT server, COUNT(*) as count FROM tools GROUP BY server"
+            )
+            stats["by_server"] = {
+                row["server"]: row["count"] for row in cursor.fetchall()
+            }
 
-        # Index metadata
-        cursor = self.db.execute("SELECT key, value FROM index_meta")
-        stats["index_meta"] = {row["key"]: row["value"] for row in cursor.fetchall()}
+            # Index metadata
+            cursor = self.db.execute("SELECT key, value FROM index_meta")
+            stats["index_meta"] = {
+                row["key"]: row["value"] for row in cursor.fetchall()
+            }
 
         # Index age + orphan counts (IDX-B-008 + BE-A-013).
         # build_time is the duration of the most recent build in seconds.
@@ -1052,13 +1072,6 @@ class CompassIndex:
                     f"Rebuild the index after setting embedding_dim."
                 )
 
-            # Now do DB write + HNSW add inside a single transaction.
-            # Check if tool already exists
-            cursor = self.db.execute(
-                "SELECT id FROM tools WHERE name = ?", (tool.name,)
-            )
-            existing = cursor.fetchone()
-
             # FEAT-01: preserve the full inputSchema on the incremental path too
             # (as JSON, or SQL NULL when absent) so sync's add-based branch keeps
             # schema fidelity alongside the full-rebuild branch.
@@ -1067,9 +1080,16 @@ class CompassIndex:
                 json.dumps(raw_schema) if raw_schema is not None else None
             )
 
+            # F-acb311bc: existence SELECT + writes share one lock so a
+            # concurrent search_sync cannot use the connection mid-read.
+            # Embed already completed above — do not await while holding.
             with self._db_write_lock:
                 self.db.execute("BEGIN IMMEDIATE")
                 try:
+                    cursor = self.db.execute(
+                        "SELECT id FROM tools WHERE name = ?", (tool.name,)
+                    )
+                    existing = cursor.fetchone()
                     if existing:
                         # Update existing tool
                         tool_id = existing["id"]
@@ -1203,19 +1223,18 @@ class CompassIndex:
             return False
 
         try:
-            cursor = self.db.execute(
-                "SELECT id FROM tools WHERE name = ?", (tool_name,)
-            )
-            row = cursor.fetchone()
-
-            if not row:
-                logger.warning(f"Tool not found: {tool_name}")
-                return False
-
-            tool_id = row["id"]
-
-            # Remove from database
             with self._db_write_lock:
+                cursor = self.db.execute(
+                    "SELECT id FROM tools WHERE name = ?", (tool_name,)
+                )
+                row = cursor.fetchone()
+
+                if not row:
+                    logger.warning(f"Tool not found: {tool_name}")
+                    return False
+
+                tool_id = row["id"]
+
                 self.db.execute("DELETE FROM tools WHERE id = ?", (tool_id,))
                 self.db.commit()
 
@@ -1231,9 +1250,10 @@ class CompassIndex:
 
     async def close(self):
         """Clean up resources."""
-        if self.db:
-            self.db.close()
-            self.db = None
+        with self._db_write_lock:
+            if self.db:
+                self.db.close()
+                self.db = None
         await self.embedder.close()
 
 
