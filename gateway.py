@@ -320,14 +320,26 @@ def _cold_start_envelope(
     structured `service_unavailable` envelope that compass_status /
     compass_audit already degrade into, never as a raw stack to the caller.
 
-    The code distinguishes the two halves of the precondition: if Ollama is
-    known-down we report `ollama_unavailable`; otherwise the index itself is
-    the blocker (`index_unhealthy`). Both are retryable — the operator can
-    bring Ollama up or run a sync and retry the same call.
+    The code distinguishes the two halves of the precondition: if the
+    embedding service is known-down we report `ollama_unavailable` (stable
+    code; title/suggestions follow embedding_provider); otherwise the index
+    itself is the blocker (`index_unhealthy`). Both are retryable.
     """
+    cfg = None
+    try:
+        cfg = get_config()
+    except Exception:
+        cfg = None
     ollama_down = not _health_state.get("ollama_available", True)
     code = "ollama_unavailable" if ollama_down else "index_unhealthy"
-    title = "Ollama unavailable" if ollama_down else "Index unhealthy"
+    if ollama_down:
+        title = (
+            "Ollama unavailable"
+            if _is_ollama_embedding_provider(cfg)
+            else "Embedding service unavailable"
+        )
+    else:
+        title = "Index unhealthy"
     return _augment_with_health(
         _error_envelope(
             code=code,
@@ -336,10 +348,7 @@ def _cold_start_envelope(
             category="service_unavailable",
             retryable=True,
             trace_id=trace_id,
-            suggestions=[
-                "Start Ollama: ollama serve",
-                "Run python gateway.py --sync to build the index",
-            ],
+            suggestions=_embedding_recovery_suggestions(cfg, include_sync=True),
         )
     )
 
@@ -403,6 +412,144 @@ def get_config() -> CompassConfig:
     return _config
 
 
+# F-92e4758b: recovery copy must follow embedding_provider. Ollama-only
+# strings ("ollama serve", interpolating ollama_url) send openai /
+# openai-compatible operators to the wrong daemon.
+_OLLAMA_EMBEDDING_PROVIDERS = frozenset({"ollama", ""})
+
+
+def _embedding_provider_name(cfg: Optional[CompassConfig] = None) -> str:
+    """Normalized ``embedding_provider`` (default ``ollama``)."""
+    if cfg is None:
+        try:
+            cfg = get_config()
+        except Exception:
+            return "ollama"
+    name = getattr(cfg, "embedding_provider", None)
+    if not isinstance(name, str) or not name.strip():
+        return "ollama"
+    return name.strip().lower()
+
+
+def _is_ollama_embedding_provider(cfg: Optional[CompassConfig] = None) -> bool:
+    return _embedding_provider_name(cfg) in _OLLAMA_EMBEDDING_PROVIDERS
+
+
+def _embedding_endpoint_display(cfg: Optional[CompassConfig] = None) -> str:
+    """Redacted active embed endpoint for user-facing copy.
+
+    Non-ollama providers must not interpolate ``ollama_url`` when
+    ``embedding_base_url`` is unset (F-92e4758b).
+    """
+    if cfg is None:
+        try:
+            cfg = get_config()
+        except Exception:
+            return ""
+    explicit = getattr(cfg, "embedding_base_url", None)
+    if isinstance(explicit, str) and explicit.strip():
+        return redact_url_credentials(explicit.strip())
+    if _is_ollama_embedding_provider(cfg):
+        return redact_url_credentials(getattr(cfg, "ollama_url", "") or "")
+    return "(embedding_base_url unset)"
+
+
+def _embedding_recovery_suggestions(
+    cfg: Optional[CompassConfig] = None,
+    *,
+    include_sync: bool = False,
+    include_retry: bool = False,
+) -> List[str]:
+    """Provider-aware next-action hints for embedder outages."""
+    if cfg is None:
+        try:
+            cfg = get_config()
+        except Exception:
+            cfg = None
+    model = getattr(cfg, "embedding_model", None) or "nomic-embed-text"
+    suggestions: List[str] = []
+    if _is_ollama_embedding_provider(cfg):
+        suggestions.append("Start Ollama: ollama serve")
+        suggestions.append(f"Pull the embedding model: ollama pull {model}")
+    else:
+        provider = _embedding_provider_name(cfg)
+        endpoint = _embedding_endpoint_display(cfg)
+        suggestions.append(
+            f"Check embedding_base_url ({endpoint}) is reachable for "
+            f"provider {provider!r}"
+        )
+        suggestions.append(
+            f"Confirm embedding_model={model!r} is served by the provider"
+        )
+        suggestions.append(
+            "Set embedding_api_key or TOOL_COMPASS_EMBEDDING_API_KEY"
+        )
+    if include_sync:
+        suggestions.append("Run python gateway.py --sync to build the index")
+    if include_retry:
+        if _is_ollama_embedding_provider(cfg):
+            suggestions.append("Retry once Ollama is reachable.")
+        else:
+            suggestions.append("Retry once the embedding service is reachable.")
+    return suggestions
+
+
+def _semantic_unavailable_warning(cfg: Optional[CompassConfig] = None) -> str:
+    """Lexical-fallback warning for compass() (F-92e4758b)."""
+    endpoint = _embedding_endpoint_display(cfg)
+    if _is_ollama_embedding_provider(cfg):
+        return (
+            "Semantic search unavailable: Ollama is unreachable at "
+            f"{endpoint}. Try: ollama serve. "
+            "Showing keyword-based results instead."
+        )
+    provider = _embedding_provider_name(cfg)
+    return (
+        f"Semantic search unavailable: embedding provider {provider!r} is "
+        f"unreachable at {endpoint}. Check embedding_base_url, "
+        "embedding_model, and TOOL_COMPASS_EMBEDDING_API_KEY. "
+        "Showing keyword-based results instead."
+    )
+
+
+def _embedder_unavailable_index_error(index_path: Any, cfg: CompassConfig) -> str:
+    """RuntimeError detail when get_index() cannot build without embeddings."""
+    model = getattr(cfg, "embedding_model", None) or "nomic-embed-text"
+    if _is_ollama_embedding_provider(cfg):
+        return (
+            "Ollama not available and no cached index found at "
+            f"{index_path}. Start Ollama (ollama serve) and run: "
+            f"ollama pull {model}"
+        )
+    provider = _embedding_provider_name(cfg)
+    endpoint = _embedding_endpoint_display(cfg)
+    return (
+        f"Embedding provider {provider!r} not available at {endpoint} and no "
+        f"cached index found at {index_path}. Check embedding_base_url, "
+        f"embedding_model={model!r}, and embedding_api_key / "
+        "TOOL_COMPASS_EMBEDDING_API_KEY."
+    )
+
+
+def _embedder_from_config(cfg: CompassConfig) -> Any:
+    """Build the configured Embedder (provider + resolved endpoint)."""
+    from embedder import Embedder
+
+    return Embedder(
+        base_url=cfg.resolved_embedding_base_url(),
+        model=cfg.embedding_model,
+        provider=cfg.embedding_provider,
+        api_key=getattr(cfg, "embedding_api_key", None),
+        query_prefix=getattr(cfg, "embedding_query_prefix", None),
+        document_prefix=getattr(cfg, "embedding_document_prefix", None),
+        breaker_failure_threshold=cfg.ollama_breaker_failure_threshold,
+        breaker_open_seconds=cfg.ollama_breaker_open_seconds,
+        retry_attempts=cfg.ollama_retry_attempts,
+        retry_backoffs=tuple(cfg.ollama_retry_backoffs),
+        on_breaker_transition=_record_breaker_transition,
+    )
+
+
 async def get_index() -> CompassIndex:
     """Get or initialize the compass index.
 
@@ -431,16 +578,7 @@ async def get_index() -> CompassIndex:
         # can re-shape the index + breaker without code edits. BE-B-002:
         # on_breaker_transition fires the breaker_transitions_total counter.
         cfg = get_config()
-        from embedder import Embedder
-        embedder = Embedder(
-            base_url=cfg.ollama_url,
-            model=cfg.embedding_model,
-            breaker_failure_threshold=cfg.ollama_breaker_failure_threshold,
-            breaker_open_seconds=cfg.ollama_breaker_open_seconds,
-            retry_attempts=cfg.ollama_retry_attempts,
-            retry_backoffs=tuple(cfg.ollama_retry_backoffs),
-            on_breaker_transition=_record_breaker_transition,
-        )
+        embedder = _embedder_from_config(cfg)
         index = CompassIndex(
             embedder=embedder,
             hnsw_m=cfg.hnsw_m,
@@ -455,23 +593,19 @@ async def get_index() -> CompassIndex:
 
         logger.warning("No existing index found. Building from manifest...")
 
-        # Check Ollama — building needs embeddings, so this is non-negotiable here.
+        # Building needs embeddings, so this is non-negotiable here.
         try:
             ollama_ok = await index.embedder.health_check()
         except Exception as e:
             _mark_ollama_down(e)
             raise RuntimeError(
-                "Ollama not available and no cached index found at "
-                f"{index.index_path}. Start Ollama (ollama serve) and run: "
-                "ollama pull nomic-embed-text"
+                _embedder_unavailable_index_error(index.index_path, cfg)
             ) from e
 
         if not ollama_ok:
             _mark_ollama_down(RuntimeError("health_check returned False"))
             raise RuntimeError(
-                "Ollama not available and no cached index found at "
-                f"{index.index_path}. Start Ollama (ollama serve) and run: "
-                "ollama pull nomic-embed-text"
+                _embedder_unavailable_index_error(index.index_path, cfg)
             )
 
         _mark_ollama_up()
@@ -799,6 +933,42 @@ def _clamp_query(query: Optional[str]) -> str:
         )
         q = q[:_MAX_QUERY_LEN]
     return q
+
+
+def _stamp_query_truncation(
+    response: Dict[str, Any],
+    *,
+    was_truncated: bool,
+    original_length: int,
+) -> Dict[str, Any]:
+    """Surface a 512-char clamp on the compass() envelope (F-761394e3).
+
+    Keep the cap; never hide it. LLM callers that pasted a long spec must
+    see ``truncated=true``, ``original_length``, a warnings[] entry, and a
+    hint so they can retry with a shorter intent.
+    """
+    if not was_truncated or not isinstance(response, dict):
+        return response
+    note = (
+        f"Query truncated from {original_length} to {_MAX_QUERY_LEN} "
+        "characters; search used the clipped intent. Retry with a shorter "
+        "intent."
+    )
+    response["truncated"] = True
+    response["original_length"] = original_length
+    existing = response.get("warnings")
+    if not isinstance(existing, list):
+        existing = []
+    if note not in existing:
+        existing.append(note)
+    response["warnings"] = existing
+    hint = response.get("hint")
+    if isinstance(hint, str) and hint.strip():
+        if "truncated" not in hint.lower():
+            response["hint"] = f"{hint} {note}"
+    else:
+        response["hint"] = note
+    return response
 
 
 def _escape_like(s: str) -> str:
@@ -1197,7 +1367,11 @@ async def compass(
     min_confidence = max(0.0, min(1.0, min_confidence))
 
     # BE-B-007: clamp the user-supplied intent at the boundary so a 10MB
-    # paste doesn't become a 10MB Ollama call or a 10MB LIKE parameter.
+    # paste doesn't become a 10MB embed call or a 10MB LIKE parameter.
+    # F-761394e3: remember the clip so the envelope can stamp truncated=true.
+    raw_intent = (intent or "").strip()
+    original_length = len(raw_intent)
+    was_truncated = original_length > _MAX_QUERY_LEN
     intent = _clamp_query(intent)
 
     warnings: List[str] = []
@@ -1219,7 +1393,11 @@ async def compass(
         index = await get_index()
     except RuntimeError as e:
         logger.error(f"[compass] [{trace_id}] index unavailable on cold start: {e}")
-        return _cold_start_envelope(e, trace_id=trace_id)
+        return _stamp_query_truncation(
+            _cold_start_envelope(e, trace_id=trace_id),
+            was_truncated=was_truncated,
+            original_length=original_length,
+        )
 
     # Search tools — on embedder/Ollama failure fall back to lexical LIKE
     # over the existing tools table so users keep getting results.
@@ -1242,11 +1420,7 @@ async def compass(
             f"[compass] [{trace_id}] semantic search failed ({type(e).__name__}: {e}); "
             "falling back to lexical search"
         )
-        warnings.append(
-            "Semantic search unavailable: Ollama is unreachable at "
-            f"{config.ollama_url}. Try: ollama serve. "
-            "Showing keyword-based results instead."
-        )
+        warnings.append(_semantic_unavailable_warning(config))
         fallback_matches = _lexical_search_fallback(
             index, intent, top_k, category, server
         )
@@ -1452,7 +1626,11 @@ async def compass(
     if response.get("degraded"):
         for reason in response.get("degraded_reasons", []) or ["unknown"]:
             _record_degraded_response(reason)
-    return response
+    return _stamp_query_truncation(
+        response,
+        was_truncated=was_truncated,
+        original_length=original_length,
+    )
 
 
 @mcp.tool()
@@ -2164,7 +2342,9 @@ async def compass_chains(
                 category="service_unavailable",
                 retryable=True,
                 trace_id=trace_id,
-                suggestions=["Start Ollama: ollama serve", "Retry once Ollama is reachable."],
+                suggestions=_embedding_recovery_suggestions(
+                    config, include_retry=True
+                ),
             ))
 
         return _augment_with_health({
@@ -2215,7 +2395,9 @@ async def compass_chains(
                     category="service_unavailable",
                     retryable=True,
                     trace_id=trace_id,
-                    suggestions=["Start Ollama: ollama serve", "Retry once Ollama is reachable."],
+                    suggestions=_embedding_recovery_suggestions(
+                        config, include_retry=True
+                    ),
                 ))
 
             return _augment_with_health({
@@ -2574,15 +2756,32 @@ async def sync_from_backends() -> bool:
 
     # Step 4: Build index
     print("\n[4/4] Building HNSW search index...")
-    index = CompassIndex()
+    index = CompassIndex(embedder=_embedder_from_config(config))
 
-    # Check Ollama first
-    print("      Checking Ollama embeddings service...", end=" ", flush=True)
+    provider = _embedding_provider_name(config)
+    endpoint = _embedding_endpoint_display(config)
+    print(
+        f"      Checking {provider} embeddings service at {endpoint}...",
+        end=" ",
+        flush=True,
+    )
     if not await index.embedder.health_check():
         print("FAILED")
-        print("\n❌ Ollama not available. Please start Ollama and pull the embedding model:")
-        print("   1. ollama serve")
-        print("   2. ollama pull nomic-embed-text")
+        if _is_ollama_embedding_provider(config):
+            model = config.embedding_model or "nomic-embed-text"
+            print(
+                "\n❌ Ollama not available. Please start Ollama and pull "
+                "the embedding model:"
+            )
+            print("   1. ollama serve")
+            print(f"   2. ollama pull {model}")
+        else:
+            print(
+                f"\n❌ Embedding service ({provider}) not available at "
+                f"{endpoint}."
+            )
+            print("   Check embedding_base_url, embedding_model, and")
+            print("   embedding_api_key / TOOL_COMPASS_EMBEDDING_API_KEY.")
         await manager.disconnect_all()
         return False
     print("OK")
@@ -2650,11 +2849,22 @@ async def run_tests():
     except RuntimeError as e:
         import sys
 
-        print(
-            "❌ No index yet — run 'python gateway.py --sync' first, "
-            "ensure 'ollama serve' is running.",
-            file=sys.stderr,
-        )
+        try:
+            cfg = get_config()
+        except Exception:
+            cfg = None
+        if _is_ollama_embedding_provider(cfg):
+            hint = (
+                "❌ No index yet — run 'python gateway.py --sync' first, "
+                "ensure 'ollama serve' is running."
+            )
+        else:
+            hint = (
+                "❌ No index yet — run 'python gateway.py --sync' first, "
+                "check embedding_base_url, embedding_model, and "
+                "TOOL_COMPASS_EMBEDDING_API_KEY."
+            )
+        print(hint, file=sys.stderr)
         print(f"   ({e})", file=sys.stderr)
         sys.exit(1)
     stats = index.get_stats()
@@ -2731,9 +2941,15 @@ def show_config():
     print("\n--- Settings ---")
     print(f"Progressive disclosure: {config.progressive_disclosure}")
     print(f"Auto sync: {config.auto_sync}")
+    print(f"Embedding provider: {config.embedding_provider}")
     print(f"Embedding model: {config.embedding_model}")
     # CFG-A-001 sibling: scrub credentials embedded in the URL before printing.
-    print(f"Ollama URL: {redact_url_credentials(config.ollama_url)}")
+    print(
+        "Embedding base URL: "
+        f"{_embedding_endpoint_display(config)}"
+    )
+    if _is_ollama_embedding_provider(config):
+        print(f"Ollama URL: {redact_url_credentials(config.ollama_url)}")
     print(f"Default top_k: {config.default_top_k}")
     print(f"Min confidence: {config.min_confidence}")
 
@@ -3363,8 +3579,11 @@ Examples:
   python gateway.py --config     Show current configuration
 
 Prerequisites:
-  - Ollama must be running: ollama serve
-  - Embedding model required: ollama pull nomic-embed-text
+  Configure embedding_provider (ollama | openai | openai-compatible) and
+  embedding_base_url. For ollama (default): `ollama serve` then
+  `ollama pull <embedding_model>`. For openai / openai-compatible: confirm
+  embedding_base_url, embedding_model, and embedding_api_key
+  (or TOOL_COMPASS_EMBEDDING_API_KEY).
 
 Workflow:
   1. First run --sync to build the tool index from backend servers
@@ -3381,7 +3600,7 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
     parser.add_argument("--config", action="store_true",
                         help="Display current configuration including backends and settings")
     parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Enable verbose output with detailed progress")
+                        help="DEBUG logs (backend stderr, retries)")
 
     args = parser.parse_args()
 
@@ -3401,7 +3620,8 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
             import sys
 
             print(
-                "Index NOT rebuilt: 0 backends connected (or no tools / Ollama down).",
+                "Index NOT rebuilt: 0 backends connected "
+                "(or no tools / embedding service down).",
                 file=sys.stderr,
             )
             sys.exit(1)
