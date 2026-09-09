@@ -522,8 +522,21 @@ class Embedder:
             "opened_at": 0.0,
             "probe_in_flight": False,
         }
-        # BE-B-006: ensure at most one probe enters the half-open window.
-        self._breaker_lock = asyncio.Lock()
+        # F-b0a3fc8b: asyncio.Lock binds to the first loop that acquires it.
+        # CompassIndex.search_sync / SyncEmbedder._run spin a fresh
+        # asyncio.run() loop on a worker thread; a lock constructed in
+        # __init__ (or first acquired on the gateway loop) then raises
+        # RuntimeError on the next worker loop. Key per running loop, same
+        # as _get_global_embed_semaphore / _loop_clients. _breaker_lock is
+        # the same shape (sibling, not a new finding).
+        self._loop_inflight_locks: Dict[int, asyncio.Lock] = {}
+        self._loop_inflight_lock_owners: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+            weakref.WeakKeyDictionary()
+        )
+        self._loop_breaker_locks: Dict[int, asyncio.Lock] = {}
+        self._loop_breaker_lock_owners: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = (
+            weakref.WeakKeyDictionary()
+        )
 
         # Metrics (IDX-B-003 + BE-B-005 + BE-B-013).
         # latency_samples is a bounded deque of per-call latency in
@@ -539,7 +552,6 @@ class Embedder:
             "consecutive_failures": 0,
             "last_success_at": 0.0,
         }
-        self._inflight_lock = asyncio.Lock()
 
     @property
     def embedding_dim(self) -> int:
@@ -601,6 +613,41 @@ class Embedder:
             self._bind_client_janitor(loop, key, client)
         self._client = client
         return client
+
+    def _lock_for_running_loop(
+        self,
+        store: Dict[int, asyncio.Lock],
+        owners: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]",
+    ) -> asyncio.Lock:
+        """Return an asyncio.Lock bound to the *running* event loop.
+
+        F-b0a3fc8b: do not share one asyncio.Lock across search_sync worker
+        threads and the gateway loop. Created lazily inside the running loop
+        and cached per-loop, same as _get_global_embed_semaphore.
+        """
+        loop = asyncio.get_running_loop()
+        key = id(loop)
+        lock = store.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            store[key] = lock
+            try:
+                owners[loop] = lock
+            except TypeError:
+                pass
+        return lock
+
+    @property
+    def _inflight_lock(self) -> asyncio.Lock:
+        return self._lock_for_running_loop(
+            self._loop_inflight_locks, self._loop_inflight_lock_owners
+        )
+
+    @property
+    def _breaker_lock(self) -> asyncio.Lock:
+        return self._lock_for_running_loop(
+            self._loop_breaker_locks, self._loop_breaker_lock_owners
+        )
 
     async def close(self):
         """Close HTTP clients for every loop this embedder touched."""
