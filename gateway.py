@@ -526,8 +526,12 @@ async def get_analytics_instance() -> Optional[CompassAnalytics]:
         if _analytics is not None:
             return _analytics
 
-        _analytics = get_analytics()
-        await _analytics.load_hot_cache_from_db()
+        # Do not latch the singleton until load succeeds. A corrupt analytics
+        # sqlite on first load must not pin a half-initialized instance (or
+        # skip retries) for the process lifetime — sibling of F-1dcb1182.
+        analytics = get_analytics()
+        await analytics.load_hot_cache_from_db()
+        _analytics = analytics
 
     return _analytics
 
@@ -595,7 +599,13 @@ async def get_chain_indexer_instance() -> Optional[ChainIndexer]:
         except RuntimeError as e:
             logger.warning(f"chain indexer unavailable on cold start: {e}")
             return None
-        analytics = await get_analytics_instance()
+        try:
+            analytics = await get_analytics_instance()
+        except Exception as e:
+            # Analytics is optional for chain indexing; a corrupt metrics
+            # store must not block seed/build (F-d829270e sibling).
+            logger.warning(f"chain indexer: analytics unavailable: {e}")
+            analytics = None
         chain_indexer = get_chain_indexer(index.embedder, analytics)
 
         # Load existing chain index or build it
@@ -621,22 +631,30 @@ async def maybe_startup_sync():
     if not config.sync_check_on_startup:
         return
 
-    # Fast path: already done
+    # Fast path: sync already succeeded (or is disabled). Still retry
+    # polling/prune — those must not permanently skip on a failed first try.
     if _startup_sync_done:
+        await _retry_startup_sidecars()
         return
 
     # Slow path with lock
     async with _loop_lock("startup_sync"):
         # Double-check after acquiring lock
         if _startup_sync_done:
+            await _retry_startup_sidecars()
             return
 
-        # GW-A-001 sibling: do NOT latch _startup_sync_done before the work.
-        # get_sync_manager_instance() returns None on cold start (index not
-        # ready); leave the flag unset there so the next call retries once the
-        # index/Ollama is available. Only latch once a sync actually ran (or
-        # sync is disabled), so a cold-start deferral is not permanent.
-        sync_manager = await get_sync_manager_instance()
+        # GW-A-001 sibling / F-1dcb1182: do NOT latch _startup_sync_done
+        # before the work succeeds. get_sync_manager_instance() returns None
+        # on cold start (index not ready); leave the flag unset there so the
+        # next call retries once the index/Ollama is available. Only latch
+        # once a sync actually ran (or sync is disabled), so a cold-start
+        # deferral or a transient Ollama/sqlite/backend blip is not permanent.
+        try:
+            sync_manager = await get_sync_manager_instance()
+        except Exception as e:
+            logger.warning(f"Startup sync manager unavailable: {e}")
+            return
         if sync_manager is None:
             if not get_config().auto_sync:
                 _startup_sync_done = True  # sync disabled: nothing to do, ever
@@ -646,12 +664,17 @@ async def maybe_startup_sync():
             await sync_manager.sync_if_needed()
         except Exception as e:
             logger.warning(f"Startup sync failed: {e}")
+            # Leave unset so a later request retries. Do not start polling
+            # until the first sync actually succeeded.
+            return
+
         _startup_sync_done = True
 
         # auto-refresh: now that a sync_manager exists and the first sync ran,
         # start background polling (guarded on interval > 0) and opportunistically
         # prune old analytics rows once. Both are best-effort — a failure here
-        # must never break the sync path.
+        # must never break the sync path, and a failed first attempt must not
+        # permanently skip retries (see _retry_startup_sidecars).
         await _maybe_start_background_polling(sync_manager)
         await _maybe_prune_analytics_once()
 
@@ -682,7 +705,9 @@ async def _maybe_start_background_polling(sync_manager) -> bool:
         await sync_manager.start_background_polling(interval_seconds=interval)
     except Exception as e:
         logger.warning(f"auto-refresh: failed to start background polling: {e}")
-        return True  # the decision to poll was taken even if the start failed
+        # Decision to poll was taken (return True) but do not treat the start
+        # as done — maybe_startup_sync retries via _retry_startup_sidecars.
+        return True
     return True
 
 
@@ -709,6 +734,8 @@ async def _maybe_prune_analytics_once() -> bool:
         logger.debug(f"auto-refresh: analytics unavailable for prune: {e}")
         return False
     if analytics is None:
+        if not get_config().analytics_enabled:
+            _analytics_pruned_once = True  # disabled: nothing to prune, ever
         return False
     prune = getattr(analytics, "prune_old_records", None)
     if prune is None or not callable(prune):
@@ -726,6 +753,25 @@ async def _maybe_prune_analytics_once() -> bool:
         logger.warning(f"auto-refresh: analytics prune failed: {e}")
         # Don't latch on failure — a later startup attempt may succeed.
         return False
+
+
+async def _retry_startup_sidecars() -> None:
+    """Retry polling/prune after startup sync has latched.
+
+    `_startup_sync_done` must not make a failed first poll start or prune a
+    process-lifetime skip (sibling of F-1dcb1182). start_background_polling
+    is itself idempotent when a task is already live.
+    """
+    if int(get_config().sync_polling_interval) > 0:
+        try:
+            sync_manager = await get_sync_manager_instance()
+        except Exception as e:
+            logger.debug(f"auto-refresh: polling retry skipped: {e}")
+        else:
+            if sync_manager is not None:
+                await _maybe_start_background_polling(sync_manager)
+    if not _analytics_pruned_once:
+        await _maybe_prune_analytics_once()
 
 
 # =============================================================================
@@ -1215,12 +1261,14 @@ async def compass(
 
     # Search chains if enabled — chain search also relies on embeddings,
     # so a semantic outage will usually take this path down too. Don't let
-    # that kill the whole response.
+    # that kill the whole response. get_chain_indexer_instance() (seed/
+    # build) is inside the try so an embed failure degrades to no chains
+    # rather than aborting a good semantic result (F-d829270e).
     chain_matches = []
     if include_chains and config.chain_indexing_enabled and not degraded:
-        chain_indexer = await get_chain_indexer_instance()
-        if chain_indexer:
-            try:
+        try:
+            chain_indexer = await get_chain_indexer_instance()
+            if chain_indexer:
                 chain_results = await chain_indexer.search_chains(
                     intent, top_k=3, min_confidence=min_confidence
                 )
@@ -1232,14 +1280,14 @@ async def compass(
                         "confidence": float(round(cr.score, 3)),
                         "use_count": cr.chain.use_count,
                     })
-            except Exception as e:
-                logger.warning(
-                    f"[compass] [{trace_id}] chain search failed "
-                    f"({type(e).__name__}: {e}); skipping chain matches"
-                )
-                warnings.append(
-                    "Chain search skipped: embedding service unavailable."
-                )
+        except Exception as e:
+            logger.warning(
+                f"[compass] [{trace_id}] chain search failed "
+                f"({type(e).__name__}: {e}); skipping chain matches"
+            )
+            warnings.append(
+                "Chain search skipped: embedding service unavailable."
+            )
 
     # Build response - progressive disclosure means we only return summaries
     matches: List[Dict[str, Any]] = []
@@ -1335,10 +1383,18 @@ async def compass(
     # Calculate latency
     latency_ms = (time.time() - start_time) * 1000
 
-    # Record analytics
-    analytics = await get_analytics_instance()
+    # Record analytics (optional — a metrics-store failure must not poison
+    # an otherwise-good search; F-d829270e).
+    try:
+        analytics = await get_analytics_instance()
+    except Exception as e:
+        logger.warning(f"[compass] [{trace_id}] analytics unavailable: {e}")
+        analytics = None
     if analytics:
-        await analytics.record_search(intent, results, latency_ms, category, server)
+        try:
+            await analytics.record_search(intent, results, latency_ms, category, server)
+        except Exception as rec_err:
+            logger.debug(f"[compass] [{trace_id}] analytics record failed: {rec_err}")
 
     # Hint for next steps
     if not matches and not chain_matches:
@@ -1569,7 +1625,14 @@ async def execute(
         arguments = {}
 
     manager = await get_backends()
-    analytics = await get_analytics_instance()
+    analytics = None
+    try:
+        analytics = await get_analytics_instance()
+    except Exception as e:
+        # Analytics is optional; a corrupt metrics sqlite must not block
+        # connect/proxy work (F-d829270e).
+        logger.warning(f"[execute] [{trace_id}] analytics unavailable: {e}")
+        analytics = None
 
     # Check hot cache for faster schema lookup (optional optimization)
     if analytics:
@@ -1636,12 +1699,15 @@ async def execute(
                 # Record failed call
                 latency_ms = (time.time() - start_time) * 1000
                 if analytics:
-                    await analytics.record_tool_call(
-                        tool_name,
-                        success=False,
-                        latency_ms=latency_ms,
-                        error_message=f"Failed to connect to backend: {server_name}",
-                    )
+                    try:
+                        await analytics.record_tool_call(
+                            tool_name,
+                            success=False,
+                            latency_ms=latency_ms,
+                            error_message=f"Failed to connect to backend: {server_name}",
+                        )
+                    except Exception as rec_err:
+                        logger.debug(f"analytics record failed: {rec_err}")
                 logger.warning(
                     f"[execute] [{trace_id}] backend connect failed: {server_name}"
                 )
@@ -1719,13 +1785,16 @@ async def execute(
     )
 
     if analytics:
-        await analytics.record_tool_call(
-            tool_name,
-            success=success,
-            latency_ms=latency_ms,
-            error_message=error_msg,
-            arguments=arguments,
-        )
+        try:
+            await analytics.record_tool_call(
+                tool_name,
+                success=success,
+                latency_ms=latency_ms,
+                error_message=error_msg,
+                arguments=arguments,
+            )
+        except Exception as rec_err:
+            logger.debug(f"analytics record failed: {rec_err}")
 
     # GW-B-003: stamp trace_id into both success and failure envelopes so the
     # user can paste it into a bug report.
@@ -1939,7 +2008,18 @@ async def compass_analytics(
             suggestions=["Enable analytics_enabled in config to track usage."],
         ))
 
-    analytics = await get_analytics_instance()
+    try:
+        analytics = await get_analytics_instance()
+    except Exception as e:
+        logger.error(f"[compass_analytics] [{trace_id}] init failed: {e}")
+        return _augment_with_health(_error_envelope(
+            code="analytics_unavailable",
+            title="Analytics not initialized",
+            detail=f"{type(e).__name__}: {e}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
     if not analytics:
         return _augment_with_health(_error_envelope(
             code="analytics_unavailable",
@@ -2005,7 +2085,18 @@ async def compass_chains(
             suggestions=["Enable chain_indexing_enabled in config."],
         ))
 
-    chain_indexer = await get_chain_indexer_instance()
+    try:
+        chain_indexer = await get_chain_indexer_instance()
+    except Exception as e:
+        logger.error(f"[compass_chains] [{trace_id}] init failed: {e}")
+        return _augment_with_health(_error_envelope(
+            code="chain_indexer_unavailable",
+            title="Chain indexer not initialized",
+            detail=f"{type(e).__name__}: {e}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
     if not chain_indexer:
         return _augment_with_health(_error_envelope(
             code="chain_indexer_unavailable",
@@ -2086,7 +2177,11 @@ async def compass_chains(
         })
 
     elif action == "detect":
-        analytics = await get_analytics_instance()
+        try:
+            analytics = await get_analytics_instance()
+        except Exception as e:
+            logger.error(f"[compass_chains] [{trace_id}] analytics unavailable: {e}")
+            analytics = None
         if analytics:
             # GW-COMPOSED-002 + IDX-COMPOSED-003: detect_chains() raw-INSERTs
             # promoted chains into tool_chains but does NOT embed them into the
@@ -2183,7 +2278,18 @@ async def compass_sync(force: bool = False) -> Dict[str, Any]:
             suggestions=["Enable auto_sync in config for automatic synchronization."],
         ))
 
-    sync_manager = await get_sync_manager_instance()
+    try:
+        sync_manager = await get_sync_manager_instance()
+    except Exception as e:
+        logger.error(f"[compass_sync] [{trace_id}] init failed: {e}")
+        return _augment_with_health(_error_envelope(
+            code="sync_manager_unavailable",
+            title="Sync manager not initialized",
+            detail=f"{type(e).__name__}: {e}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
     if not sync_manager:
         return _augment_with_health(_error_envelope(
             code="sync_manager_unavailable",
