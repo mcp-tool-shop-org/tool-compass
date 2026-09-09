@@ -319,8 +319,8 @@ class TestIndexBuilding:
 
         await chain_indexer.build_chain_index(chains)
 
-        # Embedder should have been called
-        mock_embedder.embed.assert_called()
+        # Embedder should have been called (native batch path).
+        assert mock_embedder.embed_batch.called or mock_embedder.embed.called
 
     @pytest.mark.asyncio
     async def test_build_chain_index_refreshes_cache(
@@ -415,6 +415,15 @@ class TestChainSearch:
         """Should return empty results when no index."""
         results = await chain_indexer.search_chains("file operations")
 
+        assert results == []
+
+    @pytest.mark.asyncio
+    async def test_search_chains_no_index_down_embedder(
+        self, test_chain_indexer, down_embedder
+    ):
+        """Empty chain index + down embedder must return [] without raising."""
+        test_chain_indexer.embedder = down_embedder
+        results = await test_chain_indexer.search_chains("file operations")
         assert results == []
 
     @pytest.mark.asyncio

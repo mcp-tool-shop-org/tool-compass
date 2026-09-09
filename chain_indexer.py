@@ -4,6 +4,7 @@ Makes tool chains (workflows) searchable via semantic search.
 """
 
 import json
+import os
 import sqlite3
 import numpy as np
 import logging
@@ -55,6 +56,11 @@ def _chain_index_dim_path() -> Path:
     return Path(CHAIN_INDEX_PATH).with_suffix(".dim")
 
 
+def _chain_index_backend_path() -> Path:
+    """Sidecar recording the VectorStore backend the chain index was built with."""
+    return Path(CHAIN_INDEX_PATH).with_suffix(".backend")
+
+
 @dataclass
 class ToolChain:
     """A sequence of tools that form a workflow."""
@@ -92,18 +98,30 @@ class ChainIndexer:
         embedder: "Embedder",
         analytics: Optional["CompassAnalytics"] = None,
         top_chains_cache_size: int = 5,
+        vector_backend: Optional[str] = None,
     ):
         self.embedder = embedder
         self.analytics = analytics
         self.top_chains_cache_size = top_chains_cache_size
+        if vector_backend:
+            self.vector_backend = str(vector_backend).strip().lower()
+        else:
+            self.vector_backend = "hnswlib" if hnswlib is not None else "numpy"
 
-        self.index: Optional["hnswlib.Index"] = None
+        self.index = None
         self._chain_cache: List[ToolChain] = []
         self._id_to_chain: Dict[int, ToolChain] = {}
         self._db: Optional[sqlite3.Connection] = None
 
         # Ensure db directory exists
         DB_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _embedding_dim(self) -> int:
+        """Provider/embedder dim, falling back to the nomic 768 default."""
+        dim = getattr(self.embedder, "embedding_dim", None)
+        if isinstance(dim, int) and dim > 0:
+            return dim
+        return EMBEDDING_DIM
 
     def _get_db(self) -> sqlite3.Connection:
         """Get database connection (uses analytics DB).
@@ -170,15 +188,22 @@ class ChainIndexer:
 
         return chains
 
+    def _new_vector_store(self, dim: Optional[int] = None):
+        # Lazy import so chain_indexer can load without pulling indexer.py
+        # (and its tool_manifest) at module import time.
+        from indexer import create_vector_store
+
+        store = create_vector_store(
+            self.vector_backend, dim=dim or self._embedding_dim()
+        )
+        self.vector_backend = getattr(store, "name", self.vector_backend)
+        return store
+
     async def build_chain_index(self, chains: Optional[List[ToolChain]] = None):
         """
         Build HNSW index for chains.
         If chains not provided, loads from database.
         """
-        if hnswlib is None:
-            logger.error("hnswlib not installed - chain indexing disabled")
-            return
-
         if chains is None:
             chains = await self.load_chains_from_db()
 
@@ -188,52 +213,79 @@ class ChainIndexer:
 
         logger.info(f"Building chain index with {len(chains)} chains...")
 
-        # Generate embeddings for chains without them
-        for chain in chains:
-            if chain.embedding is None:
-                embedding_text = (
-                    chain.embedding_text or self.create_chain_embedding_text(chain)
-                )
-                embedding = await self.embedder.embed(embedding_text)
-                chain.embedding = embedding
-                chain.embedding_text = embedding_text
+        # F-c987c9d3: one embed_batch instead of N sequential embed() calls.
+        need = [c for c in chains if c.embedding is None]
+        if need:
+            texts = [
+                (c.embedding_text or self.create_chain_embedding_text(c))
+                for c in need
+            ]
+            for chain, text in zip(need, texts):
+                chain.embedding_text = text
+            batch = await self.embedder.embed_batch(texts)
+            for chain, vec in zip(need, batch):
+                chain.embedding = vec
 
-        # Initialize HNSW index
-        self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+        dim = self._embedding_dim()
+        # F-57869654 sibling: build into a local Index; assign self.index
+        # only after the on-disk save commits via os.replace.
+        new_index = self._new_vector_store(dim)
         # BE-A2-002: allow_replace_deleted=True permits the ON CONFLICT path
         # in add_chain to mark the old label deleted and re-add with
         # replace_deleted=True. Without this flag, hnswlib raises on duplicate
         # labels and the DB row updates while HNSW stays stale.
-        self.index.init_index(
+        new_index.init_index(
             max_elements=max(len(chains) * 2, 100),
             M=CHAIN_HNSW_M,
             ef_construction=CHAIN_HNSW_EF_CONSTRUCTION,
             allow_replace_deleted=True,
         )
-        self.index.set_ef(CHAIN_HNSW_EF_SEARCH)
+        new_index.set_ef(CHAIN_HNSW_EF_SEARCH)
 
         # Add chains to index
-        self._id_to_chain = {}
+        id_to_chain: Dict[int, ToolChain] = {}
         embeddings = []
         ids = []
 
         for chain in chains:
-            self._id_to_chain[chain.id] = chain
+            id_to_chain[chain.id] = chain
             embeddings.append(chain.embedding)
             ids.append(chain.id)
 
         if embeddings:
             embeddings_array = np.vstack(embeddings).astype(np.float32)
-            self.index.add_items(embeddings_array, ids)
+            if embeddings_array.shape[1] != dim:
+                raise RuntimeError(
+                    f"Chain embedding shape mismatch: got "
+                    f"{embeddings_array.shape}, expected (*, {dim}). "
+                    f"Rebuild the chain index after setting embedding_dim."
+                )
+            new_index.add_items(embeddings_array, ids)
 
-        # Save index
-        self.index.save_index(str(CHAIN_INDEX_PATH))
+        tmp_path = Path(str(CHAIN_INDEX_PATH) + ".tmp")
+        new_index.save_index(str(tmp_path))
+        try:
+            os.replace(str(tmp_path), str(CHAIN_INDEX_PATH))
+        except OSError:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self.index = new_index
+        self._id_to_chain = id_to_chain
         # SC-004: persist the build-time embedding dim so a later load can
         # detect a model-dim change with an actionable message.
         try:
-            _chain_index_dim_path().write_text(str(EMBEDDING_DIM), encoding="utf-8")
+            _chain_index_dim_path().write_text(str(dim), encoding="utf-8")
         except OSError as e:
             logger.debug(f"failed to write chain index dim sidecar: {e}")
+        try:
+            _chain_index_backend_path().write_text(
+                self.vector_backend, encoding="utf-8"
+            )
+        except OSError as e:
+            logger.debug(f"failed to write chain index backend sidecar: {e}")
         logger.info(f"Chain index saved to {CHAIN_INDEX_PATH}")
 
         # Update cache
@@ -254,11 +306,18 @@ class ChainIndexer:
         except (OSError, ValueError):
             return None
 
+    def _read_persisted_index_backend(self) -> Optional[str]:
+        path = _chain_index_backend_path()
+        try:
+            if not path.exists():
+                return None
+            value = path.read_text(encoding="utf-8").strip()
+            return value or None
+        except OSError:
+            return None
+
     async def load_chain_index(self) -> bool:
         """Load existing chain index from disk."""
-        if hnswlib is None:
-            return False
-
         if not CHAIN_INDEX_PATH.exists():
             return False
 
@@ -274,20 +333,37 @@ class ChainIndexer:
             # load with an actionable rebuild message instead of swallowing
             # an opaque error in the bare except below.
             persisted_dim = self._read_persisted_index_dim()
-            if persisted_dim is not None and persisted_dim != EMBEDDING_DIM:
+            expected_dim = self._embedding_dim()
+            if persisted_dim is not None and persisted_dim != expected_dim:
                 logger.error(
                     "Chain index was built with %d-dim vectors but the "
                     "embedder now produces %d-dim vectors. The embedding "
                     "model likely changed. Delete %s (and %s) and rebuild "
                     "the chain index via build_chain_index().",
                     persisted_dim,
-                    EMBEDDING_DIM,
+                    expected_dim,
                     CHAIN_INDEX_PATH,
                     _chain_index_dim_path(),
                 )
                 return False
 
-            self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+            persisted_backend = self._read_persisted_index_backend()
+            if (
+                persisted_backend is not None
+                and persisted_backend != self.vector_backend
+            ):
+                logger.error(
+                    "Chain index was built with vector backend %r but "
+                    "code expects %r. Delete %s (and %s) and rebuild via "
+                    "build_chain_index().",
+                    persisted_backend,
+                    self.vector_backend,
+                    CHAIN_INDEX_PATH,
+                    _chain_index_backend_path(),
+                )
+                return False
+
+            self.index = self._new_vector_store(expected_dim)
             # BE-A2-002: pass allow_replace_deleted=True at load so the
             # restored chain index supports mark_deleted + replace_deleted on
             # add_chain's ON CONFLICT path after a restart.
@@ -394,6 +470,15 @@ class ChainIndexer:
 
         # Generate embedding (use embed() for documents, embed_query() for searches)
         embedding = await self.embedder.embed(embedding_text)
+        expected_dim = self._embedding_dim()
+        if (
+            getattr(embedding, "shape", None) is not None
+            and embedding.shape[-1] != expected_dim
+        ):
+            raise RuntimeError(
+                f"Chain embedding dim {embedding.shape[-1]} != {expected_dim}. "
+                f"Rebuild the chain index after setting embedding_dim."
+            )
 
         # BE-A2-002: detect UPDATE vs INSERT BEFORE the write, so the HNSW
         # branch below can mark_deleted + replace_deleted on the duplicate-
@@ -591,6 +676,137 @@ class ChainIndexer:
     def get_cached_chains(self) -> List[ToolChain]:
         """Get the cached top chains."""
         return self._chain_cache
+
+    def compact_index(self) -> Dict:
+        """Rebuild the chain vector index from live SQLite without re-embedding.
+
+        F-98218381: harvest vectors from the current store via get_items.
+        When tool_chains is empty, clear the in-memory index and drop the
+        on-disk file.
+        """
+        db = self._get_db()
+        rows = db.execute(
+            "SELECT id, chain_name, chain_tools, description, use_count, "
+            "is_auto_detected, embedding_text FROM tool_chains ORDER BY id"
+        ).fetchall()
+
+        if not rows:
+            self.index = None
+            self._id_to_chain = {}
+            self._chain_cache = []
+            for path in (
+                Path(CHAIN_INDEX_PATH),
+                _chain_index_dim_path(),
+                _chain_index_backend_path(),
+            ):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError as e:
+                    logger.debug("compact_index unlink %s: %s", path, e)
+            logger.info("compact_index cleared empty chain catalog")
+            return {"chains_compacted": 0, "index_path": str(CHAIN_INDEX_PATH)}
+
+        if self.index is None:
+            logger.warning(
+                "compact_index: no in-memory chain index to harvest vectors from"
+            )
+            return {
+                "chains_compacted": 0,
+                "reason": "no_index",
+                "index_path": str(CHAIN_INDEX_PATH),
+            }
+
+        dim = self._embedding_dim()
+        ids: List[int] = []
+        vectors: List[np.ndarray] = []
+        id_to_chain: Dict[int, ToolChain] = {}
+        skipped = 0
+        for row in rows:
+            chain_id = int(row["id"])
+            chain = ToolChain(
+                id=chain_id,
+                name=row["chain_name"],
+                tools=json.loads(row["chain_tools"]),
+                description=row["description"] or "",
+                use_count=row["use_count"],
+                is_auto_detected=bool(row["is_auto_detected"]),
+                embedding_text=row["embedding_text"],
+            )
+            vec = None
+            cached = self._id_to_chain.get(chain_id)
+            if cached is not None and cached.embedding is not None:
+                vec = np.asarray(cached.embedding, dtype=np.float32).reshape(-1)
+            if vec is None:
+                try:
+                    harvested = self.index.get_items([chain_id])
+                    vec = np.asarray(harvested, dtype=np.float32).reshape(-1)
+                except Exception:
+                    vec = None
+            if vec is None or vec.shape[-1] != dim:
+                skipped += 1
+                logger.warning(
+                    "compact_index: no vector for chain id=%s name=%s; skip",
+                    chain_id,
+                    chain.name,
+                )
+                continue
+            chain.embedding = vec
+            ids.append(chain_id)
+            vectors.append(vec)
+            id_to_chain[chain_id] = chain
+
+        if rows and not ids:
+            logger.error(
+                "compact_index: no harvestable chain vectors; refusing to replace"
+            )
+            return {
+                "chains_compacted": 0,
+                "reason": "no_cached_vectors",
+                "index_path": str(CHAIN_INDEX_PATH),
+            }
+
+        new_index = self._new_vector_store(dim)
+        new_index.init_index(
+            max_elements=max(len(ids) * 2, 100),
+            M=CHAIN_HNSW_M,
+            ef_construction=CHAIN_HNSW_EF_CONSTRUCTION,
+            allow_replace_deleted=True,
+        )
+        new_index.set_ef(CHAIN_HNSW_EF_SEARCH)
+        if ids:
+            new_index.add_items(np.stack(vectors).astype(np.float32), ids)
+        tmp_path = Path(str(CHAIN_INDEX_PATH) + ".tmp")
+        new_index.save_index(str(tmp_path))
+        try:
+            os.replace(str(tmp_path), str(CHAIN_INDEX_PATH))
+        except OSError:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self.index = new_index
+        self._id_to_chain = id_to_chain
+        try:
+            _chain_index_dim_path().write_text(str(dim), encoding="utf-8")
+        except OSError as e:
+            logger.debug("failed to write chain index dim sidecar: %s", e)
+        try:
+            _chain_index_backend_path().write_text(
+                self.vector_backend, encoding="utf-8"
+            )
+        except OSError as e:
+            logger.debug("failed to write chain index backend sidecar: %s", e)
+        logger.info(
+            "compact_index rebuilt %d chain vectors (skipped %d)",
+            len(ids),
+            skipped,
+        )
+        return {
+            "chains_compacted": len(ids),
+            "skipped": skipped,
+            "index_path": str(CHAIN_INDEX_PATH),
+        }
 
     def close(self):
         """Close database connection."""

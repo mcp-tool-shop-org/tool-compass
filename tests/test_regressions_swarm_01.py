@@ -189,6 +189,36 @@ class TestIDXA002EmptyIndexSearch:
         finally:
             await index.close()
 
+    @pytest.mark.xfail(
+        reason="F-607117d6: embed_query still runs before the empty-index guard",
+        strict=True,
+        raises=RuntimeError,
+    )
+    @pytest.mark.asyncio
+    async def test_search_empty_index_down_embedder_returns_list(
+        self, temp_index_path, temp_db_path, down_embedder
+    ):
+        """Empty index + down embedder must return [] without raising.
+
+        mock_embedder is healthy (health_check True, embed_query always
+        returns a vector), so the sibling above cannot catch embed_query
+        running before the empty-index guard.
+        """
+        from indexer import CompassIndex
+
+        index = CompassIndex(
+            index_path=temp_index_path,
+            db_path=temp_db_path,
+            embedder=down_embedder,
+        )
+        await index.build_index([])
+
+        try:
+            results = await index.search("anything", top_k=5)
+            assert results == []
+        finally:
+            await index.close()
+
 
 # =============================================================================
 # IDX-A-005: ChainIndexer survives numpy int64 labels from knn_query

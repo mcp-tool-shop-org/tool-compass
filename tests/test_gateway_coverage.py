@@ -367,6 +367,37 @@ class TestCompassFallback:
                 assert m["degraded"] is True
 
     @pytest.mark.asyncio
+    async def test_compass_falls_back_to_lexical_when_embedder_down(
+        self, test_index, test_config, down_embedder
+    ):
+        """Populated index + down embedder must take the lexical fallback path.
+
+        Unlike the patched search() sibling, this drives CompassIndex.search
+        through a breaker-open embedder so embed_query raising is live.
+        """
+        import gateway
+
+        original = test_index.embedder
+        test_index.embedder = down_embedder
+        try:
+            gateway._compass_index = test_index
+            gateway._config = test_config
+            gateway._startup_sync_done = True
+            gateway._analytics = None
+
+            from gateway import compass
+
+            result = await compass(intent="read_file", top_k=3)
+
+            assert result["degraded"] is True
+            assert "warnings" in result
+            assert any("Ollama" in w for w in result["warnings"])
+            for m in result["matches"]:
+                assert m["degraded"] is True
+        finally:
+            test_index.embedder = original
+
+    @pytest.mark.asyncio
     async def test_compass_clamps_oversize_intent(self, test_index, test_config):
         """A 10MB paste should never reach the embedder."""
         import gateway
@@ -1380,7 +1411,7 @@ class TestCompassChainsErrors:
         assert env["category"] == "validation"
         assert env["retryable"] is False
         # The extra **valid_actions kwarg flows through.
-        assert env["valid_actions"] == ["list", "create", "detect"]
+        assert env["valid_actions"] == ["list", "create", "detect", "run"]
 
     @pytest.mark.asyncio
     async def test_chains_create_embedder_failure_envelope(
@@ -2206,7 +2237,7 @@ class TestColdStartIndexEnvelope:
     that as the structured service_unavailable envelope, never a raw raise."""
 
     @staticmethod
-    def _assert_cold_start_envelope(result):
+    def _assert_cold_start_envelope(result, provider: str = "ollama"):
         from gateway import _ERROR_CODES, _ERROR_CATEGORIES
 
         assert isinstance(result, dict), "handler must return a dict, not raise"
@@ -2219,10 +2250,19 @@ class TestColdStartIndexEnvelope:
         assert env["category"] == "service_unavailable"
         assert env["category"] in _ERROR_CATEGORIES
         assert env["retryable"] is True
-        # Operator-actionable suggestions are required by the finding.
+        # Operator-actionable suggestions follow embedding_provider (F-0866279e).
         suggestions = " ".join(env.get("suggestions", [])).lower()
-        assert "ollama serve" in suggestions
         assert "--sync" in suggestions
+        if provider == "ollama":
+            assert "ollama serve" in suggestions
+        else:
+            assert "ollama serve" not in suggestions
+            assert "ollama pull nomic-embed-text" not in suggestions
+            assert (
+                "embedding" in suggestions
+                or "api key" in suggestions
+                or "1234" in suggestions
+            ), f"{provider} envelope must name the embed endpoint: {suggestions!r}"
 
     @pytest.mark.asyncio
     async def test_compass_cold_start_returns_envelope(self, test_config):
@@ -2303,6 +2343,30 @@ class TestColdStartIndexEnvelope:
         with patch("gateway.get_index", side_effect=cold_start):
             result = await compass_categories()
         assert result["error_envelope"]["code"] == "index_unhealthy"
+
+    @pytest.mark.parametrize(
+        "provider", ["ollama", "openai", "openai-compatible"]
+    )
+    @pytest.mark.asyncio
+    async def test_cold_start_suggestions_follow_embedding_provider(
+        self, test_config, provider
+    ):
+        import gateway
+
+        test_config.embedding_provider = provider
+        if provider != "ollama":
+            test_config.embedding_base_url = "http://127.0.0.1:1234/v1"
+        gateway._config = test_config
+        gateway._health_state["ollama_available"] = False
+
+        async def cold_start():
+            raise RuntimeError("embedder not available and no cached index found")
+
+        with patch("gateway.get_index", side_effect=cold_start):
+            from gateway import compass
+
+            result = await compass(intent="read a file")
+        self._assert_cold_start_envelope(result, provider=provider)
 
 
 # =============================================================================
@@ -3017,7 +3081,7 @@ class TestHybridSearchDISC01:
         # Semantic buries git_status at the bottom, but the intent literally
         # contains "git status" so the lexical list ranks it top. RRF fusion
         # should lift it above where semantics alone placed it.
-        # Baseline healthy _health_state (module global not reset by conftest).
+        # Baseline healthy _health_state (conftest deep-copies this dict).
         gateway._health_state["ollama_available"] = True
         gateway._health_state["index_available"] = True
         test_config.hybrid_search = True
@@ -3127,7 +3191,7 @@ class TestHybridSearchDISC01:
         import gateway
         from unittest.mock import patch as _patch
 
-        # Baseline healthy _health_state (module global not reset by conftest).
+        # Baseline healthy _health_state (conftest deep-copies this dict).
         gateway._health_state["ollama_available"] = True
         gateway._health_state["index_available"] = True
         test_config.hybrid_search = True

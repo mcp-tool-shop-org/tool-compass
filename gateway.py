@@ -47,7 +47,7 @@ from _version import __version__
 
 # MCP imports
 try:
-    from mcp.server.fastmcp import FastMCP
+    from mcp.server.fastmcp import FastMCP, Context
 except ImportError:
     import sys as _sys
 
@@ -67,7 +67,7 @@ from config import (
     _redact_structural,
 )
 # Use simple backend client to avoid anyio conflicts when nested inside another MCP server
-from backend_client_simple import SimpleBackendManager as BackendManager
+from backend_client_simple import SimpleBackendManager as BackendManager, TOOL_CALL_TIMEOUT
 from analytics import CompassAnalytics, get_analytics
 from sync_manager import SyncManager, get_sync_manager
 from chain_indexer import ChainIndexer, get_chain_indexer
@@ -193,6 +193,9 @@ _ERROR_CODES = {
     "execute_unhandled_exception",
     # FEAT-06: tool blocked by the resolving backend's allow/deny policy.
     "tool_denied",
+    "chain_not_found",
+    "resource_not_found",
+    "prompt_not_found",
 }
 
 
@@ -254,7 +257,10 @@ def _error_envelope(
     if trace_id is not None:
         payload["instance"] = trace_id
     if retry_after_seconds is not None:
-        payload["retry_after_seconds"] = float(retry_after_seconds)
+        try:
+            payload["retry_after_seconds"] = float(retry_after_seconds)
+        except (TypeError, ValueError):
+            payload["retry_after_seconds"] = 5.0
     if nearest_tools:
         payload["nearest_tools"] = nearest_tools
     if suggestions:
@@ -320,14 +326,26 @@ def _cold_start_envelope(
     structured `service_unavailable` envelope that compass_status /
     compass_audit already degrade into, never as a raw stack to the caller.
 
-    The code distinguishes the two halves of the precondition: if Ollama is
-    known-down we report `ollama_unavailable`; otherwise the index itself is
-    the blocker (`index_unhealthy`). Both are retryable — the operator can
-    bring Ollama up or run a sync and retry the same call.
+    The code distinguishes the two halves of the precondition: if the
+    embedding service is known-down we report `ollama_unavailable` (stable
+    code; title/suggestions follow embedding_provider); otherwise the index
+    itself is the blocker (`index_unhealthy`). Both are retryable.
     """
+    cfg = None
+    try:
+        cfg = get_config()
+    except Exception:
+        cfg = None
     ollama_down = not _health_state.get("ollama_available", True)
     code = "ollama_unavailable" if ollama_down else "index_unhealthy"
-    title = "Ollama unavailable" if ollama_down else "Index unhealthy"
+    if ollama_down:
+        title = (
+            "Ollama unavailable"
+            if _is_ollama_embedding_provider(cfg)
+            else "Embedding service unavailable"
+        )
+    else:
+        title = "Index unhealthy"
     return _augment_with_health(
         _error_envelope(
             code=code,
@@ -336,10 +354,7 @@ def _cold_start_envelope(
             category="service_unavailable",
             retryable=True,
             trace_id=trace_id,
-            suggestions=[
-                "Start Ollama: ollama serve",
-                "Run python gateway.py --sync to build the index",
-            ],
+            suggestions=_embedding_recovery_suggestions(cfg, include_sync=True),
         )
     )
 
@@ -403,6 +418,144 @@ def get_config() -> CompassConfig:
     return _config
 
 
+# F-92e4758b: recovery copy must follow embedding_provider. Ollama-only
+# strings ("ollama serve", interpolating ollama_url) send openai /
+# openai-compatible operators to the wrong daemon.
+_OLLAMA_EMBEDDING_PROVIDERS = frozenset({"ollama", ""})
+
+
+def _embedding_provider_name(cfg: Optional[CompassConfig] = None) -> str:
+    """Normalized ``embedding_provider`` (default ``ollama``)."""
+    if cfg is None:
+        try:
+            cfg = get_config()
+        except Exception:
+            return "ollama"
+    name = getattr(cfg, "embedding_provider", None)
+    if not isinstance(name, str) or not name.strip():
+        return "ollama"
+    return name.strip().lower()
+
+
+def _is_ollama_embedding_provider(cfg: Optional[CompassConfig] = None) -> bool:
+    return _embedding_provider_name(cfg) in _OLLAMA_EMBEDDING_PROVIDERS
+
+
+def _embedding_endpoint_display(cfg: Optional[CompassConfig] = None) -> str:
+    """Redacted active embed endpoint for user-facing copy.
+
+    Non-ollama providers must not interpolate ``ollama_url`` when
+    ``embedding_base_url`` is unset (F-92e4758b).
+    """
+    if cfg is None:
+        try:
+            cfg = get_config()
+        except Exception:
+            return ""
+    explicit = getattr(cfg, "embedding_base_url", None)
+    if isinstance(explicit, str) and explicit.strip():
+        return redact_url_credentials(explicit.strip())
+    if _is_ollama_embedding_provider(cfg):
+        return redact_url_credentials(getattr(cfg, "ollama_url", "") or "")
+    return "(embedding_base_url unset)"
+
+
+def _embedding_recovery_suggestions(
+    cfg: Optional[CompassConfig] = None,
+    *,
+    include_sync: bool = False,
+    include_retry: bool = False,
+) -> List[str]:
+    """Provider-aware next-action hints for embedder outages."""
+    if cfg is None:
+        try:
+            cfg = get_config()
+        except Exception:
+            cfg = None
+    model = getattr(cfg, "embedding_model", None) or "nomic-embed-text"
+    suggestions: List[str] = []
+    if _is_ollama_embedding_provider(cfg):
+        suggestions.append("Start Ollama: ollama serve")
+        suggestions.append(f"Pull the embedding model: ollama pull {model}")
+    else:
+        provider = _embedding_provider_name(cfg)
+        endpoint = _embedding_endpoint_display(cfg)
+        suggestions.append(
+            f"Check embedding_base_url ({endpoint}) is reachable for "
+            f"provider {provider!r}"
+        )
+        suggestions.append(
+            f"Confirm embedding_model={model!r} is served by the provider"
+        )
+        suggestions.append(
+            "Set embedding_api_key or TOOL_COMPASS_EMBEDDING_API_KEY"
+        )
+    if include_sync:
+        suggestions.append("Run python gateway.py --sync to build the index")
+    if include_retry:
+        if _is_ollama_embedding_provider(cfg):
+            suggestions.append("Retry once Ollama is reachable.")
+        else:
+            suggestions.append("Retry once the embedding service is reachable.")
+    return suggestions
+
+
+def _semantic_unavailable_warning(cfg: Optional[CompassConfig] = None) -> str:
+    """Lexical-fallback warning for compass() (F-92e4758b)."""
+    endpoint = _embedding_endpoint_display(cfg)
+    if _is_ollama_embedding_provider(cfg):
+        return (
+            "Semantic search unavailable: Ollama is unreachable at "
+            f"{endpoint}. Try: ollama serve. "
+            "Showing keyword-based results instead."
+        )
+    provider = _embedding_provider_name(cfg)
+    return (
+        f"Semantic search unavailable: embedding provider {provider!r} is "
+        f"unreachable at {endpoint}. Check embedding_base_url, "
+        "embedding_model, and TOOL_COMPASS_EMBEDDING_API_KEY. "
+        "Showing keyword-based results instead."
+    )
+
+
+def _embedder_unavailable_index_error(index_path: Any, cfg: CompassConfig) -> str:
+    """RuntimeError detail when get_index() cannot build without embeddings."""
+    model = getattr(cfg, "embedding_model", None) or "nomic-embed-text"
+    if _is_ollama_embedding_provider(cfg):
+        return (
+            "Ollama not available and no cached index found at "
+            f"{index_path}. Start Ollama (ollama serve) and run: "
+            f"ollama pull {model}"
+        )
+    provider = _embedding_provider_name(cfg)
+    endpoint = _embedding_endpoint_display(cfg)
+    return (
+        f"Embedding provider {provider!r} not available at {endpoint} and no "
+        f"cached index found at {index_path}. Check embedding_base_url, "
+        f"embedding_model={model!r}, and embedding_api_key / "
+        "TOOL_COMPASS_EMBEDDING_API_KEY."
+    )
+
+
+def _embedder_from_config(cfg: CompassConfig) -> Any:
+    """Build the configured Embedder (provider + resolved endpoint)."""
+    from embedder import Embedder
+
+    return Embedder(
+        base_url=cfg.resolved_embedding_base_url(),
+        model=cfg.embedding_model,
+        provider=cfg.embedding_provider,
+        api_key=getattr(cfg, "embedding_api_key", None),
+        query_prefix=getattr(cfg, "embedding_query_prefix", None),
+        document_prefix=getattr(cfg, "embedding_document_prefix", None),
+        breaker_failure_threshold=cfg.ollama_breaker_failure_threshold,
+        breaker_open_seconds=cfg.ollama_breaker_open_seconds,
+        retry_attempts=cfg.ollama_retry_attempts,
+        retry_backoffs=tuple(cfg.ollama_retry_backoffs),
+        on_breaker_transition=_record_breaker_transition,
+    )
+
+
 async def get_index() -> CompassIndex:
     """Get or initialize the compass index.
 
@@ -431,16 +584,7 @@ async def get_index() -> CompassIndex:
         # can re-shape the index + breaker without code edits. BE-B-002:
         # on_breaker_transition fires the breaker_transitions_total counter.
         cfg = get_config()
-        from embedder import Embedder
-        embedder = Embedder(
-            base_url=cfg.ollama_url,
-            model=cfg.embedding_model,
-            breaker_failure_threshold=cfg.ollama_breaker_failure_threshold,
-            breaker_open_seconds=cfg.ollama_breaker_open_seconds,
-            retry_attempts=cfg.ollama_retry_attempts,
-            retry_backoffs=tuple(cfg.ollama_retry_backoffs),
-            on_breaker_transition=_record_breaker_transition,
-        )
+        embedder = _embedder_from_config(cfg)
         index = CompassIndex(
             embedder=embedder,
             hnsw_m=cfg.hnsw_m,
@@ -455,23 +599,19 @@ async def get_index() -> CompassIndex:
 
         logger.warning("No existing index found. Building from manifest...")
 
-        # Check Ollama — building needs embeddings, so this is non-negotiable here.
+        # Building needs embeddings, so this is non-negotiable here.
         try:
             ollama_ok = await index.embedder.health_check()
         except Exception as e:
             _mark_ollama_down(e)
             raise RuntimeError(
-                "Ollama not available and no cached index found at "
-                f"{index.index_path}. Start Ollama (ollama serve) and run: "
-                "ollama pull nomic-embed-text"
+                _embedder_unavailable_index_error(index.index_path, cfg)
             ) from e
 
         if not ollama_ok:
             _mark_ollama_down(RuntimeError("health_check returned False"))
             raise RuntimeError(
-                "Ollama not available and no cached index found at "
-                f"{index.index_path}. Start Ollama (ollama serve) and run: "
-                "ollama pull nomic-embed-text"
+                _embedder_unavailable_index_error(index.index_path, cfg)
             )
 
         _mark_ollama_up()
@@ -526,8 +666,12 @@ async def get_analytics_instance() -> Optional[CompassAnalytics]:
         if _analytics is not None:
             return _analytics
 
-        _analytics = get_analytics()
-        await _analytics.load_hot_cache_from_db()
+        # Do not latch the singleton until load succeeds. A corrupt analytics
+        # sqlite on first load must not pin a half-initialized instance (or
+        # skip retries) for the process lifetime — sibling of F-1dcb1182.
+        analytics = get_analytics()
+        await analytics.load_hot_cache_from_db()
+        _analytics = analytics
 
     return _analytics
 
@@ -595,7 +739,13 @@ async def get_chain_indexer_instance() -> Optional[ChainIndexer]:
         except RuntimeError as e:
             logger.warning(f"chain indexer unavailable on cold start: {e}")
             return None
-        analytics = await get_analytics_instance()
+        try:
+            analytics = await get_analytics_instance()
+        except Exception as e:
+            # Analytics is optional for chain indexing; a corrupt metrics
+            # store must not block seed/build (F-d829270e sibling).
+            logger.warning(f"chain indexer: analytics unavailable: {e}")
+            analytics = None
         chain_indexer = get_chain_indexer(index.embedder, analytics)
 
         # Load existing chain index or build it
@@ -621,22 +771,30 @@ async def maybe_startup_sync():
     if not config.sync_check_on_startup:
         return
 
-    # Fast path: already done
+    # Fast path: sync already succeeded (or is disabled). Still retry
+    # polling/prune — those must not permanently skip on a failed first try.
     if _startup_sync_done:
+        await _retry_startup_sidecars()
         return
 
     # Slow path with lock
     async with _loop_lock("startup_sync"):
         # Double-check after acquiring lock
         if _startup_sync_done:
+            await _retry_startup_sidecars()
             return
 
-        # GW-A-001 sibling: do NOT latch _startup_sync_done before the work.
-        # get_sync_manager_instance() returns None on cold start (index not
-        # ready); leave the flag unset there so the next call retries once the
-        # index/Ollama is available. Only latch once a sync actually ran (or
-        # sync is disabled), so a cold-start deferral is not permanent.
-        sync_manager = await get_sync_manager_instance()
+        # GW-A-001 sibling / F-1dcb1182: do NOT latch _startup_sync_done
+        # before the work succeeds. get_sync_manager_instance() returns None
+        # on cold start (index not ready); leave the flag unset there so the
+        # next call retries once the index/Ollama is available. Only latch
+        # once a sync actually ran (or sync is disabled), so a cold-start
+        # deferral or a transient Ollama/sqlite/backend blip is not permanent.
+        try:
+            sync_manager = await get_sync_manager_instance()
+        except Exception as e:
+            logger.warning(f"Startup sync manager unavailable: {e}")
+            return
         if sync_manager is None:
             if not get_config().auto_sync:
                 _startup_sync_done = True  # sync disabled: nothing to do, ever
@@ -646,12 +804,17 @@ async def maybe_startup_sync():
             await sync_manager.sync_if_needed()
         except Exception as e:
             logger.warning(f"Startup sync failed: {e}")
+            # Leave unset so a later request retries. Do not start polling
+            # until the first sync actually succeeded.
+            return
+
         _startup_sync_done = True
 
         # auto-refresh: now that a sync_manager exists and the first sync ran,
         # start background polling (guarded on interval > 0) and opportunistically
         # prune old analytics rows once. Both are best-effort — a failure here
-        # must never break the sync path.
+        # must never break the sync path, and a failed first attempt must not
+        # permanently skip retries (see _retry_startup_sidecars).
         await _maybe_start_background_polling(sync_manager)
         await _maybe_prune_analytics_once()
 
@@ -682,7 +845,9 @@ async def _maybe_start_background_polling(sync_manager) -> bool:
         await sync_manager.start_background_polling(interval_seconds=interval)
     except Exception as e:
         logger.warning(f"auto-refresh: failed to start background polling: {e}")
-        return True  # the decision to poll was taken even if the start failed
+        # Decision to poll was taken (return True) but do not treat the start
+        # as done — maybe_startup_sync retries via _retry_startup_sidecars.
+        return True
     return True
 
 
@@ -709,6 +874,8 @@ async def _maybe_prune_analytics_once() -> bool:
         logger.debug(f"auto-refresh: analytics unavailable for prune: {e}")
         return False
     if analytics is None:
+        if not get_config().analytics_enabled:
+            _analytics_pruned_once = True  # disabled: nothing to prune, ever
         return False
     prune = getattr(analytics, "prune_old_records", None)
     if prune is None or not callable(prune):
@@ -726,6 +893,25 @@ async def _maybe_prune_analytics_once() -> bool:
         logger.warning(f"auto-refresh: analytics prune failed: {e}")
         # Don't latch on failure — a later startup attempt may succeed.
         return False
+
+
+async def _retry_startup_sidecars() -> None:
+    """Retry polling/prune after startup sync has latched.
+
+    `_startup_sync_done` must not make a failed first poll start or prune a
+    process-lifetime skip (sibling of F-1dcb1182). start_background_polling
+    is itself idempotent when a task is already live.
+    """
+    if int(get_config().sync_polling_interval) > 0:
+        try:
+            sync_manager = await get_sync_manager_instance()
+        except Exception as e:
+            logger.debug(f"auto-refresh: polling retry skipped: {e}")
+        else:
+            if sync_manager is not None:
+                await _maybe_start_background_polling(sync_manager)
+    if not _analytics_pruned_once:
+        await _maybe_prune_analytics_once()
 
 
 # =============================================================================
@@ -753,6 +939,42 @@ def _clamp_query(query: Optional[str]) -> str:
         )
         q = q[:_MAX_QUERY_LEN]
     return q
+
+
+def _stamp_query_truncation(
+    response: Dict[str, Any],
+    *,
+    was_truncated: bool,
+    original_length: int,
+) -> Dict[str, Any]:
+    """Surface a 512-char clamp on the compass() envelope (F-761394e3).
+
+    Keep the cap; never hide it. LLM callers that pasted a long spec must
+    see ``truncated=true``, ``original_length``, a warnings[] entry, and a
+    hint so they can retry with a shorter intent.
+    """
+    if not was_truncated or not isinstance(response, dict):
+        return response
+    note = (
+        f"Query truncated from {original_length} to {_MAX_QUERY_LEN} "
+        "characters; search used the clipped intent. Retry with a shorter "
+        "intent."
+    )
+    response["truncated"] = True
+    response["original_length"] = original_length
+    existing = response.get("warnings")
+    if not isinstance(existing, list):
+        existing = []
+    if note not in existing:
+        existing.append(note)
+    response["warnings"] = existing
+    hint = response.get("hint")
+    if isinstance(hint, str) and hint.strip():
+        if "truncated" not in hint.lower():
+            response["hint"] = f"{hint} {note}"
+    else:
+        response["hint"] = note
+    return response
 
 
 def _escape_like(s: str) -> str:
@@ -1104,6 +1326,210 @@ def _tool_denied_by_policy(
     return True
 
 
+async def _report_progress(
+    ctx: Optional["Context"],
+    progress: float,
+    total: float = 100.0,
+    message: Optional[str] = None,
+) -> None:
+    """F-2084dd0f: best-effort FastMCP progress. Degrades if ctx is absent."""
+    if ctx is None:
+        return
+    reporter = getattr(ctx, "report_progress", None)
+    if reporter is None:
+        return
+    try:
+        await reporter(progress, total, message)
+    except Exception as e:
+        logger.debug(f"report_progress failed: {e}")
+
+
+_JSON_TYPE_MAP = {
+    "string": str,
+    "number": (int, float),
+    "integer": int,
+    "boolean": bool,
+    "object": dict,
+    "array": list,
+    "null": type(None),
+}
+
+
+def _json_type_matches(value: Any, expected: Any) -> bool:
+    if isinstance(expected, list):
+        return any(_json_type_matches(value, t) for t in expected)
+    if not isinstance(expected, str):
+        return True
+    py = _JSON_TYPE_MAP.get(expected)
+    if py is None:
+        return True
+    if expected == "number" and isinstance(value, bool):
+        return False
+    if expected == "integer" and isinstance(value, bool):
+        return False
+    return isinstance(value, py)
+
+
+def _validate_arguments_against_schema(
+    arguments: Dict[str, Any], schema: Optional[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Small required/type/enum checker. jsonschema is not a dependency."""
+    errors: List[Dict[str, Any]] = []
+    if not isinstance(schema, dict) or not arguments and schema is None:
+        return errors
+    if not isinstance(schema, dict):
+        return errors
+    required = schema.get("required") or []
+    if not isinstance(required, list):
+        required = []
+    properties = schema.get("properties") or {}
+    if not isinstance(properties, dict):
+        properties = {}
+    args = arguments if isinstance(arguments, dict) else {}
+    for key in required:
+        if not isinstance(key, str):
+            continue
+        if key not in args:
+            errors.append({"path": key, "error": "required"})
+    additional = schema.get("additionalProperties", True)
+    for key, value in args.items():
+        prop = properties.get(key)
+        if not isinstance(prop, dict):
+            if additional is False:
+                errors.append({"path": key, "error": "unexpected"})
+            continue
+        expected_type = prop.get("type")
+        if expected_type is not None and not _json_type_matches(value, expected_type):
+            errors.append({
+                "path": key,
+                "error": "type",
+                "expected": expected_type,
+                "actual": type(value).__name__,
+            })
+        enum = prop.get("enum")
+        if isinstance(enum, list) and value not in enum:
+            errors.append({"path": key, "error": "enum", "expected": enum})
+    return errors
+
+
+def _lookup_tool_schema(
+    tool_name: str,
+    index: Optional[Any] = None,
+    manager: Optional[Any] = None,
+    trace_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Load input schema from the index (preferred) or a live backend cache.
+
+    Does NOT connect a backend — execute() validates before connect.
+    """
+    if index is not None:
+        full = _load_raw_schema(index, tool_name, trace_id)
+        if isinstance(full, dict) and full:
+            return full
+        if getattr(index, "db", None):
+            try:
+                row = index.db.execute(
+                    "SELECT parameters FROM tools WHERE name = ?",
+                    (tool_name,),
+                ).fetchone()
+            except sqlite3.Error:
+                row = None
+            if row and row["parameters"]:
+                try:
+                    params = json.loads(row["parameters"])
+                except (json.JSONDecodeError, TypeError):
+                    params = None
+                if isinstance(params, dict) and params:
+                    if "type" in params or "properties" in params or "required" in params:
+                        return params
+                    return {"type": "object", "properties": params}
+    if manager is not None:
+        try:
+            info = manager.get_tool_schema(tool_name)
+        except Exception:
+            info = None
+        if isinstance(info, dict):
+            schema = info.get("input_schema") or info.get("schema") or info.get("inputSchema")
+            if isinstance(schema, dict) and schema:
+                return schema
+    return None
+
+
+def _resolve_json_pointer(doc: Any, pointer: str) -> Any:
+    """RFC 6901 JSON Pointer plus dotted-path convenience."""
+    if pointer in ("", "/", "."):
+        return doc
+    if pointer.startswith("/"):
+        parts = [p.replace("~1", "/").replace("~0", "~") for p in pointer.split("/")[1:]]
+    else:
+        parts = [p for p in pointer.lstrip(".").split(".") if p]
+    cur = doc
+    for part in parts:
+        if isinstance(cur, dict):
+            if part not in cur:
+                return None
+            cur = cur[part]
+        elif isinstance(cur, list):
+            try:
+                cur = cur[int(part)]
+            except (ValueError, IndexError):
+                return None
+        else:
+            return None
+    return cur
+
+
+def _resolve_chain_ref(expr: Any, prev: Any, steps: List[Dict[str, Any]]) -> Any:
+    """Resolve $prev / $steps[n] (optional JSON Pointer) in chain arg_map."""
+    if not isinstance(expr, str):
+        if isinstance(expr, dict):
+            return {k: _resolve_chain_ref(v, prev, steps) for k, v in expr.items()}
+        if isinstance(expr, list):
+            return [_resolve_chain_ref(v, prev, steps) for v in expr]
+        return expr
+    if expr == "$prev":
+        return prev
+    if expr.startswith("$prev"):
+        rest = expr[5:]
+        return _resolve_json_pointer(prev, rest)
+    if expr.startswith("$steps["):
+        close = expr.find("]")
+        if close == -1:
+            return expr
+        try:
+            idx = int(expr[7:close])
+        except ValueError:
+            return expr
+        if idx < 0 or idx >= len(steps):
+            return None
+        rest = expr[close + 1:]
+        return _resolve_json_pointer(steps[idx], rest)
+    return expr
+
+
+def _hop_arguments(
+    hop_index: int,
+    arguments: Optional[Dict[str, Any]],
+    arg_map: Optional[Any],
+    prev: Any,
+    steps: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Best-effort argument plumbing for compass_chains(action='run')."""
+    template: Any = None
+    if isinstance(arg_map, list) and hop_index < len(arg_map):
+        template = arg_map[hop_index]
+    elif isinstance(arg_map, dict) and hop_index == 0:
+        template = arg_map
+    elif hop_index == 0:
+        template = arguments
+    if template is None:
+        return dict(arguments or {}) if hop_index == 0 else {}
+    resolved = _resolve_chain_ref(template, prev, steps)
+    if isinstance(resolved, dict):
+        return resolved
+    return {"value": resolved}
+
+
 # =============================================================================
 # MCP TOOLS - The Gateway Interface
 # =============================================================================
@@ -1117,6 +1543,7 @@ async def compass(
     server: Optional[str] = None,
     min_confidence: float = 0.3,
     include_chains: bool = True,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
     Find tools by describing what you want to accomplish.
@@ -1151,7 +1578,11 @@ async def compass(
     min_confidence = max(0.0, min(1.0, min_confidence))
 
     # BE-B-007: clamp the user-supplied intent at the boundary so a 10MB
-    # paste doesn't become a 10MB Ollama call or a 10MB LIKE parameter.
+    # paste doesn't become a 10MB embed call or a 10MB LIKE parameter.
+    # F-761394e3: remember the clip so the envelope can stamp truncated=true.
+    raw_intent = (intent or "").strip()
+    original_length = len(raw_intent)
+    was_truncated = original_length > _MAX_QUERY_LEN
     intent = _clamp_query(intent)
 
     warnings: List[str] = []
@@ -1163,7 +1594,9 @@ async def compass(
     )
 
     # Check for sync on first call
+    await _report_progress(ctx, 5, 100, "startup sync")
     await maybe_startup_sync()
+    await _report_progress(ctx, 20, 100, "searching")
 
     # GW-A-001: get_index() raises RuntimeError on cold start (no baked index
     # AND Ollama unreachable). Surface that as the structured
@@ -1173,7 +1606,11 @@ async def compass(
         index = await get_index()
     except RuntimeError as e:
         logger.error(f"[compass] [{trace_id}] index unavailable on cold start: {e}")
-        return _cold_start_envelope(e, trace_id=trace_id)
+        return _stamp_query_truncation(
+            _cold_start_envelope(e, trace_id=trace_id),
+            was_truncated=was_truncated,
+            original_length=original_length,
+        )
 
     # Search tools — on embedder/Ollama failure fall back to lexical LIKE
     # over the existing tools table so users keep getting results.
@@ -1196,11 +1633,7 @@ async def compass(
             f"[compass] [{trace_id}] semantic search failed ({type(e).__name__}: {e}); "
             "falling back to lexical search"
         )
-        warnings.append(
-            "Semantic search unavailable: Ollama is unreachable at "
-            f"{config.ollama_url}. Try: ollama serve. "
-            "Showing keyword-based results instead."
-        )
+        warnings.append(_semantic_unavailable_warning(config))
         fallback_matches = _lexical_search_fallback(
             index, intent, top_k, category, server
         )
@@ -1215,12 +1648,14 @@ async def compass(
 
     # Search chains if enabled — chain search also relies on embeddings,
     # so a semantic outage will usually take this path down too. Don't let
-    # that kill the whole response.
+    # that kill the whole response. get_chain_indexer_instance() (seed/
+    # build) is inside the try so an embed failure degrades to no chains
+    # rather than aborting a good semantic result (F-d829270e).
     chain_matches = []
     if include_chains and config.chain_indexing_enabled and not degraded:
-        chain_indexer = await get_chain_indexer_instance()
-        if chain_indexer:
-            try:
+        try:
+            chain_indexer = await get_chain_indexer_instance()
+            if chain_indexer:
                 chain_results = await chain_indexer.search_chains(
                     intent, top_k=3, min_confidence=min_confidence
                 )
@@ -1232,14 +1667,14 @@ async def compass(
                         "confidence": float(round(cr.score, 3)),
                         "use_count": cr.chain.use_count,
                     })
-            except Exception as e:
-                logger.warning(
-                    f"[compass] [{trace_id}] chain search failed "
-                    f"({type(e).__name__}: {e}); skipping chain matches"
-                )
-                warnings.append(
-                    "Chain search skipped: embedding service unavailable."
-                )
+        except Exception as e:
+            logger.warning(
+                f"[compass] [{trace_id}] chain search failed "
+                f"({type(e).__name__}: {e}); skipping chain matches"
+            )
+            warnings.append(
+                "Chain search skipped: embedding service unavailable."
+            )
 
     # Build response - progressive disclosure means we only return summaries
     matches: List[Dict[str, Any]] = []
@@ -1335,10 +1770,18 @@ async def compass(
     # Calculate latency
     latency_ms = (time.time() - start_time) * 1000
 
-    # Record analytics
-    analytics = await get_analytics_instance()
+    # Record analytics (optional — a metrics-store failure must not poison
+    # an otherwise-good search; F-d829270e).
+    try:
+        analytics = await get_analytics_instance()
+    except Exception as e:
+        logger.warning(f"[compass] [{trace_id}] analytics unavailable: {e}")
+        analytics = None
     if analytics:
-        await analytics.record_search(intent, results, latency_ms, category, server)
+        try:
+            await analytics.record_search(intent, results, latency_ms, category, server)
+        except Exception as rec_err:
+            logger.debug(f"[compass] [{trace_id}] analytics record failed: {rec_err}")
 
     # Hint for next steps
     if not matches and not chain_matches:
@@ -1348,7 +1791,11 @@ async def compass(
     ):
         # Chain is the best match
         chain_name = chain_matches[0]["name"]
-        hint = f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). Tools: {' → '.join(chain_matches[0]['tools'])}"
+        hint = (
+            f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). "
+            f"Tools: {' → '.join(chain_matches[0]['tools'])}. "
+            f"Use compass_chains(action='run', chain_name='{chain_name}') to execute."
+        )
     elif not matches:
         # GW-COMPOSED-001: matches is empty but chains exist and none of them
         # scored above the (0) tool threshold — e.g. a single chain matched at
@@ -1357,7 +1804,11 @@ async def compass(
         # (violating BE-B-004: handlers return a structured payload, never
         # raise). Produce a chains-only hint instead of touching matches[0].
         chain_name = chain_matches[0]["name"]
-        hint = f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). Tools: {' → '.join(chain_matches[0]['tools'])}"
+        hint = (
+            f"Found workflow '{chain_name}' ({chain_matches[0]['confidence']:.0%}). "
+            f"Tools: {' → '.join(chain_matches[0]['tools'])}. "
+            f"Use compass_chains(action='run', chain_name='{chain_name}') to execute."
+        )
     elif len(matches) == 1:
         tool_name = matches[0]["tool"]
         if config.progressive_disclosure:
@@ -1396,7 +1847,11 @@ async def compass(
     if response.get("degraded"):
         for reason in response.get("degraded_reasons", []) or ["unknown"]:
             _record_degraded_response(reason)
-    return response
+    return _stamp_query_truncation(
+        response,
+        was_truncated=was_truncated,
+        original_length=original_length,
+    )
 
 
 @mcp.tool()
@@ -1546,7 +2001,10 @@ async def describe(tool_name: str) -> Dict[str, Any]:
 
 @mcp.tool()
 async def execute(
-    tool_name: str, arguments: Optional[Dict[str, Any]] = None
+    tool_name: str,
+    arguments: Optional[Dict[str, Any]] = None,
+    dry_run: bool = False,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
     Execute a tool on its backend server.
@@ -1557,19 +2015,29 @@ async def execute(
     Args:
         tool_name: The tool to execute (e.g., "bridge:read_file" or "comfy:comfy_generate")
         arguments: Tool arguments as a dictionary. Check describe() for required parameters.
+        dry_run: If True, validate arguments and return {would_call, server, policy,
+            timeout, schema_errors} without connecting to the backend.
 
     Returns:
         The tool's response or an error message.
     """
     start_time = time.time()
     trace_id = uuid.uuid4().hex[:8]
-    logger.info(f"[execute] [{trace_id}] tool_name={tool_name!r}")
+    logger.info(f"[execute] [{trace_id}] tool_name={tool_name!r} dry_run={dry_run}")
 
     if arguments is None:
         arguments = {}
 
+    await _report_progress(ctx, 5, 100, "resolving")
     manager = await get_backends()
-    analytics = await get_analytics_instance()
+    analytics = None
+    try:
+        analytics = await get_analytics_instance()
+    except Exception as e:
+        # Analytics is optional; a corrupt metrics sqlite must not block
+        # connect/proxy work (F-d829270e).
+        logger.warning(f"[execute] [{trace_id}] analytics unavailable: {e}")
+        analytics = None
 
     # Check hot cache for faster schema lookup (optional optimization)
     if analytics:
@@ -1626,32 +2094,110 @@ async def execute(
         envelope["success"] = False
         return _augment_with_health(envelope)
 
+    # F-65618c94: validate required/type/enum from describe schema BEFORE
+    # connect so LLM argument mistakes do not pay CONNECTION_TIMEOUT.
+    # Use the already-loaded index only — do not cold-start get_index()/Ollama
+    # just to validate arguments.
+    schema = _lookup_tool_schema(
+        tool_name, index=_compass_index, manager=manager, trace_id=trace_id
+    )
+    schema_errors = _validate_arguments_against_schema(arguments, schema)
+
+    server_name = tool_name.split(":", 1)[0] if ":" in tool_name else None
+    cfg_backend = None
+    try:
+        cfg_backend = manager.config.backends.get(server_name) if server_name else None
+    except Exception:
+        cfg_backend = None
+    resolved_timeout = TOOL_CALL_TIMEOUT
+    if cfg_backend is not None:
+        timeouts = getattr(cfg_backend, "tool_timeouts", None)
+        default_t = getattr(cfg_backend, "default_timeout", None)
+        if isinstance(timeouts, dict) and timeouts.get(_bare_tool) is not None:
+            resolved_timeout = timeouts.get(_bare_tool)
+        elif isinstance(default_t, (int, float)):
+            resolved_timeout = default_t
+    policy = "denied" if _tool_denied_by_policy(_policy_backend, _bare_tool) else "allowed"
+
+    if schema_errors and not dry_run:
+        latency_ms = (time.time() - start_time) * 1000
+        if analytics:
+            try:
+                await analytics.record_tool_call(
+                    tool_name,
+                    success=False,
+                    latency_ms=latency_ms,
+                    error_message="invalid_argument: schema validation failed",
+                )
+            except Exception as rec_err:
+                logger.debug(f"analytics record failed: {rec_err}")
+        envelope = _error_envelope(
+            code="invalid_argument",
+            title="Invalid tool arguments",
+            detail=f"Arguments for {tool_name!r} failed schema validation.",
+            category="validation",
+            retryable=False,
+            trace_id=trace_id,
+            schema_errors=schema_errors,
+            suggestions=[
+                f"Use describe('{tool_name}') to inspect required parameters.",
+                "Fix missing/typed/enum fields and retry; do not reconnect yet.",
+            ],
+        )
+        envelope["success"] = False
+        envelope["schema_errors"] = schema_errors
+        return _augment_with_health(envelope)
+
+    if dry_run:
+        return _augment_with_health({
+            "success": True,
+            "dry_run": True,
+            "would_call": tool_name,
+            "server": server_name,
+            "policy": policy,
+            "timeout": resolved_timeout,
+            "schema_errors": schema_errors,
+            "schema": schema,
+            "trace_id": trace_id,
+        })
+
     # Connect to backend if needed
     if ":" in tool_name:
         server_name = tool_name.split(":")[0]
         if not manager.is_backend_connected(server_name):
             logger.info(f"Connecting to backend: {server_name}")
+            await _report_progress(ctx, 25, 100, f"connecting {server_name}")
             success = await manager.connect_backend(server_name)
             if not success:
                 # Record failed call
                 latency_ms = (time.time() - start_time) * 1000
                 if analytics:
-                    await analytics.record_tool_call(
-                        tool_name,
-                        success=False,
-                        latency_ms=latency_ms,
-                        error_message=f"Failed to connect to backend: {server_name}",
-                    )
+                    try:
+                        await analytics.record_tool_call(
+                            tool_name,
+                            success=False,
+                            latency_ms=latency_ms,
+                            error_message=f"Failed to connect to backend: {server_name}",
+                        )
+                    except Exception as rec_err:
+                        logger.debug(f"analytics record failed: {rec_err}")
                 logger.warning(
                     f"[execute] [{trace_id}] backend connect failed: {server_name}"
                 )
+                retry_after = 5.0
+                try:
+                    retry_after = float(
+                        manager._stats_for(server_name).breaker_retry_after() or 5.0
+                    )
+                except (TypeError, ValueError, AttributeError):
+                    retry_after = 5.0
                 envelope = _error_envelope(
                     code="backend_connect_failed",
                     title="Backend connect failed",
                     detail=f"Failed to connect to backend: {server_name}",
                     category="service_unavailable",
                     retryable=True,
-                    retry_after_seconds=5.0,
+                    retry_after_seconds=retry_after,
                     trace_id=trace_id,
                     suggestions=[
                         "Check that the backend server is configured correctly.",
@@ -1668,8 +2214,26 @@ async def execute(
     # backend client doesn't propagate a Python traceback through the MCP
     # JSON-RPC envelope. The MCP spec requires tool handlers to return a
     # structured payload, never raise unhandled.
+    async def _forward_progress(progress, total=None, message=None):
+        # Backend progress is 0..total; map into the latter half of our bar.
+        try:
+            frac = float(progress)
+            if total:
+                frac = (frac / float(total)) * 50.0
+            else:
+                frac = min(frac, 50.0)
+            await _report_progress(ctx, 45 + frac, 100, message or "calling")
+        except Exception:
+            await _report_progress(ctx, 50, 100, message or "calling")
+
+    await _report_progress(ctx, 45, 100, "calling")
     try:
-        result = await manager.execute_tool(tool_name, arguments)
+        if ctx is not None:
+            result = await manager.execute_tool(
+                tool_name, arguments, progress_callback=_forward_progress
+            )
+        else:
+            result = await manager.execute_tool(tool_name, arguments)
     except Exception as e:
         latency_ms = (time.time() - start_time) * 1000
         error_text = f"{type(e).__name__}: {e}"
@@ -1719,13 +2283,16 @@ async def execute(
     )
 
     if analytics:
-        await analytics.record_tool_call(
-            tool_name,
-            success=success,
-            latency_ms=latency_ms,
-            error_message=error_msg,
-            arguments=arguments,
-        )
+        try:
+            await analytics.record_tool_call(
+                tool_name,
+                success=success,
+                latency_ms=latency_ms,
+                error_message=error_msg,
+                arguments=arguments,
+            )
+        except Exception as rec_err:
+            logger.debug(f"analytics record failed: {rec_err}")
 
     # GW-B-003: stamp trace_id into both success and failure envelopes so the
     # user can paste it into a bug report.
@@ -1739,7 +2306,9 @@ async def execute(
             logger.info(
                 f"[execute] [{trace_id}] tool={tool_name!r} ok in {latency_ms:.1f}ms"
             )
+        await _report_progress(ctx, 100, 100, "done")
         return _augment_with_health(result)
+    await _report_progress(ctx, 100, 100, "done")
     return result
 
 
@@ -1812,6 +2381,10 @@ async def compass_status(active: bool = False) -> Dict[str, Any]:
     try:
         manager = await get_backends()
         response["backends"] = manager.get_stats()
+        if isinstance(response["backends"], dict):
+            response["last_notification_at"] = response["backends"].get(
+                "last_notification_at"
+            )
         # FEAT-03: fold active-probe results into the backends block on request.
         # Guarded independently so a probe failure never aborts the status
         # response — it degrades to "no probes" and records the error.
@@ -1939,7 +2512,18 @@ async def compass_analytics(
             suggestions=["Enable analytics_enabled in config to track usage."],
         ))
 
-    analytics = await get_analytics_instance()
+    try:
+        analytics = await get_analytics_instance()
+    except Exception as e:
+        logger.error(f"[compass_analytics] [{trace_id}] init failed: {e}")
+        return _augment_with_health(_error_envelope(
+            code="analytics_unavailable",
+            title="Analytics not initialized",
+            detail=f"{type(e).__name__}: {e}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
     if not analytics:
         return _augment_with_health(_error_envelope(
             code="analytics_unavailable",
@@ -1975,18 +2559,24 @@ async def compass_chains(
     chain_name: Optional[str] = None,
     tools: Optional[List[str]] = None,
     description: Optional[str] = None,
+    arguments: Optional[Dict[str, Any]] = None,
+    arg_map: Optional[Any] = None,
+    ctx: Optional[Context] = None,
 ) -> Dict[str, Any]:
     """
-    List and manage tool chains (workflows).
+    List, manage, and run tool chains (workflows).
 
     Tool chains are sequences of tools that commonly go together.
     They're auto-detected from usage patterns or can be manually defined.
 
     Args:
-        action: "list" to see all chains, "create" to add a new chain, "detect" to find patterns
-        chain_name: Name for new chain (required for "create")
+        action: "list", "create", "detect", or "run"
+        chain_name: Name for new chain (required for "create") or chain to run
         tools: List of tool names for new chain (required for "create")
         description: Description for new chain (optional for "create")
+        arguments: Arguments for hop 0 when action='run'
+        arg_map: Per-hop argument templates. Values may be literals or
+            $prev / $prev.result / $steps[n] JSON Pointers.
 
     Returns:
         Chain information based on action
@@ -2005,7 +2595,18 @@ async def compass_chains(
             suggestions=["Enable chain_indexing_enabled in config."],
         ))
 
-    chain_indexer = await get_chain_indexer_instance()
+    try:
+        chain_indexer = await get_chain_indexer_instance()
+    except Exception as e:
+        logger.error(f"[compass_chains] [{trace_id}] init failed: {e}")
+        return _augment_with_health(_error_envelope(
+            code="chain_indexer_unavailable",
+            title="Chain indexer not initialized",
+            detail=f"{type(e).__name__}: {e}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
     if not chain_indexer:
         return _augment_with_health(_error_envelope(
             code="chain_indexer_unavailable",
@@ -2073,7 +2674,9 @@ async def compass_chains(
                 category="service_unavailable",
                 retryable=True,
                 trace_id=trace_id,
-                suggestions=["Start Ollama: ollama serve", "Retry once Ollama is reachable."],
+                suggestions=_embedding_recovery_suggestions(
+                    config, include_retry=True
+                ),
             ))
 
         return _augment_with_health({
@@ -2086,7 +2689,11 @@ async def compass_chains(
         })
 
     elif action == "detect":
-        analytics = await get_analytics_instance()
+        try:
+            analytics = await get_analytics_instance()
+        except Exception as e:
+            logger.error(f"[compass_chains] [{trace_id}] analytics unavailable: {e}")
+            analytics = None
         if analytics:
             # GW-COMPOSED-002 + IDX-COMPOSED-003: detect_chains() raw-INSERTs
             # promoted chains into tool_chains but does NOT embed them into the
@@ -2120,7 +2727,9 @@ async def compass_chains(
                     category="service_unavailable",
                     retryable=True,
                     trace_id=trace_id,
-                    suggestions=["Start Ollama: ollama serve", "Retry once Ollama is reachable."],
+                    suggestions=_embedding_recovery_suggestions(
+                        config, include_retry=True
+                    ),
                 ))
 
             return _augment_with_health({
@@ -2143,6 +2752,97 @@ async def compass_chains(
             trace_id=trace_id,
         ))
 
+    elif action == "run":
+        if not chain_name:
+            return _augment_with_health(_error_envelope(
+                code="invalid_argument",
+                title="Missing required arguments",
+                detail="chain_name is required for run.",
+                category="validation",
+                retryable=False,
+                trace_id=trace_id,
+                suggestions=[
+                    "compass_chains(action='run', chain_name='my_workflow', "
+                    "arguments={...})",
+                ],
+            ))
+        chain = await chain_indexer.get_chain(chain_name)
+        if chain is None:
+            return _augment_with_health(_error_envelope(
+                code="chain_not_found",
+                title="Chain not found",
+                detail=f"No chain named {chain_name!r}.",
+                category="not_found",
+                retryable=False,
+                trace_id=trace_id,
+                suggestions=["Use compass_chains(action='list') to see workflows."],
+            ))
+        hop_tools = list(chain.tools or [])
+        steps: List[Dict[str, Any]] = []
+        prev: Any = None
+        overall_success = True
+        await _report_progress(ctx, 5, 100, f"running {chain_name}")
+        for i, hop_tool in enumerate(hop_tools):
+            hop_args = _hop_arguments(i, arguments, arg_map, prev, steps)
+            hop_start = time.time()
+            await _report_progress(
+                ctx,
+                10 + (80 * i / max(len(hop_tools), 1)),
+                100,
+                f"hop {i + 1}/{len(hop_tools)}: {hop_tool}",
+            )
+            try:
+                hop_result = await execute(
+                    hop_tool, hop_args, dry_run=False, ctx=ctx
+                )
+            except Exception as hop_err:
+                hop_result = _error_envelope(
+                    code="execute_unhandled_exception",
+                    title="Chain hop failed",
+                    detail=f"{type(hop_err).__name__}: {hop_err}",
+                    category="backend_error",
+                    retryable=False,
+                    trace_id=trace_id,
+                )
+                hop_result["success"] = False
+            hop_ms = (time.time() - hop_start) * 1000
+            hop_ok = bool(isinstance(hop_result, dict) and hop_result.get("success"))
+            step = {
+                "tool": hop_tool,
+                "success": hop_ok,
+                "latency_ms": round(hop_ms, 1),
+            }
+            if hop_ok:
+                step["result"] = hop_result.get("result") if isinstance(hop_result, dict) else hop_result
+                if isinstance(hop_result, dict) and hop_result.get("content"):
+                    step["content"] = hop_result["content"]
+            else:
+                step["error"] = (
+                    hop_result.get("error") if isinstance(hop_result, dict) else str(hop_result)
+                )
+                overall_success = False
+            steps.append(step)
+            prev = hop_result
+            if not hop_ok:
+                break
+        if overall_success:
+            try:
+                await chain_indexer.record_chain_use(chain_name)
+            except Exception as rec_err:
+                logger.debug(f"record_chain_use failed: {rec_err}")
+        await _report_progress(ctx, 100, 100, "done")
+        return _augment_with_health({
+            "success": overall_success,
+            "chain": chain_name,
+            "steps": steps,
+            "trace_id": trace_id,
+            "hint": (
+                f"Chain '{chain_name}' completed."
+                if overall_success
+                else f"Chain '{chain_name}' stopped at hop {len(steps)}."
+            ),
+        })
+
     else:
         return _augment_with_health(_error_envelope(
             code="invalid_action",
@@ -2151,12 +2851,12 @@ async def compass_chains(
             category="validation",
             retryable=False,
             trace_id=trace_id,
-            valid_actions=["list", "create", "detect"],
+            valid_actions=["list", "create", "detect", "run"],
         ))
 
 
 @mcp.tool()
-async def compass_sync(force: bool = False) -> Dict[str, Any]:
+async def compass_sync(force: bool = False, ctx: Optional[Context] = None) -> Dict[str, Any]:
     """
     Check for backend changes and sync the index.
 
@@ -2183,7 +2883,18 @@ async def compass_sync(force: bool = False) -> Dict[str, Any]:
             suggestions=["Enable auto_sync in config for automatic synchronization."],
         ))
 
-    sync_manager = await get_sync_manager_instance()
+    try:
+        sync_manager = await get_sync_manager_instance()
+    except Exception as e:
+        logger.error(f"[compass_sync] [{trace_id}] init failed: {e}")
+        return _augment_with_health(_error_envelope(
+            code="sync_manager_unavailable",
+            title="Sync manager not initialized",
+            detail=f"{type(e).__name__}: {e}",
+            category="service_unavailable",
+            retryable=True,
+            trace_id=trace_id,
+        ))
     if not sync_manager:
         return _augment_with_health(_error_envelope(
             code="sync_manager_unavailable",
@@ -2194,16 +2905,113 @@ async def compass_sync(force: bool = False) -> Dict[str, Any]:
             trace_id=trace_id,
         ))
 
+    await _report_progress(ctx, 10, 100, "sync starting")
     if force:
+        await _report_progress(ctx, 40, 100, "full sync")
         result = await sync_manager.full_sync()
-        return _augment_with_health({"action": "full_sync", "result": result})
+        await _report_progress(ctx, 100, 100, "sync done")
+        return _augment_with_health({"action": "full_sync", "result": result, "trace_id": trace_id})
     else:
+        await _report_progress(ctx, 40, 100, "sync if needed")
         results = await sync_manager.sync_if_needed()
+        await _report_progress(ctx, 100, 100, "sync done")
         return _augment_with_health({
             "action": "sync_if_needed",
             "backends": results,
+            "trace_id": trace_id,
             "hint": "Use force=True to rebuild the entire index",
         })
+
+
+@mcp.tool()
+async def compass_resources(
+    server: Optional[str] = None,
+    uri: Optional[str] = None,
+    ctx: Optional[Context] = None,
+) -> Dict[str, Any]:
+    """
+    List or read MCP resources from live backends (no HNSW index).
+
+    Args:
+        server: Optional backend name to list. Omit to list every connected backend.
+        uri: Qualified ``server:uri`` (or a raw uri when ``server`` is set) to read.
+    """
+    trace_id = uuid.uuid4().hex[:8]
+    manager = await get_backends()
+    await _report_progress(ctx, 20, 100, "resources")
+    if uri:
+        qualified = uri if ":" in uri and server is None else (
+            f"{server}:{uri}" if server and not uri.startswith(f"{server}:") else uri
+        )
+        result = await manager.read_resource(qualified)
+        if isinstance(result, dict):
+            result.setdefault("trace_id", trace_id)
+        await _report_progress(ctx, 100, 100, "done")
+        return _augment_with_health(result)
+    result = await manager.list_resources(server)
+    result["trace_id"] = trace_id
+    result["hint"] = "Use compass_resources(uri='server:uri') or read_resource(uri) to fetch contents."
+    await _report_progress(ctx, 100, 100, "done")
+    return _augment_with_health(result)
+
+
+@mcp.tool()
+async def compass_prompts(
+    server: Optional[str] = None,
+    name: Optional[str] = None,
+    arguments: Optional[Dict[str, Any]] = None,
+    ctx: Optional[Context] = None,
+) -> Dict[str, Any]:
+    """
+    List or get MCP prompts from live backends (no HNSW index).
+
+    Args:
+        server: Optional backend name to list.
+        name: Qualified ``server:prompt`` (or a raw name when ``server`` is set) to get.
+        arguments: Prompt arguments for get.
+    """
+    trace_id = uuid.uuid4().hex[:8]
+    manager = await get_backends()
+    await _report_progress(ctx, 20, 100, "prompts")
+    if name:
+        qualified = name if ":" in name and server is None else (
+            f"{server}:{name}" if server and not name.startswith(f"{server}:") else name
+        )
+        result = await manager.get_prompt(qualified, arguments)
+        if isinstance(result, dict):
+            result.setdefault("trace_id", trace_id)
+        await _report_progress(ctx, 100, 100, "done")
+        return _augment_with_health(result)
+    result = await manager.list_prompts(server)
+    result["trace_id"] = trace_id
+    result["hint"] = "Use compass_prompts(name='server:prompt') to fill a template."
+    await _report_progress(ctx, 100, 100, "done")
+    return _augment_with_health(result)
+
+
+@mcp.tool()
+async def read_resource(uri: str, ctx: Optional[Context] = None) -> Dict[str, Any]:
+    """Read an MCP resource qualified as server:uri (F-e126a298)."""
+    trace_id = uuid.uuid4().hex[:8]
+    manager = await get_backends()
+    await _report_progress(ctx, 30, 100, f"reading {uri}")
+    result = await manager.read_resource(uri)
+    if isinstance(result, dict):
+        result.setdefault("trace_id", trace_id)
+        if result.get("success") is False and not result.get("error_envelope"):
+            envelope = _error_envelope(
+                code="resource_not_found",
+                title="Resource read failed",
+                detail=str(result.get("error") or "read failed"),
+                category="not_found",
+                retryable=False,
+                trace_id=trace_id,
+            )
+            envelope.update({k: v for k, v in result.items() if k not in envelope})
+            await _report_progress(ctx, 100, 100, "done")
+            return _augment_with_health(envelope)
+    await _report_progress(ctx, 100, 100, "done")
+    return _augment_with_health(result if isinstance(result, dict) else {"result": result, "trace_id": trace_id})
 
 
 @mcp.tool()
@@ -2468,15 +3276,32 @@ async def sync_from_backends() -> bool:
 
     # Step 4: Build index
     print("\n[4/4] Building HNSW search index...")
-    index = CompassIndex()
+    index = CompassIndex(embedder=_embedder_from_config(config))
 
-    # Check Ollama first
-    print("      Checking Ollama embeddings service...", end=" ", flush=True)
+    provider = _embedding_provider_name(config)
+    endpoint = _embedding_endpoint_display(config)
+    print(
+        f"      Checking {provider} embeddings service at {endpoint}...",
+        end=" ",
+        flush=True,
+    )
     if not await index.embedder.health_check():
         print("FAILED")
-        print("\n❌ Ollama not available. Please start Ollama and pull the embedding model:")
-        print("   1. ollama serve")
-        print("   2. ollama pull nomic-embed-text")
+        if _is_ollama_embedding_provider(config):
+            model = config.embedding_model or "nomic-embed-text"
+            print(
+                "\n❌ Ollama not available. Please start Ollama and pull "
+                "the embedding model:"
+            )
+            print("   1. ollama serve")
+            print(f"   2. ollama pull {model}")
+        else:
+            print(
+                f"\n❌ Embedding service ({provider}) not available at "
+                f"{endpoint}."
+            )
+            print("   Check embedding_base_url, embedding_model, and")
+            print("   embedding_api_key / TOOL_COMPASS_EMBEDDING_API_KEY.")
         await manager.disconnect_all()
         return False
     print("OK")
@@ -2544,11 +3369,22 @@ async def run_tests():
     except RuntimeError as e:
         import sys
 
-        print(
-            "❌ No index yet — run 'python gateway.py --sync' first, "
-            "ensure 'ollama serve' is running.",
-            file=sys.stderr,
-        )
+        try:
+            cfg = get_config()
+        except Exception:
+            cfg = None
+        if _is_ollama_embedding_provider(cfg):
+            hint = (
+                "❌ No index yet — run 'python gateway.py --sync' first, "
+                "ensure 'ollama serve' is running."
+            )
+        else:
+            hint = (
+                "❌ No index yet — run 'python gateway.py --sync' first, "
+                "check embedding_base_url, embedding_model, and "
+                "TOOL_COMPASS_EMBEDDING_API_KEY."
+            )
+        print(hint, file=sys.stderr)
         print(f"   ({e})", file=sys.stderr)
         sys.exit(1)
     stats = index.get_stats()
@@ -2625,9 +3461,15 @@ def show_config():
     print("\n--- Settings ---")
     print(f"Progressive disclosure: {config.progressive_disclosure}")
     print(f"Auto sync: {config.auto_sync}")
+    print(f"Embedding provider: {config.embedding_provider}")
     print(f"Embedding model: {config.embedding_model}")
     # CFG-A-001 sibling: scrub credentials embedded in the URL before printing.
-    print(f"Ollama URL: {redact_url_credentials(config.ollama_url)}")
+    print(
+        "Embedding base URL: "
+        f"{_embedding_endpoint_display(config)}"
+    )
+    if _is_ollama_embedding_provider(config):
+        print(f"Ollama URL: {redact_url_credentials(config.ollama_url)}")
     print(f"Default top_k: {config.default_top_k}")
     print(f"Min confidence: {config.min_confidence}")
 
@@ -2859,6 +3701,8 @@ def build_http_app():
         lines.append("# TYPE tool_compass_backend_up gauge")
         lines.append("# HELP tool_compass_backend_call_total Backend tool-call counter, labelled by status.")
         lines.append("# TYPE tool_compass_backend_call_total counter")
+        lines.append("# HELP tool_compass_backend_breaker Per-backend circuit breaker state (1 = current).")
+        lines.append("# TYPE tool_compass_backend_breaker gauge")
         try:
             mgr = _backend_manager
             if mgr is not None:
@@ -2880,6 +3724,24 @@ def build_http_app():
                     lines.append(
                         f'tool_compass_backend_call_total{{name="{label}",status="error"}} {_int_fmt(failed)}'
                     )
+                    breaker_state = str(entry.get("breaker_state") or "closed")
+                    lines.append(
+                        f'tool_compass_backend_breaker{{name="{label}",state="{_escape_label(breaker_state)}"}} 1'
+                    )
+                    for trans_key, trans_count in (
+                        (entry.get("breaker_transitions") or {})
+                        if isinstance(entry.get("breaker_transitions"), dict)
+                        else {}
+                    ).items():
+                        try:
+                            from_s, to_s = str(trans_key).split("->", 1)
+                        except ValueError:
+                            continue
+                        lines.append(
+                            f'tool_compass_circuit_breaker_transitions_total'
+                            f'{{from="{_escape_label(from_s)}",to="{_escape_label(to_s)}",'
+                            f'breaker="backend:{label}"}} {_int_fmt(trans_count)}'
+                        )
         except Exception as e:
             logger.debug(f"metrics: backend stats failed: {e}")
 
@@ -3179,9 +4041,6 @@ def _run_http(port: int) -> None:
     import os
     from mcp.server.transport_security import TransportSecuritySettings
 
-    # Build + register the ops routes (idempotent) before the server starts.
-    app = build_http_app()
-
     host = os.environ.get("HOST", "127.0.0.1")
     if host not in ("127.0.0.1", "localhost", "::1"):
         logger.warning(
@@ -3192,16 +4051,33 @@ def _run_http(port: int) -> None:
 
     mcp.settings.host = host
     mcp.settings.port = port
-    # Allow Fly.io and Smithery proxy hosts (0.0.0.0 intentionally omitted — never a valid Host header)
+
+    # Wildcard bind addresses are never valid Host headers; skip them so
+    # DNS-rebinding protection is not bypassed. Known public proxy names
+    # stay on the list because Fly/Smithery set HOST to a wildcard bind and
+    # send the public hostname as Host. The actual HOST is included when it
+    # is a usable hostname.
+    _not_host_headers = frozenset({"0.0.0.0", "::", "*", ""})
+    allowed = [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "tool-compass-gateway.fly.dev",
+        "tool-compass-gateway--mcp-tool-shop.run.tools",
+    ]
+    if host not in _not_host_headers and host not in allowed:
+        allowed.append(host)
+
+    # FastMCP snapshots TransportSecuritySettings at app construction.
+    # Assign host/port/transport_security BEFORE build_http_app() so the
+    # auth path (uvicorn serving the already-built app) sees the allowlist.
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "tool-compass-gateway.fly.dev",
-            "tool-compass-gateway--mcp-tool-shop.run.tools",
-            "localhost",
-            "127.0.0.1",
-        ],
+        allowed_hosts=allowed,
     )
+
+    # Build + register the ops routes (idempotent) after settings are live.
+    app = build_http_app()
 
     # OPS-1: resolve the auth token (config field + env override already
     # applied by apply_env_overrides). Only when a non-empty token is present
@@ -3243,8 +4119,11 @@ Examples:
   python gateway.py --config     Show current configuration
 
 Prerequisites:
-  - Ollama must be running: ollama serve
-  - Embedding model required: ollama pull nomic-embed-text
+  Configure embedding_provider (ollama | openai | openai-compatible) and
+  embedding_base_url. For ollama (default): `ollama serve` then
+  `ollama pull <embedding_model>`. For openai / openai-compatible: confirm
+  embedding_base_url, embedding_model, and embedding_api_key
+  (or TOOL_COMPASS_EMBEDDING_API_KEY).
 
 Workflow:
   1. First run --sync to build the tool index from backend servers
@@ -3261,7 +4140,7 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
     parser.add_argument("--config", action="store_true",
                         help="Display current configuration including backends and settings")
     parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Enable verbose output with detailed progress")
+                        help="DEBUG logs (backend stderr, retries)")
 
     args = parser.parse_args()
 
@@ -3281,7 +4160,8 @@ For more info, see: https://github.com/mcp-tool-shop-org/tool-compass
             import sys
 
             print(
-                "Index NOT rebuilt: 0 backends connected (or no tools / Ollama down).",
+                "Index NOT rebuilt: 0 backends connected "
+                "(or no tools / embedding service down).",
                 file=sys.stderr,
             )
             sys.exit(1)

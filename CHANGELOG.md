@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.1] - 2026-09-09
+
+Dogfood swarm `swarm-1788918264-9859` — health Stages A–D, a 23-item
+feature pass (1 CRITICAL + 22 HIGH), then Phase 9 verify. No breaking
+API changes. Coverage floor held at 77% while the new surfaces are
+covered back to the 80% bar.
+
+### Added
+- **Chain run** — `compass_chains(action="run")` executes hops in order.
+- **Execute schema validation + dry-run** — required/type/enum check before connect.
+- **MCP resources and prompts** — `compass_resources` / `compass_prompts` list+read (live backends, not HNSW).
+- **Backend circuit breaker** — dead backends stop paying connect-timeout × retries.
+- **tools/list_changed** — catalog refresh on MCP notifications, not poll-only.
+- **Pluggable vector store** — hnswlib default, numpy fallback if hnswlib is missing.
+- **Batched embed HTTP** — one array POST instead of N single-text calls.
+- **Offline embed providers** — `hash` and `local` (sentence-transformers if already installed).
+- **`compact_index()`** — rebuild HNSW from SQLite without re-embedding.
+- **Gradio execute playground** — Search → Describe → Execute in the UI.
+- **`tool-compass init --client`** — Cursor, VS Code, Claude Code, Claude Desktop snippets.
+- **Atomic npx path** — npm publish waits for GitHub Release binaries + checksums.
+- **Distinct GHCR tags** — `:gateway` vs `:ui` image stages.
+- **Gateway lockup** — Director-authored arch mark (replaces the cartoon compass in-tree).
+
+### Changed
+- Provider-aware recovery copy (no more "run ollama serve" for OpenAI-compatible embedders).
+- CLI `--json` exits 1 on error envelopes.
+- Unknown backend type / embedding_provider fail closed.
+- Docker production HEALTHCHECK fails when the index cannot load.
+- `npx @mcptoolshop/tool-compass --help` / `--version` print locally without downloading a binary.
+- Python badge / `requires-python` remain `>=3.12,<3.15`.
+
+### Fixed
+- Fail-open auth on corrupt config, empty-backend hash, allow/deny incremental rebuild, timeout cap, process leak on cancel, torn HNSW, loop-bound asyncio locks, startup-sync latch on first failure.
+- Gradio UI starts without a baked HNSW index (Docker production smoke): chain indexer degrades instead of crashing Blocks construction.
+- README lockup is the Director 2000×800 banner at 800px (not the 400px square-logo default, not a square-padded crop).
+
 ## [2.5.0] - 2026-07-04
 
 Dogfood swarm v4 — a composed re-audit health pass (Stage A bug/security →

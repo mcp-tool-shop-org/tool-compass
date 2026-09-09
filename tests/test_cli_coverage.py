@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -256,11 +257,33 @@ class TestPrintHelpers:
 class TestBuildParser:
     """Smoke tests for the argparse tree shape."""
 
-    def test_parser_has_version(self):
+    def test_parser_has_version(self, capsys):
         parser = cli._build_parser()
-        # --version action raises SystemExit on parse.
-        with pytest.raises(SystemExit):
+        # --version action raises SystemExit(0) and prints the version.
+        # Matching any SystemExit also passes for an unregistered flag
+        # (argparse exits 2); pin the code and the stdout banner.
+        with pytest.raises(SystemExit) as exc:
             parser.parse_args(["--version"])
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        from _version import __version__
+
+        assert __version__ in captured.out
+        assert "tool-compass" in captured.out
+
+    def test_cli_version_subprocess(self):
+        """`python cli.py --version` must exit 0 and print the version string."""
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "cli.py"), "--version"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        assert result.returncode == 0, result.stderr
+        from _version import __version__
+
+        assert __version__ in result.stdout
+        assert "tool-compass" in result.stdout
 
     def test_parser_has_no_color(self):
         parser = cli._build_parser()
@@ -395,10 +418,12 @@ class TestEnvelopeHelpers:
         ) is True
 
     def test_is_error_envelope_no_code(self):
-        assert cli._is_error_envelope({"error": {"title": "missing code"}}) is False
+        # F-0aa8e487: a dict error without `code` is still an error envelope.
+        assert cli._is_error_envelope({"error": {"title": "missing code"}}) is True
 
     def test_is_error_envelope_non_dict_error(self):
-        assert cli._is_error_envelope({"error": "string not dict"}) is False
+        # F-0aa8e487: gateway may return error as a string.
+        assert cli._is_error_envelope({"error": "string not dict"}) is True
 
     def test_is_error_envelope_non_dict_payload(self):
         assert cli._is_error_envelope("not even a dict") is False
@@ -1249,6 +1274,27 @@ class TestCmdSearchExtended:
         # A keyword/degraded notice is emitted (adjacent to results).
         assert "keyword" in (captured.out + captured.err).lower()
 
+    @pytest.mark.parametrize("provider", ["ollama", "openai", "openai-compatible"])
+    def test_search_fallback_copy_follows_embedding_provider(
+        self, monkeypatch, capsys, provider
+    ):
+        idx = _stub_index_with_db(
+            [("bridge:read_file", "read a file", "file", "bridge")],
+            search_raises=ConnectionError("embed endpoint refused"),
+        )
+        monkeypatch.setattr(cli, "_load_index", lambda: idx)
+        monkeypatch.setattr(cli, "_configured_embedding_provider", lambda: provider)
+        rc = cli.main(["search", "read"])
+        captured = capsys.readouterr()
+        blob = (captured.out + captured.err).lower()
+        assert rc == 0
+        assert "bridge:read_file" in captured.out
+        if provider == "ollama":
+            assert "ollama" in blob or "keyword" in blob
+        else:
+            assert "ollama serve" not in blob
+            assert "ollama pull nomic-embed-text" not in blob
+
     def test_search_os_error_falls_back_to_keyword(self, monkeypatch, capsys):
         """cli-ui-001: OSError from the embedder also degrades to keyword
         results + exit 0 (was exit 1 with a dead hint before the fix)."""
@@ -1668,6 +1714,7 @@ class TestCmdDoctorExtended:
             "config_path": "x",
             "backends": [],
             "ollama_url": "http://localhost:11434",
+            "embedding_provider": "ollama",
             "ollama_reachable": False,
             "index_exists": False,
         }
@@ -1680,6 +1727,37 @@ class TestCmdDoctorExtended:
         # Warnings for ollama-unreachable + index-missing
         assert "unreachable" in out.lower()
         assert "missing" in out.lower()
+        assert "ollama serve" in out.lower()
+
+    @pytest.mark.parametrize(
+        "provider", ["ollama", "openai", "openai-compatible"]
+    )
+    def test_doctor_text_recovery_follows_embedding_provider(
+        self, monkeypatch, capsys, provider
+    ):
+        payload = {
+            "version": "2.3.0",
+            "config_path": "x",
+            "backends": {},
+            "ollama_url": "http://localhost:11434",
+            "embedding_provider": provider,
+            "embedding_base_url": "http://127.0.0.1:1234/v1",
+            "ollama_reachable": False if provider == "ollama" else None,
+            "embedding_reachable": False,
+            "index_exists": True,
+        }
+        import config
+
+        monkeypatch.setattr(config, "doctor", lambda: payload)
+        rc = cli.main(["doctor", "--text"])
+        out = capsys.readouterr().out.lower()
+        assert rc == 0
+        if provider == "ollama":
+            assert "ollama serve" in out
+        else:
+            assert "ollama serve" not in out
+            assert "ollama pull nomic-embed-text" not in out
+            assert provider in out or "embedding" in out or "1234" in out
 
     def test_doctor_text_backends_unknown_shape(self, monkeypatch, capsys):
         """backend_count falls back to 0 when backends is neither list/dict."""

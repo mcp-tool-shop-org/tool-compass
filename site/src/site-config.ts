@@ -9,7 +9,7 @@ export const config: SiteConfig = {
   footerText: 'MIT Licensed — built by <a href="https://github.com/mcp-tool-shop-org" style="color:var(--color-muted);text-decoration:underline">mcp-tool-shop-org</a>',
 
   hero: {
-    badge: 'MCP Gateway — v2.4',
+    badge: 'MCP Gateway — v2.5.1',
     headline: 'Find tools by',
     headlineAccent: 'intent, not memory.',
     description: 'Semantic search for MCP tools. 95% fewer tokens, ~15ms latency, graceful Ollama-offline fallback, trace IDs you can paste into a bug report.',

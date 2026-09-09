@@ -23,9 +23,10 @@ If/when this module is reactivated:
 import asyncio
 import logging
 import os
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
+from datetime import datetime
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
@@ -71,6 +72,10 @@ class BackendConnection:
         self._exit_stack: Optional[AsyncExitStack] = None
         self._tools: List[Tool] = []
         self._connected = False
+        self._last_notification_at: Optional[datetime] = None
+        self._on_catalog_changed: Optional[Callable[[str], Any]] = None
+        self._resources: List[Dict[str, Any]] = []
+        self._prompts: List[Dict[str, Any]] = []
 
     async def connect(self, timeout: Optional[float] = None) -> bool:
         """
@@ -124,7 +129,11 @@ class BackendConnection:
                 read_stream, write_stream = stdio_transport
 
                 self.session = await self._exit_stack.enter_async_context(
-                    ClientSession(read_stream, write_stream)
+                    ClientSession(
+                        read_stream,
+                        write_stream,
+                        message_handler=self._on_session_message,
+                    )
                 )
 
                 # Initialize the session
@@ -147,6 +156,16 @@ class BackendConnection:
             logger.error(f"Failed to connect to {self.name}: {e}")
             await self.disconnect()
             return False
+        except BaseException:
+            # CancelledError is a BaseException on 3.9+; a cancel during
+            # enter_async_context / initialize must still aclose the stack.
+            try:
+                await self.disconnect()
+            except Exception:
+                logger.debug(
+                    f"Disconnect after cancelled connect to {self.name} failed"
+                )
+            raise
 
     async def disconnect(self):
         """Close the connection."""
@@ -160,17 +179,134 @@ class BackendConnection:
         self._connected = False
         self._tools = []
 
+    async def _on_session_message(self, message: Any) -> None:
+        """Honor tools/list_changed instead of dropping no-id notifications."""
+        try:
+            root = getattr(message, "root", message)
+            inner = getattr(root, "root", None)
+            method = getattr(root, "method", None) or getattr(inner, "method", None)
+            if not method:
+                return
+            self._last_notification_at = datetime.now()
+            method_s = str(method)
+            if method_s.endswith("tools/list_changed"):
+                await self._refresh_tools()
+                cb = self._on_catalog_changed
+                if cb is not None:
+                    maybe = cb(self.name)
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+            elif method_s.endswith("prompts/list_changed"):
+                await self.list_prompts()
+            elif method_s.endswith("resources/list_changed"):
+                await self.list_resources()
+        except Exception as e:
+            logger.debug(f"SDK session message handler for {self.name} failed: {e}")
+
     async def _refresh_tools(self):
-        """Refresh the cached tool list."""
+        """Refresh the cached tool list (follow nextCursor)."""
         if not self.session:
             return
 
         try:
-            result = await self.session.list_tools()
-            self._tools = result.tools
+            tools: List[Tool] = []
+            cursor = None
+            for _ in range(32):
+                result = (
+                    await self.session.list_tools(cursor=cursor)
+                    if cursor
+                    else await self.session.list_tools()
+                )
+                tools.extend(result.tools)
+                cursor = getattr(result, "nextCursor", None)
+                if not isinstance(cursor, str) or not cursor:
+                    break
+            self._tools = tools
         except Exception as e:
             logger.error(f"Failed to list tools from {self.name}: {e}")
             self._tools = []
+
+    async def list_resources(self) -> List[Dict[str, Any]]:
+        """Live-backend resources/list (F-e126a298)."""
+        if not self.session or not self._connected:
+            raise RuntimeError(f"Not connected to backend: {self.name}")
+        items: List[Dict[str, Any]] = []
+        cursor = None
+        for _ in range(32):
+            result = (
+                await self.session.list_resources(cursor=cursor)
+                if cursor
+                else await self.session.list_resources()
+            )
+            for res in result.resources:
+                if hasattr(res, "model_dump"):
+                    items.append(res.model_dump(mode="json"))
+                else:
+                    items.append({"uri": str(getattr(res, "uri", "")), "name": getattr(res, "name", None)})
+            cursor = getattr(result, "nextCursor", None)
+            if not isinstance(cursor, str) or not cursor:
+                break
+        self._resources = items
+        return items
+
+    async def read_resource(self, uri: str) -> Dict[str, Any]:
+        """Live-backend resources/read (F-e126a298)."""
+        if not self.session or not self._connected:
+            raise RuntimeError(f"Not connected to backend: {self.name}")
+        from pydantic import AnyUrl
+        result = await self.session.read_resource(AnyUrl(uri))
+        contents = []
+        for item in result.contents or []:
+            if hasattr(item, "model_dump"):
+                contents.append(item.model_dump(mode="json"))
+            else:
+                contents.append({"uri": uri, "text": getattr(item, "text", None)})
+        return {"success": True, "uri": uri, "contents": contents, "backend": self.name}
+
+    async def list_prompts(self) -> List[Dict[str, Any]]:
+        """Live-backend prompts/list (F-e126a298)."""
+        if not self.session or not self._connected:
+            raise RuntimeError(f"Not connected to backend: {self.name}")
+        items: List[Dict[str, Any]] = []
+        cursor = None
+        for _ in range(32):
+            result = (
+                await self.session.list_prompts(cursor=cursor)
+                if cursor
+                else await self.session.list_prompts()
+            )
+            for prompt in result.prompts:
+                if hasattr(prompt, "model_dump"):
+                    items.append(prompt.model_dump(mode="json"))
+                else:
+                    items.append({"name": getattr(prompt, "name", "")})
+            cursor = getattr(result, "nextCursor", None)
+            if not isinstance(cursor, str) or not cursor:
+                break
+        self._prompts = items
+        return items
+
+    async def get_prompt(
+        self, name: str, arguments: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Live-backend prompts/get (F-e126a298)."""
+        if not self.session or not self._connected:
+            raise RuntimeError(f"Not connected to backend: {self.name}")
+        str_args = {k: str(v) for k, v in arguments.items()} if arguments else None
+        result = await self.session.get_prompt(name, str_args)
+        messages = []
+        for msg in result.messages or []:
+            if hasattr(msg, "model_dump"):
+                messages.append(msg.model_dump(mode="json"))
+            else:
+                messages.append(msg)
+        return {
+            "success": True,
+            "name": name,
+            "description": getattr(result, "description", None),
+            "messages": messages,
+            "backend": self.name,
+        }
 
     def get_tools(self) -> List[ToolInfo]:
         """Get normalized tool info list."""
@@ -190,13 +326,18 @@ class BackendConnection:
         return tools
 
     async def call_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
+        self,
+        tool_name: str,
+        arguments: Dict[str, Any],
+        progress_callback: Optional[Any] = None,
     ) -> CallToolResult:
-        """Call a tool on this backend."""
+        """Call a tool on this backend (forwards SDK progress if provided)."""
         if not self.session or not self._connected:
             raise RuntimeError(f"Not connected to backend: {self.name}")
 
-        return await self.session.call_tool(tool_name, arguments)
+        return await self.session.call_tool(
+            tool_name, arguments, progress_callback=progress_callback
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -213,6 +354,13 @@ class BackendManager:
         self.config = config or load_config()
         self._backends: Dict[str, BackendConnection] = {}
         self._tool_index: Dict[str, str] = {}  # qualified_name -> server_name
+        self._lock: Optional[asyncio.Lock] = None
+        self._connecting: Dict[str, "asyncio.Future[bool]"] = {}
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def connect_all(self, timeout: Optional[float] = None) -> Dict[str, bool]:
         """
@@ -266,35 +414,102 @@ class BackendManager:
         """
         Connect to a specific backend.
 
+        Single-flight per backend (sibling of F-47ef65da): waiters await the
+        in-flight connect instead of spawning a sibling session. On swap, a
+        different live occupant wins and the extra is disconnected.
+
         Args:
             name: Backend name to connect to.
             timeout: Connection timeout in seconds. Defaults to CONNECTION_TIMEOUT.
         """
-        if name in self._backends and self._backends[name].is_connected:
-            return True
+        lock = self._ensure_lock()
+        waiter: Optional["asyncio.Future[bool]"] = None
+        slot: Optional["asyncio.Future[bool]"] = None
+        backend = None
+        reject = False
 
-        backend = self.config.backends.get(name)
-        if not backend:
-            logger.error(f"Unknown backend: {name}")
-            return False
+        async with lock:
+            if name in self._backends and self._backends[name].is_connected:
+                return True
+            inflight = self._connecting.get(name)
+            if inflight is not None and not inflight.done():
+                waiter = inflight
+            else:
+                slot = asyncio.get_running_loop().create_future()
+                self._connecting[name] = slot
+                backend = self.config.backends.get(name)
+                if not backend or not isinstance(backend, StdioBackend):
+                    reject = True
 
-        if isinstance(backend, StdioBackend):
+        if waiter is not None:
+            return await waiter
+
+        extra = None
+        result = False
+        try:
+            if reject:
+                if not backend:
+                    logger.error(f"Unknown backend: {name}")
+                else:
+                    logger.error(
+                        f"Unsupported backend type for {name}: {type(backend)}"
+                    )
+                return False
+
             conn = BackendConnection(name, backend)
             success = await conn.connect(timeout=timeout)
-            if success:
-                self._backends[name] = conn
-                for tool in conn.get_tools():
-                    self._tool_index[tool.qualified_name] = name
-            return success
+            if not success:
+                return False
 
-        return False
+            async with lock:
+                existing = self._backends.get(name)
+                if (
+                    existing is not None
+                    and existing is not conn
+                    and existing.is_connected
+                ):
+                    extra = conn
+                    result = True
+                else:
+                    if existing is not None and existing is not conn:
+                        extra = existing
+                    self._backends[name] = conn
+                    for tool in conn.get_tools():
+                        self._tool_index[tool.qualified_name] = name
+                    result = True
+            return result
+        except BaseException:
+            result = False
+            raise
+        finally:
+            try:
+                if extra is not None:
+                    try:
+                        await extra.disconnect()
+                    except Exception as e:
+                        logger.debug(
+                            f"Extra-connection disconnect for {name}: {e}"
+                        )
+            finally:
+                if slot is not None and not slot.done():
+                    slot.set_result(result)
+                if self._connecting.get(name) is slot:
+                    self._connecting.pop(name, None)
 
     async def disconnect_all(self):
         """Disconnect from all backends."""
-        for conn in self._backends.values():
+        lock = self._ensure_lock()
+        async with lock:
+            conns = list(self._backends.values())
+            self._backends.clear()
+            self._tool_index.clear()
+            connecting = list(self._connecting.values())
+            self._connecting.clear()
+        for fut in connecting:
+            if not fut.done():
+                fut.set_result(False)
+        for conn in conns:
             await conn.disconnect()
-        self._backends.clear()
-        self._tool_index.clear()
 
     def get_all_tools(self) -> List[ToolInfo]:
         """Get all tools from all connected backends."""

@@ -4,13 +4,15 @@
 
 <div align="center">
 
-<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="800"></p>
 
-**Navegador semântico para ferramentas MCP – Encontre a ferramenta certa com base na intenção, não na memória.**
+**Navegador semântico para ferramentas MCP – Encontre a ferramenta certa por intenção, não por memória**
 
 <a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
-<img src="https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.10+">
+<img src="https://img.shields.io/badge/python-3.12%2B-blue?style=flat-square&logo=python&logoColor=white" alt="Python 3.12+">
+<a href="https://pypi.org/project/tool-compass/"><img src="https://img.shields.io/pypi/v/tool-compass?style=flat-square" alt="PyPI"></a>
+<a href="https://www.npmjs.com/package/@mcptoolshop/tool-compass"><img src="https://img.shields.io/npm/v/@mcptoolshop/tool-compass?style=flat-square" alt="npm"></a>
 <a href="LICENSE"><img src="https://img.shields.io/github/license/mcp-tool-shop-org/tool-compass?style=flat-square" alt="License"></a>
 <img src="https://img.shields.io/badge/docker-ready-blue?style=flat-square&logo=docker&logoColor=white" alt="Docker">
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
@@ -43,7 +45,7 @@ O Tool Compass usa **busca semântica** para encontrar ferramentas relevantes a 
 
 📖 **Documentação completa:** Consulte o [Manual do Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) para obter informações detalhadas sobre instalação, configuração e arquitetura.
 
-### Opção 1: npm (sem pré-requisitos, sem necessidade de instalar o Python)
+### Opção 1: npm (sem pré-requisitos, sem instalação do Python)
 
 ```bash
 npx @mcptoolshop/tool-compass --help
@@ -111,13 +113,13 @@ docker-compose --profile with-ollama up
 
 ## Recursos
 
-- **Pesquisa Híbrida** - Semântica (HNSW) + fusão léxica com reforço de nome exato — descreva o que deseja ou cole o nome de uma ferramenta e ela será classificada como a primeira.
-- **Divulgação Progressiva do Esquema Completo** - `compass()` → `describe()` → `execute()`; `describe()` retorna o `inputSchema` completo (campos obrigatórios, descrições, enumerações, valores padrão).
-- **Backends stdio + HTTP** - Servidores MCP locais de subprocesso *e* servidores remotos/SaaS via streamable-http, com autenticação opcional por token.
-- **Tempos limite e permissões/restrições por ferramenta** - Substitua o tempo limite padrão por backend/ferramenta; exponha um subconjunto seguro de um backend amplo.
-- **Cache Dinâmico e Detecção de Cadeia** - Ferramentas frequentemente usadas pré-carregadas; fluxos de trabalho comuns detectados automaticamente.
-- **Análise** - Rastreie padrões de uso e desempenho da ferramenta (com retenção/limpeza).
-- **Compatível com várias plataformas e pronto para Docker** - Windows, macOS, Linux; implantação com um único comando.
+- **Busca Híbrida** – Semântica (HNSW) + fusão léxica com reforço de nome exato – descreva o que você deseja ou cole o nome de uma ferramenta e ela será classificada como a primeira.
+- **Divulgação Progressiva de Esquema Completo** – `compass()` → `describe()` → `execute()`; `describe()` retorna o `inputSchema` completo (campos obrigatórios, descrições, enums, valores padrão)
+- **Backends stdio + HTTP** – Front-end de servidores MCP de subprocesso local *e* servidores remotos / SaaS via streamable-http, com autenticação opcional de token de portador
+- **Timeouts e permissão/negação por ferramenta** – Substitua o tempo limite padrão por backend/ferramenta; exponha um subconjunto seguro de um backend amplo
+- **Cache dinâmico e detecção de cadeia** – Ferramentas frequentemente usadas pré-carregadas; fluxos de trabalho comuns detectados automaticamente
+- **Análise** – Rastreie padrões de uso e desempenho das ferramentas (com retenção/limpeza)
+- **Multiplataforma e pronto para Docker** – Windows, macOS, Linux; implantação com um único comando
 
 ## Arquitetura
 
@@ -142,7 +144,7 @@ docker-compose --profile with-ollama up
 
 ## Uso
 
-### A Ferramenta `compass()`
+### A ferramenta `compass()`
 
 ```python
 compass(
@@ -170,25 +172,25 @@ Retorna:
 }
 ```
 
-### Ferramentas Disponíveis
+### Ferramentas disponíveis
 
 | Ferramenta | Descrição |
 |------|-------------|
-| `compass(intent)` | Pesquisa híbrida semântica + léxica com reforço de nome exato. |
-| `describe(tool_name)` | Obtenha o `inputSchema` completo para uma ferramenta (campos obrigatórios/enumerações/valores padrão). |
+| `compass(intent)` | Busca híbrida semântica + léxica com reforço de nome exato |
+| `describe(tool_name)` | Obtenha o `inputSchema` completo de uma ferramenta (obrigatórios/enums/padrões) |
 | `execute(tool_name, args)` | Execute uma ferramenta em seu backend |
 | `compass_categories()` | Liste categorias e servidores |
-| `compass_status(active)` | Saúde e configuração do sistema; `active=True` executa um teste de funcionamento em tempo real do backend. |
+| `compass_status(active)` | Saúde do sistema e configuração; `active=True` executa uma sonda de atividade de backend em tempo real |
 | `compass_analytics(timeframe)` | Estatísticas de uso |
 | `compass_chains(action)` | Gerencie fluxos de trabalho de ferramentas |
 | `compass_sync(force)` | Reconstrua o índice a partir dos backends |
 | `compass_audit()` | Relatório completo do sistema |
 
-As mesmas ações estão disponíveis na CLI — incluindo `tool-compass execute <ferramenta> '<json>'` para testar uma chamada proxy a partir do terminal.
+As mesmas ações estão disponíveis na CLI – incluindo `tool-compass execute <tool> '<json>'` para testar uma chamada proxy do terminal.
 
-### Padrão de Divulgação Progressiva
+### Padrão de divulgação progressiva
 
-O Tool Compass usa um padrão de divulgação progressiva em três etapas para minimizar o uso de tokens:
+O Tool Compass usa um padrão de divulgação progressiva de três etapas para minimizar o uso de tokens:
 
 ```
 1. compass("your intent")     → Get tool name + short description (~100 tokens)
@@ -216,35 +218,39 @@ describe("comfy:comfy_generate")
 execute("comfy:comfy_generate", {"prompt": "a sunset over mountains"})
 ```
 
-O campo `hint` nos resultados do compass guia esse fluxo, sugerindo quando usar `describe()`.
+O campo `hint` nos resultados do compass guia este fluxo, sugerindo quando usar `describe()`.
 
 ## Configuração
 
 | Variável | Descrição | Padrão |
 |----------|-------------|---------|
 | `TOOL_COMPASS_BASE_PATH` | Diretório do projeto | Detectado automaticamente |
-| `TOOL_COMPASS_PYTHON` | Executável Python | Detectado automaticamente |
+| `TOOL_COMPASS_PYTHON` | Executável do Python | Detectado automaticamente |
 | `TOOL_COMPASS_CONFIG` | Caminho do arquivo de configuração | `~/.config/tool-compass/compass_config.json` |
 | `TOOL_COMPASS_DATA_DIR` | Diretório de dados | Específico da plataforma (veja abaixo) |
 | `OLLAMA_URL` | URL do servidor Ollama | `http://localhost:11434` |
 | `COMFYUI_URL` | Servidor ComfyUI | `http://localhost:8188` |
 | `PORT` | Defina para habilitar o transporte HTTP (por exemplo, para Fly.io) | não definido (stdio) |
-| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | Token necessário no transporte HTTP (opcional; substitui o campo de configuração `gateway_auth_token`). | desativado (sem autenticação). |
+| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | Token de portador exigido no transporte HTTP (opcional; substitui o campo de configuração `gateway_auth_token`) | não definido (sem autenticação) |
 
 **Diretórios de dados padrão:**
 - **Windows:** `%LOCALAPPDATA%\tool-compass\`
 - **macOS:** `~/Library/Application Support/tool-compass/`
 - **Linux:** `~/.config/tool-compass/` (ou `$XDG_CONFIG_HOME/tool-compass/`)
 
-Configurações do arquivo de configuração (em `compass_config.json`) adicionadas na v2.5.0 — `hybrid_search`, `exact_name_boost`, `default_timeout` / `tool_timeouts` por backend, `allow_tools` / `deny_tools`, `analytics_retention_days` e backends HTTP (`type: "http"`) — estão documentados no [Handbook → Configuration](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/). Consulte o arquivo [`env.example`](.env.example) para opções de variáveis de ambiente.
+As configurações do arquivo de configuração (em `compass_config.json`) adicionadas na v2.5.0 – `hybrid_search`,
+`exact_name_boost`, por backend `default_timeout` / `tool_timeouts`,
+`allow_tools` / `deny_tools`, `analytics_retention_days` e HTTP (`type: "http"`)
+backends – estão documentadas no [Manual → Configuração](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/).
+Consulte [`.env.example`](.env.example) para opções de variáveis de ambiente.
 
 ## Desempenho
 
 | Métrica | Valor |
 |--------|-------|
-| Tempo de construção do índice | ~5 segundos para 44 ferramentas |
-| Latência da consulta | ~15 ms (incluindo a incorporação) |
-| Economia de tokens | ~95% (38 mil → 2 mil) |
+| Tempo de construção do índice | ~5s para 44 ferramentas |
+| Latência da consulta | ~15ms (incluindo incorporação) |
+| Economia de tokens | ~95% (38K → 2K) |
 | Precisão@3 | ~95% (ferramenta correta no top 3) |
 
 ## Testes
@@ -269,9 +275,9 @@ Se os logs do Claude Desktop mostrarem erros de análise JSON:
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**Causa:** As instruções `print()` corrompem o protocolo JSON-RPC.
+**Causa**: As instruções `print()` corrompem o protocolo JSON-RPC.
 
-**Correção:** Use registro ou `file=sys.stderr`:
+**Correção**: Use registro ou `file=sys.stderr`:
 ```python
 import sys
 print("Debug message", file=sys.stderr)
@@ -295,41 +301,44 @@ tool-compass sync
 
 ## Projetos relacionados
 
-Faz parte do **Pacote Compass** para desenvolvimento baseado em IA:
+Parte do **Pacote Compass** para desenvolvimento com tecnologia de IA:
 
-- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) – Busca semântica de arquivos
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) – Componentes Gradio incorporados em vetores
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) – Ajuste fino de LLM sem interface gráfica
-- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) – ComfyUI sem a complexidade
+- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Pesquisa semântica de arquivos
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Componentes Gradio com vetores incorporados
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajuste fino de LLM sem interface gráfica
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sem a complexidade
 
 ## Contribuições
 
-Agradecemos as contribuições! Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para obter diretrizes.
+Agradecemos as contribuições! Consulte [CONTRIBUTING.md](CONTRIBUTING.md) para obter as diretrizes.
 
 ## Segurança e Escopo de Dados
 
 O Tool Compass é uma ferramenta de desenvolvimento **local-first**. Consulte [SECURITY.md](SECURITY.md) para obter a política completa.
 
-- **Dados acessados:** descrições de ferramentas indexadas no banco de dados vetorial HNSW local, consultas de pesquisa registradas no SQLite local (`compass_analytics.db`), incorporações geradas por meio do Ollama local.
-- **Dados NÃO acessados:** nenhum código de usuário, nenhum conteúdo de arquivo, nenhuma credencial. Os argumentos das chamadas de ferramentas são criptografados, não armazenados em texto simples.
-- **Rede:** conecta-se ao Ollama local para gerar incorporações. Interface Gradio opcional vinculada ao localhost. Sem telemetria externa.
+- **Dados acessados:** descrições de ferramentas indexadas no banco de dados vetorial HNSW local, consultas de pesquisa registradas no SQLite local (`compass_analytics.db`), incorporações geradas via Ollama local.
+- **Dados NÃO acessados:** nenhum código de usuário, nenhum conteúdo de arquivo, nenhuma credencial. Os argumentos de chamada da ferramenta são criptografados, não armazenados em texto simples.
+- **Rede:** conecta-se ao Ollama local para incorporações. Interface Gradio opcional vinculada ao localhost. Sem telemetria externa.
 - **Sem telemetria:** não coleta nada externamente. A análise é apenas local.
 
-## Tabela de avaliação
+## Avaliação
 
-As pontuações por categoria são regeneradas após a execução em lote por meio do comando:
-`bash scripts/regenerate-scorecard.sh` (que envolve `npx @mcptoolshop/shipcheck audit`). Consulte [SCORECARD.md](SCORECARD.md) para obter a análise detalhada mais recente — a tabela abaixo é um espelho e não foi criada manualmente. As seções selecionadas manualmente (Lacunas Conhecidas, Histórico de Correção) estão fora das tags `<!-- SHIPCHECK-AUTO-START/END -->` no arquivo SCORECARD.md e permanecem após as regenerações.
+As pontuações por categoria são regeneradas após a execução do swarm por meio de
+`bash scripts/regenerate-scorecard.sh` (que envolve `npx @mcptoolshop/shipcheck audit`). Consulte [SCORECARD.md](SCORECARD.md) para obter a
+análise detalhada mais recente — a tabela abaixo a espelha e não é
+intencionalmente criada manualmente. As seções selecionadas manualmente (Lacunas Conhecidas,
+Histórico de Correções) estão fora dos marcadores `<!-- SHIPCHECK-AUTO-START/END -->` em SCORECARD.md e sobrevivem às regenerações.
 
-Última auditoria `shipcheck`: **32 verificados · 0 não verificados · 5 ignorados · 100% aprovados — todas as barreiras rígidas foram superadas.**
+Último `shipcheck audit`: **32 verificados · 0 não verificados · 5 ignorados · 100% aprovados — todas as verificações obrigatórias aprovadas.**
 
 | Categoria | Pontuação | Observações |
 |----------|-------|-------|
-| A. Segurança | ✅ Aprovado. | Ações com SHA fixo; imagem base com hash de digestão fixo; proveniência SLSA + SBOM no PyPI + GHCR; verificação pré-commit de segredos; autenticação opcional por token do gateway. |
-| B. Tratamento de erros | ✅ Aprovado. | Resultados estruturados, degradação gradual, códigos de saída |
-| C. Documentação para operadores | ✅ Aprovado. | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
-| D. Boas práticas de distribuição | ✅ Aprovado. | CI consolidado; tempo limite em minutos + dias de retenção em cada tarefa; configuração pytest em pyproject.toml |
-| E. Identidade (suave) | ✅ Aprovado. | Logotipo, página inicial, metadados do GitHub; mantenedores explícitos em pyproject.toml |
-| **Total** | **100%** | Todas as barreiras rígidas foram superadas — gere novamente usando `make scorecard`. |
+| A. Segurança | ✅ Aprovado | Ações com hash SHA; imagem base com hash de digestão; SLSA provenance + SBOM no PyPI + GHCR; verificação de segredos no pré-commit; autenticação de portão opcional. |
+| B. Tratamento de Erros | ✅ Aprovado | Resultados estruturados, degradação gradual, códigos de saída |
+| C. Documentação do Operador | ✅ Aprovado | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Boas Práticas de Distribuição | ✅ Aprovado | CI consolidado; tempo limite em minutos + retenção em dias em cada tarefa; configuração do pytest em pyproject.toml |
+| E. Identidade (suave) | ✅ Aprovado | Logotipo, página de destino, metadados do GitHub; mantenedores explícitos em pyproject.toml |
+| **Total** | **100%** | Todas as verificações obrigatórias aprovadas — regenerar via `make scorecard` |
 
 ## Licença
 

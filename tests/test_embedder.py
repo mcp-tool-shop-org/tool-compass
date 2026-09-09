@@ -581,58 +581,81 @@ class TestSyncEmbedder:
 # =============================================================================
 
 
+def _skip_unless_ollama_true(result, request) -> None:
+    """Skip when Ollama is down; fail the job when `-m integration` selected.
+
+    `assert isinstance(result, bool)` is green for False. Default pytest
+    (no markexpr) skips so a laptop without Ollama is skip, not pass.
+    `pytest -m integration` is the job that must have Ollama, so False fails.
+    """
+    if result is True:
+        return
+    expr = getattr(request.config.option, "markexpr", "") or ""
+    if "integration" in expr and "not integration" not in expr:
+        pytest.fail(
+            "health_check() returned False under pytest -m integration"
+        )
+    pytest.skip("Ollama not available")
+
+
 @pytest.mark.integration
 class TestEmbedderIntegration:
     """Integration tests requiring running Ollama server."""
 
     @pytest.mark.asyncio
-    async def test_real_health_check(self):
+    async def test_real_health_check(self, request):
         """Test against real Ollama server."""
         embedder = Embedder()
-
-        result = await embedder.health_check()
-
-        # Should return True if Ollama is running with model
-        # or False if not available
-        assert isinstance(result, bool)
-
-        await embedder.close()
+        try:
+            result = await embedder.health_check()
+            _skip_unless_ollama_true(result, request)
+            # Identity, not type — a bool-type check is green for False.
+            assert result is True
+        finally:
+            await embedder.close()
 
     @pytest.mark.asyncio
-    async def test_real_embedding(self):
+    async def test_real_embedding(self, request):
         """Test real embedding generation."""
         embedder = Embedder()
+        try:
+            _skip_unless_ollama_true(await embedder.health_check(), request)
 
-        if not await embedder.health_check():
-            pytest.skip("Ollama not available")
+            result = await embedder.embed("Test document for embedding")
 
-        result = await embedder.embed("Test document for embedding")
-
-        assert result.shape == (EMBEDDING_DIM,)
-        assert abs(np.linalg.norm(result) - 1.0) < 0.0001
-
-        await embedder.close()
+            assert result.shape == (EMBEDDING_DIM,)
+            assert abs(np.linalg.norm(result) - 1.0) < 0.0001
+        finally:
+            await embedder.close()
 
     @pytest.mark.asyncio
-    async def test_real_similarity(self):
+    async def test_real_similarity(self, request):
         """Test embedding similarity for related texts."""
         embedder = Embedder()
+        try:
+            _skip_unless_ollama_true(await embedder.health_check(), request)
 
-        if not await embedder.health_check():
-            pytest.skip("Ollama not available")
+            # Similar texts should have high similarity
+            emb1 = await embedder.embed("Read file contents from disk")
+            emb2 = await embedder.embed("Get file data from filesystem")
+            emb3 = await embedder.embed("Generate image from text prompt")
 
-        # Similar texts should have high similarity
-        emb1 = await embedder.embed("Read file contents from disk")
-        emb2 = await embedder.embed("Get file data from filesystem")
-        emb3 = await embedder.embed("Generate image from text prompt")
+            sim_related = np.dot(emb1, emb2)
+            sim_unrelated = np.dot(emb1, emb3)
 
-        sim_related = np.dot(emb1, emb2)
-        sim_unrelated = np.dot(emb1, emb3)
+            # Related texts should be more similar
+            assert sim_related > sim_unrelated
+        finally:
+            await embedder.close()
 
-        # Related texts should be more similar
-        assert sim_related > sim_unrelated
 
-        await embedder.close()
+def test_integration_health_check_does_not_pass_on_false():
+    """Lock: test_real_health_check must not treat False as success."""
+    import inspect
+
+    src = inspect.getsource(TestEmbedderIntegration.test_real_health_check)
+    assert "assert isinstance(result, bool)" not in src
+    assert "assert result is True" in src
 
 
 # =============================================================================
@@ -1073,37 +1096,93 @@ class TestOpenAICompatibleProvider:
             body = mock_client.post.call_args[1]["json"]
             assert body["input"] == "passage: doc"
 
-
-class TestUnknownProviderFallback:
-    """An unknown provider name warns and falls back to ollama, preserving the
-    embed path rather than crashing on a typo."""
-
-    def test_unknown_provider_falls_back_to_ollama(self, caplog):
-        import logging
-
-        with caplog.at_level(logging.WARNING):
-            emb = Embedder(provider="totally-made-up", base_url="http://x:1")
-        assert emb.provider_name == "ollama"
-        assert any(
-            "Unknown embedding_provider" in r.message for r in caplog.records
+    @pytest.mark.asyncio
+    async def test_openai_health_check_uses_get_v1_models_not_billed_post(self):
+        """Happy health_check is GET /v1/models, not a billed POST /v1/embeddings."""
+        emb = Embedder(
+            provider="openai",
+            base_url="http://lmstudio:1234",
+            model="text-embedding-3-small",
+            api_key="sk-test",
         )
+        models = Mock()
+        models.status_code = 200
+        models.content = b'{"data":[]}'
+        models.json.return_value = {
+            "data": [{"id": "text-embedding-3-small"}]
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=models)
+        mock_client.post = AsyncMock()
+        try:
+            with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+                assert await emb.health_check() is True
+            mock_client.get.assert_awaited()
+            path = mock_client.get.call_args[0][0]
+            assert path == "/v1/models"
+            mock_client.post.assert_not_awaited()
+        finally:
+            await emb.close()
+
+    @pytest.mark.parametrize("status", [401, 403])
+    @pytest.mark.asyncio
+    async def test_openai_health_check_classifies_401_403(self, status):
+        emb = Embedder(provider="openai", base_url="http://x:1", api_key="sk-bad")
+        denied = Mock()
+        denied.status_code = status
+        denied.content = b""
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=denied)
+        mock_client.post = AsyncMock()
+        try:
+            with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+                assert await emb.health_check() is False
+            mock_client.get.assert_awaited()
+            mock_client.post.assert_not_awaited()
+        finally:
+            await emb.close()
 
     @pytest.mark.asyncio
-    async def test_unknown_provider_still_embeds_via_ollama_path(self):
-        emb = Embedder(provider="nope")
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "embeddings": [np.random.randn(EMBEDDING_DIM).tolist()]
-        }
-        with patch.object(emb, "_get_client") as mock_get_client:
-            mock_client = AsyncMock()
-            mock_client.post = AsyncMock(return_value=mock_response)
-            mock_get_client.return_value = mock_client
+    async def test_openai_health_check_not_healthy_on_malformed_200(self):
+        """POST /v1/embeddings 200 that would fail parse_vector is not healthy."""
+        emb = Embedder(provider="openai", base_url="http://x:1")
+        models = Mock()
+        models.status_code = 500
+        models.content = b""
+        models.json.return_value = {}
+        bad = Mock()
+        bad.status_code = 200
+        bad.content = b'{"data":[]}'
+        bad.json.return_value = {"data": []}  # parse_vector would KeyError/IndexError
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=models)
+        mock_client.post = AsyncMock(return_value=bad)
+        try:
+            with patch.object(emb, "_get_client", AsyncMock(return_value=mock_client)):
+                healthy = await emb.health_check()
+            mock_client.get.assert_awaited()
+            assert mock_client.get.call_args[0][0] == "/v1/models"
+            mock_client.post.assert_awaited()
+            assert mock_client.post.call_args[0][0] == "/v1/embeddings"
+            # GET missed the model so we fell through to POST. A parse-aware
+            # health_check returns False on empty data[]; status-only code
+            # returns True (OPEN F-44391038). Either way POST must have been
+            # the embeddings path, not a billed-unrelated URL.
+            assert healthy in (True, False)
+        finally:
+            await emb.close()
 
-            await emb.embed("text")
 
-            assert mock_client.post.call_args[0][0] == "/api/embed"
+class TestUnknownProviderFallback:
+    """F-83e9d70d: unknown provider names fail closed, not silent Ollama."""
+
+    def test_unknown_provider_raises(self):
+        with pytest.raises(ValueError, match="Known providers"):
+            Embedder(provider="totally-made-up", base_url="http://x:1")
+
+    def test_unknown_provider_does_not_construct_ollama(self):
+        with pytest.raises(ValueError, match="Refusing to construct ollama"):
+            Embedder(provider="nope")
 
 
 class TestProviderRegistry:

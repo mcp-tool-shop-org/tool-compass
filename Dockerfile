@@ -87,9 +87,10 @@ EXPOSE 7860
 # Switch to non-root user
 USER compass
 
-# Health check
+# Fail closed: load_index() False (missing/unloadable index) must exit 1.
+# print() always exits 0, so a string like 'no index' still marked healthy.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "from indexer import CompassIndex; idx = CompassIndex(); print('healthy' if idx.load_index() else 'no index')" || exit 1
+    CMD python -c "from indexer import CompassIndex; import sys; idx = CompassIndex(); sys.exit(0 if idx.load_index() else 1)"
 
 # Default command: Run Gradio UI.
 # UI-DOCKER-BIND-001: bind 0.0.0.0 explicitly so the UI is reachable through the

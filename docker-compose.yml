@@ -1,9 +1,10 @@
 # Tool Compass - Docker Compose Configuration
 #
 # Usage:
-#   docker-compose up              # Start Gradio UI
-#   docker-compose up -d           # Start in background
-#   docker-compose --profile dev up # Include development tools
+#   docker compose up                 # Start Gradio UI (production stage, 7860)
+#   docker compose up -d              # Start in background
+#   docker compose --profile gateway up  # MCP HTTP gateway (mcp-gateway stage, 8080)
+#   docker compose --profile dev up   # Include development tools
 #
 # Prerequisites:
 #   - Ollama running locally (or update OLLAMA_URL)
@@ -39,6 +40,34 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860')"]
       interval: 30s
       timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ==========================================================================
+  # MCP HTTP gateway (profile: gateway)
+  # ==========================================================================
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: mcp-gateway
+    container_name: tool-compass-gateway
+    profiles:
+      - gateway
+    ports:
+      - "8080:8080"
+    volumes:
+      - compass-data:/app/tool_compass/db
+    environment:
+      - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - HOST=0.0.0.0
+      - PORT=8080
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8080/health'); r.raise_for_status()"]
+      interval: 30s
+      timeout: 5s
       retries: 3
       start_period: 10s
 

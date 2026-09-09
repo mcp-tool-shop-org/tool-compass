@@ -48,7 +48,7 @@
 - [x] `[all]` Dependency scanning runs in CI (ecosystem-appropriate) (2026-02-27 — pip-audit in CI)
 - [x] `[all]` Automated dependency update mechanism exists (2026-02-27 — pip-audit in CI)
 - [x] `[npm]` `@mcptoolshop/tool-compass` wrapper published (zero-prerequisite `npx` launcher; `files`/`bin`/provenance set) (2026-06-20)
-- [x] `[pypi]` `python_requires` set (2026-02-27 — >=3.10)
+- [x] `[pypi]` `python_requires` set (2026-09-09 — >=3.12,<3.15)
 - [x] `[pypi]` Clean wheel + sdist build (2026-02-27 — hatchling, Docker build in CI)
 - [ ] `[vsix]` SKIP: not a VS Code extension
 - [ ] `[desktop]` SKIP: not a desktop app

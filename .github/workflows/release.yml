@@ -5,12 +5,16 @@
 # (.github/workflows/release.yml, workflow name "Release") — the filename and
 # the `name:` below are load-bearing and MUST NOT be renamed.
 #
-# The GitHub Release this workflow creates (step "Create GitHub Release") is
-# what fires the downstream chain: publish.yml (PyPI + GHCR + smoke) and
-# release-binaries.yml (platform binaries + npm wrapper). Because that Release
-# is created with secrets.GITHUB_TOKEN, the `release: published` event does NOT
-# fire (GitHub's recursion guard) — the downstream workflows therefore key off
-# a `workflow_run` trigger gated on this workflow's success. See their headers.
+# Atomic npx path (F-2f3fd9d7): verify tag/version → create GitHub Release →
+# matrix-build and attach binaries + checksums (reusable Release Binaries
+# workflow) → only then `npm publish --provenance --access public`. The
+# advertised `npx @mcptoolshop/tool-compass <command>` path must never go
+# live pointing at a Release that is missing platform binaries.
+#
+# Downstream chain: publish.yml (PyPI + GHCR + smoke) still keys off a
+# `workflow_run` trigger gated on this workflow's success. Because the
+# Release is created with secrets.GITHUB_TOKEN, `release: published` does
+# NOT fire (GitHub's recursion guard).
 #
 # The npm wrapper lives in the npm/ subdir (npm/package.json,
 # npm/bin/tool-compass.js), so every npm step runs with working-directory: npm.
@@ -32,15 +36,17 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write       # for GitHub Release creation
+  contents: write       # for GitHub Release creation + asset attach
   id-token: write       # for npm provenance via Sigstore OIDC
+  attestations: write   # passed through to Release Binaries (SLSA)
 
 jobs:
-  release:
-    name: Publish to npm + GitHub Release
+  verify:
+    name: Verify tag and versions
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
+    timeout-minutes: 10
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -50,25 +56,6 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
           node-version: 22
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Install npm >=11.5 in sandbox for OIDC trusted-publishing auth
-        run: |
-          # Node 22 ships npm 10.9, which signs Sigstore provenance fine but
-          # cannot negotiate the OIDC auth path for trusted publishing — the
-          # PUT returns a misleading 404 "not in this registry".
-          #
-          # An in-place `npm install -g npm@latest` races on Node 22's bundled
-          # npm 10.9 arborist rebuild and breaks irrecoverably (MODULE_NOT_FOUND:
-          # promise-retry). Sandbox install + PATH shadow avoids the race.
-          SANDBOX="$HOME/.npm-cli-sandbox"
-          mkdir -p "$SANDBOX"
-          pushd "$SANDBOX" >/dev/null
-          echo '{"name":"npm-cli-sandbox","version":"0.0.0","private":true}' > package.json
-          npm install --no-save --no-audit --no-fund --silent npm@latest
-          popd >/dev/null
-          echo "$SANDBOX/node_modules/.bin" >> "$GITHUB_PATH"
-          "$SANDBOX/node_modules/.bin/npm" --version
 
       - name: Verify tag matches npm/package.json version
         run: |
@@ -123,12 +110,15 @@ jobs:
         working-directory: npm
         run: npm pack --dry-run
 
-      - name: Publish to npm with provenance (OIDC trusted publisher)
-        working-directory: npm
-        # OIDC trusted publisher — NO token, NO NODE_AUTH_TOKEN. The
-        # id-token: write permission + the npm@latest installed above negotiate
-        # the auth path. --access public is required for the scoped package.
-        run: npm publish --provenance --access public
+  create-release:
+    name: Create GitHub Release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
 
       - name: Create GitHub Release (idempotent)
         env:
@@ -150,11 +140,10 @@ jobs:
             echo "See CHANGELOG.md for details." >> "${NOTES_FILE}"
           fi
 
-          # Create the release only if it doesn't already exist. This Release is
-          # what fires the downstream workflow_run chain (publish.yml +
-          # release-binaries.yml). Skipping when it exists makes the step
-          # idempotent on workflow_dispatch re-runs / second tag pushes (no
-          # HTTP 422 "tag_name already exists").
+          # Create the release only if it doesn't already exist. Binaries attach
+          # next; npm publish waits until those assets exist. Skipping when it
+          # exists makes the step idempotent on workflow_dispatch re-runs /
+          # second tag pushes (no HTTP 422 "tag_name already exists").
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
             echo "Release ${GITHUB_REF_NAME} already exists; skipping create."
           else
@@ -163,3 +152,99 @@ jobs:
               --notes-file "${NOTES_FILE}" \
               --verify-tag
           fi
+
+  binaries:
+    name: Build and attach platform binaries
+    needs: create-release
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      tag: ${{ github.ref_name }}
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      actions: read
+
+  publish-npm:
+    name: Publish to npm with provenance
+    needs: binaries
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install npm 11.5.2 in sandbox for OIDC trusted-publishing auth
+        run: |
+          # Node 22 ships npm 10.9, which signs Sigstore provenance fine but
+          # cannot negotiate the OIDC auth path for trusted publishing — the
+          # PUT returns a misleading 404 "not in this registry". npm 11.5+ is
+          # required. Pin an exact 11.5.x — never @latest — so a compromised
+          # or unexpected latest tarball cannot inherit this job's OIDC identity.
+          # Bump via PR / manual review (sandbox is not a Dependabot ecosystem).
+          #
+          # An in-place `npm install -g npm@latest` races on Node 22's bundled
+          # npm 10.9 arborist rebuild and breaks irrecoverably (MODULE_NOT_FOUND:
+          # promise-retry). Sandbox install + PATH shadow avoids the race.
+          SANDBOX="$HOME/.npm-cli-sandbox"
+          mkdir -p "$SANDBOX"
+          pushd "$SANDBOX" >/dev/null
+          echo '{"name":"npm-cli-sandbox","version":"0.0.0","private":true}' > package.json
+          npm install --no-save --no-audit --no-fund --silent npm@11.5.2
+          popd >/dev/null
+          echo "$SANDBOX/node_modules/.bin" >> "$GITHUB_PATH"
+          INSTALLED="$("$SANDBOX/node_modules/.bin/npm" --version)"
+          echo "sandboxed npm ${INSTALLED}"
+          if [ "$INSTALLED" != "11.5.2" ]; then
+            echo "::error::sandboxed npm is ${INSTALLED}, expected 11.5.2 (do not float @latest)"
+            exit 1
+          fi
+
+      - name: Verify GitHub Release binaries and checksums exist
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          echo "Checking Release ${TAG} assets before npm publish..."
+          ASSETS="$(gh release view "${TAG}" --json assets --jq '.assets[].name')"
+          echo "${ASSETS}"
+          missing=0
+          for f in \
+            "tool-compass-${VERSION}-linux-x64" \
+            "tool-compass-${VERSION}-darwin-arm64" \
+            "tool-compass-${VERSION}-win-x64.exe" \
+            "checksums-${VERSION}.txt"
+          do
+            if ! printf '%s\n' "${ASSETS}" | grep -Fxq "${f}"; then
+              echo "::error::GitHub Release ${TAG} is missing asset ${f} — refusing npm publish"
+              missing=1
+            fi
+          done
+          if [ "${missing}" -ne 0 ]; then
+            echo "::error::npx @mcptoolshop/tool-compass would be unable to fetch/verify a binary. Fix Release assets, then re-run."
+            exit 1
+          fi
+          echo "All required Release assets present; npm publish may proceed."
+
+      - name: Install npm wrapper dependencies
+        working-directory: npm
+        run: npm install --no-audit --no-fund
+
+      - name: Publish to npm with provenance (OIDC trusted publisher)
+        working-directory: npm
+        # OIDC trusted publisher — NO token, NO NODE_AUTH_TOKEN. The
+        # id-token: write permission + the npm@11.5.2 installed above negotiate
+        # the auth path. --access public is required for the scoped package.
+        # This step is intentionally last: the packument must not go live until
+        # the matching GitHub Release binaries + checksums exist.
+        run: npm publish --provenance --access public

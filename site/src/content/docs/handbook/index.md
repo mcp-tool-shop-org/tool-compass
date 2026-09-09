@@ -26,6 +26,16 @@ The handbook is organized by what you need to do, following the [Diátaxis](http
 ### Explanation — understand the design
 - **[Architecture](/tool-compass/handbook/architecture/)** — How semantic search works under the hood (with Mermaid diagrams)
 
+## What's new in v2.5.1
+
+- **Chain run** — `compass_chains(action="run")` executes hops in order with `$prev` / `$steps[n]` argument plumbing.
+- **Execute dry-run + schema check** — required/type/enum validation before the backend connect.
+- **Resources and prompts** — `compass_resources` / `compass_prompts` list and read live MCP backends (not indexed).
+- **Pluggable vector store** — hnswlib by default; numpy fallback if hnswlib cannot import (Python 3.13).
+- **Offline embedders** — `embedding_provider=hash` or `local` for CI and air-gapped hosts.
+- **Gradio execute playground** and `tool-compass init --client` snippets for Cursor, VS Code, and Claude Code.
+- **Atomic npx** — npm publish waits until GitHub Release binaries exist.
+
 ## What's new in v2.3
 
 - **`tool-compass init`** — first-run onboarding. Scaffolds a `compass_config.json` at your platform config path (refuses to clobber without `--force`), then prints next steps and a ready-to-paste Claude Desktop MCP snippet. See [Register with your MCP client](/tool-compass/handbook/getting-started/#register-with-your-mcp-client) for Cursor + Cline recipes.
