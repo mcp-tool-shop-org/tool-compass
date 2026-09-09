@@ -17,6 +17,24 @@ from pathlib import Path
 # =============================================================================
 
 
+def _table_names(db) -> set[str]:
+    rows = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()
+    names = set()
+    for row in rows:
+        names.add(row["name"] if not isinstance(row, tuple) else row[0])
+    return names
+
+
+def _row_value(row, key, index=0):
+    if row is None:
+        return None
+    if isinstance(row, tuple):
+        return row[index]
+    return row[key]
+
+
 class TestSecurityFuzzing:
     """Security-focused fuzz tests."""
 
@@ -34,28 +52,127 @@ class TestSecurityFuzzing:
         "{{constructor.constructor('return this')()}}",
     ]
 
+    @pytest.mark.slow  # max_examples=50, real search I/O (TST-B-006)
+    @given(st.text(min_size=0, max_size=1000))
+    @settings(
+        max_examples=50,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_search_query_sanitization(self, test_index, text):
+        """Arbitrary search queries must not crash or drop the tools table.
+
+        Injection payloads are pumped through both search and
+        record_search in
+        test_injection_payloads_do_not_break_search_or_analytics_sql.
+        """
+        import asyncio
+
+        results = asyncio.run(test_index.search(text, top_k=5))
+        assert isinstance(results, list)
+        assert len(results) <= 5
+        assert "tools" in _table_names(test_index.db)
+
+    @pytest.mark.parametrize("payload", INJECTION_PAYLOADS)
+    def test_injection_payloads_do_not_break_search_or_analytics_sql(
+        self, test_index, tmp_path, payload
+    ):
+        """Injection strings must not interpolate into SQL or drop tables.
+
+        CompassIndex.search and CompassAnalytics.record_search are the
+        retrieval-path sinks. A sentinel ``tools`` table is planted in
+        the analytics DB so ``'; DROP TABLE tools; --`` would be visible
+        if the payload were concatenated into the INSERT. ToolDefinition
+        construction is a crash test only — see the renamed helpers below.
+        """
+        import asyncio
+        from analytics import CompassAnalytics
+
+        before = _row_value(
+            test_index.db.execute("SELECT COUNT(*) AS n FROM tools").fetchone(),
+            "n",
+        )
+        results = asyncio.run(
+            test_index.search(
+                payload, top_k=5, server_filter=payload, category_filter=payload
+            )
+        )
+        assert isinstance(results, list)
+        assert "tools" in _table_names(test_index.db)
+        after = _row_value(
+            test_index.db.execute("SELECT COUNT(*) AS n FROM tools").fetchone(),
+            "n",
+        )
+        assert after == before and after >= 1
+
+        analytics = CompassAnalytics(db_path=tmp_path / "injection.db")
+        try:
+            db = analytics._get_db()
+            # Canary: DROP TABLE tools as a side-effect of interpolating the
+            # payload would delete this table. Parameterized INSERT leaves it.
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS tools (id INTEGER PRIMARY KEY, mark TEXT)"
+            )
+            db.execute(
+                "INSERT OR REPLACE INTO tools (id, mark) VALUES (1, 'canary')"
+            )
+            db.commit()
+            asyncio.run(
+                analytics.record_search(
+                    query=payload,
+                    results=[],
+                    latency_ms=1.0,
+                    category_filter=payload,
+                    server_filter=payload,
+                )
+            )
+            assert "search_queries" in _table_names(db)
+            assert "tools" in _table_names(db)
+            canary = db.execute(
+                "SELECT mark FROM tools WHERE id = 1"
+            ).fetchone()
+            assert _row_value(canary, "mark") == "canary"
+            # NUL does not round-trip through SQLite TEXT; every other
+            # payload must be stored as a bound value, not executed.
+            if "\x00" not in payload:
+                stored = db.execute(
+                    "SELECT query FROM search_queries WHERE query = ?",
+                    (payload,),
+                ).fetchone()
+                assert stored is not None
+                assert _row_value(stored, "query") == payload
+        finally:
+            analytics.close()
+
     @pytest.mark.slow  # max_examples=200 (TST-B-006)
     @given(st.text(min_size=0, max_size=1000))
     @settings(max_examples=200)
-    def test_search_query_sanitization(self, text):
-        """Search queries should be safely handled."""
+    def test_tool_definition_embedding_text_accepts_arbitrary_description(self, text):
+        """ToolDefinition.embedding_text() must not crash on arbitrary text.
+
+        Crash-only: does not exercise search or SQL. Security properties
+        live in test_search_query_sanitization /
+        test_injection_payloads_do_not_break_search_or_analytics_sql.
+        """
         from tool_manifest import ToolDefinition
 
-        # Tool definition should safely handle any query text
         tool = ToolDefinition(
             name="test_tool",
-            description=text,  # Use fuzzed input as description
+            description=text,
             server="test",
             category="test",
         )
 
-        # Should not raise
         result = tool.embedding_text()
         assert isinstance(result, str)
 
     @pytest.mark.parametrize("payload", INJECTION_PAYLOADS)
-    def test_injection_in_tool_name(self, payload):
-        """Tool names with injection attempts should be handled safely."""
+    def test_tool_definition_accepts_injection_payload_in_name(self, payload):
+        """ToolDefinition must accept injection-shaped names without crashing.
+
+        Crash-only: does not open SQLite or call search. See
+        test_injection_payloads_do_not_break_search_or_analytics_sql.
+        """
         from tool_manifest import ToolDefinition
 
         tool = ToolDefinition(
@@ -65,14 +182,17 @@ class TestSecurityFuzzing:
             category="test",
         )
 
-        # Should create without crashing
         assert tool.name == payload
         text = tool.embedding_text()
         assert isinstance(text, str)
 
     @pytest.mark.parametrize("payload", INJECTION_PAYLOADS)
-    def test_injection_in_category(self, payload):
-        """Categories with injection attempts should be handled safely."""
+    def test_tool_definition_accepts_injection_payload_in_category(self, payload):
+        """ToolDefinition must accept injection-shaped categories without crashing.
+
+        Crash-only: does not open SQLite or call search. See
+        test_injection_payloads_do_not_break_search_or_analytics_sql.
+        """
         from tool_manifest import ToolDefinition
 
         tool = ToolDefinition(
@@ -180,17 +300,32 @@ class TestInputValidationFuzzing:
         text = tool.embedding_text()
         assert isinstance(text, str)
 
-    @pytest.mark.slow  # max_examples=100 (TST-B-006)
+    @pytest.mark.slow  # max_examples=50, real search I/O (TST-B-006)
     @given(st.text(min_size=0, max_size=100))
-    @settings(max_examples=100)
-    def test_server_filter_arbitrary(self, server):
-        """Server filter should handle arbitrary strings."""
-        assume(server)  # Non-empty
+    @settings(
+        max_examples=50,
+        deadline=None,
+        suppress_health_check=[HealthCheck.function_scoped_fixture],
+    )
+    def test_server_filter_arbitrary(self, test_index, server):
+        """Server filter must honor the fuzzed string on CompassIndex.search.
 
-        from config import CompassConfig
+        Empty-string filters are skipped: search treats a falsy
+        server_filter as "no filter". Every returned hit's tool.server
+        must equal the filter; unknown servers yield an empty (bounded)
+        result list.
+        """
+        assume(server)  # Non-empty — empty is treated as "no filter"
 
-        config = CompassConfig(backends={})
-        assert config.backends == {}
+        import asyncio
+
+        results = asyncio.run(
+            test_index.search("file", top_k=5, server_filter=server)
+        )
+        assert isinstance(results, list)
+        assert len(results) <= 5
+        for hit in results:
+            assert hit.tool.server == server
 
 
 # =============================================================================

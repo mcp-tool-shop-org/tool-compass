@@ -29,6 +29,7 @@ pyproject.toml (pinned at >=2.3.0); the soft-import probe below remains
 the canonical mechanism in case it's ever made optional again.
 """
 
+import copy
 import os
 import pytest
 from pathlib import Path
@@ -439,11 +440,22 @@ def test_sync_manager(
 # `gateway` is a module-level singleton container — tests mutate
 # `gateway._compass_index`, `gateway._config`, `gateway._analytics`,
 # `gateway._backend_manager`, `gateway._chain_indexer`, `gateway._sync_manager`,
-# and `gateway._startup_sync_done` directly. Without an autouse reset, the
-# state from one test leaks into the next: a test that forgets to set
-# `_analytics = None` can inherit a (now-closed) analytics handle from a
-# prior test, masking real regressions in record_tool_call. The fixture
-# snapshots these names before each test and restores them after.
+# `gateway._startup_sync_done`, `gateway._analytics_pruned_once`,
+# `gateway._health_state`, `gateway._metric_counters`, `gateway._ready_cache`
+# (when published on the module), and `gateway._ready_cache_invalidators`.
+# Without an autouse reset, the state from one test leaks into the next: a
+# test that forgets to set `_analytics = None` can inherit a (now-closed)
+# analytics handle from a prior test, masking real regressions in
+# record_tool_call. A describe-sqlite-error test that leaves
+# index_available=False, or a prune-wiring test that leaves the once-latch
+# True, hides health/prune regressions. The fixture snapshots these names
+# before each test and restores them after.
+#
+# Mutable containers (`_health_state`, `_metric_counters`, `_ready_cache`,
+# `_ready_cache_invalidators`) are deep-copied into the snapshot AND
+# deep-copied on restore. A shallow getattr of a live dict/list is an
+# alias: in-place mutations would poison the snapshot, and restoring the
+# same object would leak those mutations into the next test.
 #
 # The fixture is `try`/`yield`/`finally` so the restore runs even when a
 # test raises. The asyncio locks defined on the gateway module are NOT
@@ -452,7 +464,7 @@ def test_sync_manager(
 #
 # `gateway` is imported lazily inside the fixture so test modules that
 # never touch the gateway (e.g. pure analytics/indexer tests) pay nothing.
-_GATEWAY_STATE_NAMES = (
+_GATEWAY_SCALAR_NAMES = (
     "_compass_index",
     "_backend_manager",
     "_config",
@@ -460,7 +472,18 @@ _GATEWAY_STATE_NAMES = (
     "_sync_manager",
     "_chain_indexer",
     "_startup_sync_done",
+    "_analytics_pruned_once",
 )
+
+# Deep-copied on snapshot and again on restore (copy-on-restore, not alias).
+_GATEWAY_COPY_NAMES = (
+    "_health_state",
+    "_metric_counters",
+    "_ready_cache",
+    "_ready_cache_invalidators",
+)
+
+_GATEWAY_MISSING = object()
 
 
 @pytest.fixture(autouse=True)
@@ -473,12 +496,31 @@ def _reset_gateway_globals():
         yield
         return
 
-    snapshot = {name: getattr(gateway, name, None) for name in _GATEWAY_STATE_NAMES}
+    snapshot = {}
+    for name in _GATEWAY_SCALAR_NAMES:
+        snapshot[name] = getattr(gateway, name, _GATEWAY_MISSING)
+    for name in _GATEWAY_COPY_NAMES:
+        if hasattr(gateway, name):
+            snapshot[name] = copy.deepcopy(getattr(gateway, name))
+        else:
+            snapshot[name] = _GATEWAY_MISSING
     try:
         yield
     finally:
-        for name, value in snapshot.items():
-            setattr(gateway, name, value)
+        for name in _GATEWAY_SCALAR_NAMES:
+            value = snapshot[name]
+            if value is _GATEWAY_MISSING:
+                if hasattr(gateway, name):
+                    delattr(gateway, name)
+            else:
+                setattr(gateway, name, value)
+        for name in _GATEWAY_COPY_NAMES:
+            value = snapshot[name]
+            if value is _GATEWAY_MISSING:
+                if hasattr(gateway, name):
+                    delattr(gateway, name)
+            else:
+                setattr(gateway, name, copy.deepcopy(value))
 
 
 # =============================================================================

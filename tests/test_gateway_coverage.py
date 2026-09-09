@@ -3017,7 +3017,7 @@ class TestHybridSearchDISC01:
         # Semantic buries git_status at the bottom, but the intent literally
         # contains "git status" so the lexical list ranks it top. RRF fusion
         # should lift it above where semantics alone placed it.
-        # Baseline healthy _health_state (module global not reset by conftest).
+        # Baseline healthy _health_state (conftest deep-copies this dict).
         gateway._health_state["ollama_available"] = True
         gateway._health_state["index_available"] = True
         test_config.hybrid_search = True
@@ -3127,7 +3127,7 @@ class TestHybridSearchDISC01:
         import gateway
         from unittest.mock import patch as _patch
 
-        # Baseline healthy _health_state (module global not reset by conftest).
+        # Baseline healthy _health_state (conftest deep-copies this dict).
         gateway._health_state["ollama_available"] = True
         gateway._health_state["index_available"] = True
         test_config.hybrid_search = True
