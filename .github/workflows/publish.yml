@@ -116,7 +116,7 @@ jobs:
           attestations: true
 
   docker:
-    name: Publish to GHCR
+    name: Publish ${{ matrix.stage }} to GHCR
     runs-on: ubuntu-latest
     # PyPI ships first (CDS-B-005). If PyPI fails, Docker must not ship a
     # half-release; if PyPI succeeds, Docker becomes the recoverable tail.
@@ -124,6 +124,16 @@ jobs:
     # CT-B-011: multi-arch buildx (linux/amd64 + linux/arm64) + push to GHCR
     # is the longest leg; 30 min covers the warm cache path with headroom.
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # mcp-gateway is the last Dockerfile stage; pin it explicitly so a
+          # later debug/sbom stage cannot silently retarget :latest.
+          - stage: gateway
+            target: mcp-gateway
+          - stage: ui
+            target: production
     permissions:
       contents: read
       packages: write
@@ -164,22 +174,30 @@ jobs:
           V="${REF#v}"
           echo "version=${V}" >> "$GITHUB_OUTPUT"
           echo "major_minor=$(echo "$V" | cut -d. -f1-2)" >> "$GITHUB_OUTPUT"
-          echo "resolved=${V} (event=${{ github.event_name }} ref=${REF})"
+          echo "resolved=${V} (event=${{ github.event_name }} ref=${REF} stage=${{ matrix.stage }})"
 
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: |
+            latest=false
           # type=raw from the explicitly-resolved version (see Resolve step) —
           # NOT type=semver, which silently emits nothing under workflow_run
           # because github.ref is main, not the tag. Each enable=... gates its
           # raw tag so an empty/missing version never pushes a bogus tag.
+          # Gateway: :latest :gateway :X.Y.Z :X.Y
+          # UI:      :ui :ui-X.Y.Z
           tags: |
-            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ steps.ver.outputs.version != '' }}
-            type=raw,value=${{ steps.ver.outputs.major_minor }},enable=${{ steps.ver.outputs.major_minor != '' }}
-            type=sha
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.ver.outputs.version }},enable=${{ matrix.stage == 'gateway' && steps.ver.outputs.version != '' }}
+            type=raw,value=${{ steps.ver.outputs.major_minor }},enable=${{ matrix.stage == 'gateway' && steps.ver.outputs.major_minor != '' }}
+            type=raw,value=latest,enable=${{ matrix.stage == 'gateway' }}
+            type=raw,value=gateway,enable=${{ matrix.stage == 'gateway' }}
+            type=sha,enable=${{ matrix.stage == 'gateway' }}
+            type=raw,value=ui-${{ steps.ver.outputs.version }},enable=${{ matrix.stage == 'ui' && steps.ver.outputs.version != '' }}
+            type=raw,value=ui,enable=${{ matrix.stage == 'ui' }}
+            type=sha,prefix=ui-,enable=${{ matrix.stage == 'ui' }}
 
       # QEMU is required to cross-build linux/arm64 from an amd64 runner.
       - name: Set up QEMU
@@ -195,12 +213,13 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          target: ${{ matrix.target }}
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ghcr-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=ghcr-${{ matrix.target }}
           # CT-B-009: SLSA provenance mode=max emits buildx provenance
           # attestation (including all input source digests) attached to the
           # image manifest. sbom: true emits an SPDX SBOM attestation in the
@@ -270,16 +289,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker smoke — pull + --version matches tag
+      - name: Docker smoke — pull gateway + UI, --version matches tag
         run: |
           set -euo pipefail
           TAG="${{ steps.ver.outputs.tag }}"
           VERSION="${{ steps.ver.outputs.version }}"
-          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-          docker pull "$IMAGE"
-          OUT="$(docker run --rm --entrypoint tool-compass "$IMAGE" --version 2>&1 || true)"
-          echo "docker --version → $OUT"
+          GATEWAY="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+          UI="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ui-${VERSION}"
+          docker pull "$GATEWAY"
+          docker pull "$UI"
+          OUT="$(docker run --rm --entrypoint tool-compass "$GATEWAY" --version 2>&1 || true)"
+          echo "docker gateway --version → $OUT"
           echo "$OUT" | grep -Fq "${VERSION}" || {
-            echo "::error::Docker smoke failed: --version output did not contain ${VERSION}"
+            echo "::error::Docker gateway smoke failed: --version output did not contain ${VERSION}"
+            exit 1
+          }
+          OUT_UI="$(docker run --rm --entrypoint tool-compass "$UI" --version 2>&1 || true)"
+          echo "docker ui --version → $OUT_UI"
+          echo "$OUT_UI" | grep -Fq "${VERSION}" || {
+            echo "::error::Docker UI smoke failed: --version output did not contain ${VERSION}"
             exit 1
           }

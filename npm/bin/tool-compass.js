@@ -11,33 +11,63 @@ process.env.MCPTOOLSHOP_LAUNCH_CONFIG = JSON.stringify({
   tag: "v2.5.0",
 });
 
-// Bare -h / --help / help (no subcommand) must print usage locally. Requiring
+// Bare identity flags (no subcommand) must print locally. Requiring
 // npm-launcher here would download a GitHub Release binary before argparse
-// can speak, which is what `npx @mcptoolshop/tool-compass --help` advertises.
+// can speak, which is what `npx @mcptoolshop/tool-compass --help` / `--version`
+// advertise.
 const args = process.argv.slice(2);
-const HELP_TOKENS = new Set(["-h", "--help", "help"]);
-const hasHelp = args.some((a) => HELP_TOKENS.has(a));
+const HELP_TOKENS = new Set(["-h", "--help", "help", "--version", "-V"]);
+const VERSION_TOKENS = new Set(["--version", "-V"]);
+const hasHelp = args.some((a) => a === "-h" || a === "--help" || a === "help");
+const hasVersion = args.some((a) => VERSION_TOKENS.has(a));
 const hasSubcommand = args.some(
   (a) => a !== "" && !a.startsWith("-") && !HELP_TOKENS.has(a)
 );
 
+function embeddedVersion() {
+  try {
+    return JSON.parse(process.env.MCPTOOLSHOP_LAUNCH_CONFIG).version;
+  } catch {
+    return "0.0.0";
+  }
+}
+
+if (hasVersion && !hasSubcommand) {
+  process.stdout.write(`${embeddedVersion()}\n`);
+  process.exit(0);
+}
+
 if (hasHelp && !hasSubcommand) {
-  process.stdout.write(`Usage: tool-compass <command> [options]
+  const version = embeddedVersion();
+  process.stdout.write(`tool-compass ${version}
+Usage: npx @mcptoolshop/tool-compass <command> [options]
 
 Commands:
-  doctor      Diagnose config, backends, and Ollama
+  doctor      Diagnose config, backends, and the embedding provider
   search      One-shot semantic search by intent
   sync        Rebuild the index from backends
   ui          Launch the Gradio web UI
   serve       Run the MCP gateway (default with no command)
-  describe, execute, init, status, categories, audit, analytics, chains
+  describe    Print a tool's schema and metadata
+  execute     Run a named tool on its backend
+  init        Scaffold compass_config.json and MCP client setup
+  status      Show backend, index, and sync health
+  categories  List available tool categories with counts
+  audit       Audit the index, backends, chains, and analytics
+  analytics   Show usage statistics, hot tools, and top chains
+  chains      List or detect tool-chain workflow patterns
 
 This npx wrapper fetches a SHA256-verified GitHub Release binary on the
-first real command. Bare --help / -h / help print this usage locally and
-do not download anything.
+first real command. Bare --help / -h / help / --version / -V print locally
+and do not download anything.
 
 Python fallback:  pip install tool-compass
-Docker fallback:  docker run ghcr.io/mcp-tool-shop-org/tool-compass:latest
+Docker fallback:
+  Gateway:  docker run --rm -p 8080:8080 ghcr.io/mcp-tool-shop-org/tool-compass:latest
+  UI:       docker run --rm -p 7860:7860 ghcr.io/mcp-tool-shop-org/tool-compass:ui
+  Compose:  docker compose up
+            docker compose --profile gateway up
+            docker build --target production -t tool-compass:ui .
 `);
   process.exit(0);
 }
@@ -56,7 +86,8 @@ try {
         "@mcptoolshop/npm-launcher is missing (MODULE_NOT_FOUND).\n" +
         "  npm install @mcptoolshop/tool-compass\n" +
         "  pip install tool-compass\n" +
-        "  docker run ghcr.io/mcp-tool-shop-org/tool-compass:latest\n"
+        "  docker run --rm -p 8080:8080 ghcr.io/mcp-tool-shop-org/tool-compass:latest\n" +
+        "  docker run --rm -p 7860:7860 ghcr.io/mcp-tool-shop-org/tool-compass:ui\n"
     );
     process.exit(1);
   }
