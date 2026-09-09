@@ -1,0 +1,17 @@
+# Shell scripts and the Dockerfile MUST keep LF, on every platform.
+#
+# Earned on the sibling xrpl-camp repo the same day this landed: an entrypoint
+# script checked out with CRLF on Windows (core.autocrlf) makes the shebang
+# `#!/bin/sh\r`, and Linux then tries to exec an interpreter literally named
+# `/bin/sh\r`. It fails with "no such file or directory" naming the SCRIPT, so
+# it reads like a missing file rather than a line-ending problem.
+#
+# CI never catches it -- a Linux runner checks out LF and builds fine. Only a
+# contributor building the image on Windows hits it, which is the worst place
+# for a defect to live: invisible to the people who could fix it.
+*.sh text eol=lf
+Dockerfile text eol=lf
+docker-entrypoint.sh text eol=lf
+
+# Keep the rest normalised in the repo and native in the working tree.
+* text=auto

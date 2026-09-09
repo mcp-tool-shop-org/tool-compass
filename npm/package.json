@@ -1,6 +1,6 @@
 {
   "name": "@mcptoolshop/tool-compass",
-  "version": "2.5.1",
+  "version": "2.5.2",
   "description": "Semantic MCP tool discovery gateway — find tools by intent, not memory. Zero-prerequisite npx install (verified binary launcher).",
   "type": "commonjs",
   "license": "MIT",

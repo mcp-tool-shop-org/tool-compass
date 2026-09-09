@@ -84,6 +84,16 @@ ENV PYTHONUNBUFFERED=1 \
 # Expose Gradio UI port
 EXPOSE 7860
 
+# Warn when the index directory is not a volume. The compose file mounts
+# `compass-data` so compose users never see it; this is for the bare
+# `docker run ghcr.io/...` path, which has no volume and silently rebuilds the
+# index on every start. `exec "$@"` so BOTH stage CMDs (ui.py here, gateway.py
+# in mcp-gateway below) pass through unchanged, and so
+# `--entrypoint tool-compass` in publish.yml's post-publish handshake still
+# overrides it cleanly.
+COPY --chmod=0755 docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+ENTRYPOINT ["docker-entrypoint.sh"]
+
 # Switch to non-root user
 USER compass
 

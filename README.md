@@ -107,6 +107,19 @@ docker-compose --profile with-ollama up
 # Access the UI at http://localhost:7860
 ```
 
+Or run the published image directly, without cloning:
+
+```bash
+docker run --rm -p 7860:7860   -v tool-compass-data:/app/tool_compass/db   ghcr.io/mcp-tool-shop-org/tool-compass:latest
+```
+
+> **Mount the volume.** The semantic index lives in `/app/tool_compass/db`, and
+> building it means embedding every tool in every configured server. Without a
+> volume that work is thrown away when the container exits and paid again on the
+> next start — which reads as "Tool Compass is slow" rather than as a missing
+> flag. The image warns you if you forget. `docker compose up` already mounts a
+> named volume, so this only applies to bare `docker run`.
+
 > The GHCR image (`ghcr.io/mcp-tool-shop-org/tool-compass`) supports
 > `linux/amd64` and `linux/arm64`, so the same tag runs on x86_64 servers
 > and Apple Silicon / ARM workstations.
