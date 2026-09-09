@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import numpy as np
 import pytest
 
-import embedder as embedder_mod
 import indexer as indexer_mod
-from embedder import Embedder, EMBEDDING_DIM
+from embedder import Embedder
 from indexer import CompassIndex, NumpyVectorStore, create_vector_store
 from tool_manifest import ToolDefinition
 
@@ -179,6 +177,42 @@ def test_execute_tool_ui_success(monkeypatch):
     out = ui.execute_tool_ui("demo:echo", '{"x": 1}', timeout=5)
     payload = __import__("json").loads(out)
     assert payload.get("success") is True or "error" in payload
+
+
+@pytest.mark.asyncio
+async def test_manager_resources_prompts_error_paths():
+    from config import CompassConfig
+    from backend_client_simple import SimpleBackendManager
+
+    cfg = CompassConfig()
+    mgr = SimpleBackendManager(cfg)
+    listed = await mgr.list_resources("missing")
+    assert listed["errors"].get("missing") == "not connected"
+    prompts = await mgr.list_prompts("missing")
+    assert "errors" in prompts
+    bad = await mgr.read_resource("nocolon")
+    assert bad.get("success") is False or "error" in bad
+    gone = await mgr.read_resource("ghost:file://x")
+    assert gone.get("success") is False or "error" in gone or "error_kind" in gone
+
+
+@pytest.mark.asyncio
+async def test_stdio_resources_require_connect():
+    from backend_client_simple import SimpleBackendConnection, BackendNotConnectedError
+    from config import StdioBackend
+
+    conn = SimpleBackendConnection(
+        "t",
+        StdioBackend(command="echo", args=[]),
+    )
+    with pytest.raises(BackendNotConnectedError):
+        await conn.list_resources()
+    with pytest.raises(BackendNotConnectedError):
+        await conn.list_prompts()
+    with pytest.raises(BackendNotConnectedError):
+        await conn.read_resource("file://x")
+    with pytest.raises(BackendNotConnectedError):
+        await conn.get_prompt("p")
 
 
 def test_backend_breaker_trips_and_recovers():
