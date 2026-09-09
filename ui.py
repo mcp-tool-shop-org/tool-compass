@@ -72,6 +72,11 @@ _chain_indexer: Optional[ChainIndexer] = None
 _config = None
 _init_lock = threading.RLock()
 
+# F-5d41ce59: execute playground visibility. Hidden on Gradio --share unless
+# allow/deny policy is enforced on this path (same helper the gateway uses).
+_ui_share_mode = False
+_ui_execute_visible = True
+
 
 def _lazy_singleton(global_name: str, factory):
     """Thread-safe lazy init with publish-after-success guard (FE-B-011).
@@ -566,6 +571,14 @@ def search_tools(
                 f'Deprecated since v{safe_dep_ver}</span>'
             )
 
+        # F-5d41ce59: Run control on the card prefills the Execute playground
+        # (tool name + example JSON from describe parameters).
+        example_args = _example_args_from_schema(
+            getattr(r.tool, "parameters", {}) or {},
+            getattr(r.tool, "examples", None) or [],
+        )
+        run_control = _run_button_html(safe_name, example_args)
+
         # FE-B-005 + FE-B-006: each result is a listbox option with a stable
         # id so future combobox wiring can set aria-activedescendant. The
         # emoji + text-twin pattern (server name spoken, 📦 hidden from SR)
@@ -587,6 +600,7 @@ def search_tools(
                 <span><span aria-hidden="true">📦</span> Server: {safe_server}</span>
                 <span><span aria-hidden="true">🏷️</span> Category: {safe_category}</span>
                 {deprecated_badge}
+                {run_control}
             </div>
         </li>
         """)
@@ -1066,6 +1080,349 @@ def get_tool_details(tool_name: str) -> str:
 
 
 # =============================================================================
+# EXECUTE PLAYGROUND (F-5d41ce59)
+# Search → Describe → Execute closed loop. Reuses gateway.get_backends().
+# execute_tool (same path as cli._cmd_execute) with one-shot disconnect.
+# =============================================================================
+
+
+_SECRET_RESULT_HINTS = ("token", "authorization", "password", "secret", "api_key", "auth")
+
+
+def _execute_playground_visible(share: bool) -> bool:
+    """Show execute controls unless this is a public --share without policy."""
+    if not share:
+        return True
+    try:
+        from gateway import _tool_denied_by_policy
+
+        return callable(_tool_denied_by_policy)
+    except Exception:
+        return False
+
+
+def _default_for_param_type(ptype):
+    """Best-effort JSON default for a collapsed parameter type."""
+    if isinstance(ptype, dict):
+        t = str(ptype.get("type") or "").lower()
+        if t in ("integer", "number"):
+            return 0
+        if t == "boolean":
+            return False
+        if t == "array":
+            return []
+        if t == "object":
+            return {}
+        return ""
+    text = str(ptype or "").lower()
+    if "int" in text or "number" in text or "float" in text:
+        return 0
+    if "bool" in text:
+        return False
+    if "array" in text or "list" in text:
+        return []
+    if "object" in text or "dict" in text:
+        return {}
+    return ""
+
+
+def _example_args_from_schema(parameters, examples=None) -> dict:
+    """Build a paste-ready arguments object from describe metadata."""
+    if examples:
+        for ex in examples:
+            if isinstance(ex, dict):
+                return ex
+            if isinstance(ex, str):
+                stripped = ex.strip()
+                if stripped.startswith("{") and stripped.endswith("}"):
+                    try:
+                        parsed = json.loads(stripped)
+                    except json.JSONDecodeError:
+                        parsed = None
+                    if isinstance(parsed, dict):
+                        return parsed
+    if not isinstance(parameters, dict) or not parameters:
+        return {}
+    props = parameters.get("properties") if parameters.get("type") == "object" else None
+    source = props if isinstance(props, dict) else parameters
+    out = {}
+    skip = {"type", "properties", "required", "additionalProperties", "$schema"}
+    for key, value in source.items():
+        if key in skip:
+            continue
+        out[str(key)] = _default_for_param_type(value)
+    return out
+
+
+def _lookup_tool_row(tool_name: str):
+    """Return the tools-table row for ``tool_name``, or None."""
+    name = sanitize_query(tool_name or "")
+    if not name:
+        return None
+    try:
+        index = get_index()
+        if not index.db:
+            return None
+        cursor = index.db.execute(
+            """
+            SELECT name, description, category, server, parameters, examples
+            FROM tools WHERE name = ?
+            """,
+            (name,),
+        )
+        row = cursor.fetchone()
+        if row:
+            return row
+        cursor = index.db.execute(
+            """
+            SELECT name, description, category, server, parameters, examples
+            FROM tools WHERE name LIKE ?
+            LIMIT 1
+            """,
+            (f"%{name}%",),
+        )
+        return cursor.fetchone()
+    except Exception:
+        return None
+
+
+def _prefill_execute_fields(tool_name: str) -> tuple:
+    """Return (qualified_name, example_args_json) for the execute form."""
+    row = _lookup_tool_row(tool_name)
+    if not row:
+        return (sanitize_query(tool_name or ""), "{}")
+    try:
+        params = json.loads(row["parameters"]) if row["parameters"] else {}
+    except json.JSONDecodeError:
+        params = {}
+    try:
+        examples = json.loads(row["examples"]) if row["examples"] else []
+    except json.JSONDecodeError:
+        examples = []
+    args_obj = _example_args_from_schema(params, examples)
+    return row["name"] or "", json.dumps(args_obj, indent=2)
+
+
+def view_details_and_prefill(tool_name: str) -> tuple:
+    """Describe a tool and prefill the Execute accordion (Browser tab)."""
+    html_out = get_tool_details(tool_name)
+    name, args_json = _prefill_execute_fields(tool_name)
+    return html_out, name, args_json
+
+
+def _run_button_html(safe_name: str, args_obj: dict) -> str:
+    """Search-card Run control. ``safe_name`` is already html.escape'd."""
+    if not _ui_execute_visible:
+        return ""
+    try:
+        args_json = json.dumps(args_obj or {}, separators=(",", ":"))
+    except (TypeError, ValueError):
+        args_json = "{}"
+    safe_args = html.escape(args_json, quote=True)
+    return (
+        f'<button type="button" class="tc-run-tool" '
+        f'data-tool="{safe_name}" data-args="{safe_args}" '
+        f'aria-label="Run {safe_name}">Run</button>'
+    )
+
+
+def _redact_execute_result(obj):
+    """Strip secret-looking keys from an execute envelope before display."""
+    if isinstance(obj, dict):
+        out = {}
+        for key, value in obj.items():
+            if isinstance(key, str) and any(
+                hint in key.lower() for hint in _SECRET_RESULT_HINTS
+            ):
+                out[key] = "[REDACTED]"
+            else:
+                out[key] = _redact_execute_result(value)
+        return out
+    if isinstance(obj, list):
+        return [_redact_execute_result(item) for item in obj]
+    return obj
+
+
+def execute_tool_ui(tool_name: str, args_json: str, timeout: float = 30) -> str:
+    """Proxy one tool call via the same manager.execute_tool path as the CLI.
+
+    One-shot connect/disconnect so Gradio callbacks do not leak backend
+    children. Enforces gateway allow/deny policy before proxying. Hidden
+    on --share when that policy helper cannot be imported.
+    """
+    if _ui_share_mode and not _execute_playground_visible(True):
+        return json.dumps(
+            {
+                "success": False,
+                "error_kind": "forbidden",
+                "error": (
+                    "Execute playground is disabled on public --share "
+                    "unless backend allow/deny policy is enforced."
+                ),
+            },
+            indent=2,
+        )
+
+    name = sanitize_query(tool_name or "")
+    if not name:
+        return json.dumps(
+            {
+                "success": False,
+                "error_kind": "usage",
+                "error": "Enter a tool name (e.g. bridge:read_file).",
+            },
+            indent=2,
+        )
+
+    raw_args = args_json if args_json is not None else "{}"
+    if isinstance(raw_args, str):
+        stripped = raw_args.strip() or "{}"
+        try:
+            arguments = json.loads(stripped)
+        except json.JSONDecodeError as e:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error_kind": "usage",
+                    "error": f"Arguments must be a JSON object: {e}",
+                },
+                indent=2,
+            )
+    elif isinstance(raw_args, dict):
+        arguments = raw_args
+    else:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        return json.dumps(
+            {
+                "success": False,
+                "error_kind": "usage",
+                "error": "Arguments must be a JSON object.",
+            },
+            indent=2,
+        )
+
+    try:
+        timeout_s = float(timeout) if timeout is not None else 30.0
+    except (TypeError, ValueError):
+        timeout_s = 30.0
+    if timeout_s <= 0:
+        timeout_s = 30.0
+
+    try:
+        from gateway import get_backends, _tool_denied_by_policy
+    except Exception as e:
+        return json.dumps(
+            {
+                "success": False,
+                "error_kind": "unavailable",
+                "error": f"Could not import gateway: {type(e).__name__}: {e}",
+            },
+            indent=2,
+        )
+
+    async def _run():
+        manager = await get_backends()
+        try:
+            if ":" in name:
+                server, bare = name.split(":", 1)
+            else:
+                server, bare = None, name
+            backend = None
+            try:
+                backend = manager.config.backends.get(server)
+            except Exception:
+                backend = None
+            if _tool_denied_by_policy(backend, bare):
+                return {
+                    "success": False,
+                    "error_kind": "tool_denied",
+                    "error": (
+                        f"Tool {name!r} is blocked by the backend's "
+                        "allow/deny policy and was not proxied."
+                    ),
+                }
+            return await manager.execute_tool(
+                name, arguments, timeout=timeout_s
+            )
+        finally:
+            try:
+                await manager.disconnect_all()
+            except Exception:
+                pass
+
+    try:
+        envelope = run_async(_run())
+    except Exception as e:
+        return json.dumps(
+            {
+                "success": False,
+                "error_kind": "transport_error",
+                "error": f"{type(e).__name__}: {e}",
+            },
+            indent=2,
+        )
+
+    if not isinstance(envelope, dict):
+        envelope = {"success": False, "result": envelope}
+    return json.dumps(_redact_execute_result(envelope), indent=2, default=str)
+
+
+def _execute_accordion(
+    *,
+    tool_elem_id: str,
+    args_elem_id: str,
+    run_elem_id: str,
+    result_elem_id: str,
+    accordion_elem_id: str,
+):
+    """Shared Execute playground controls (Search + Browser)."""
+    with gr.Column(elem_id=accordion_elem_id):
+        with gr.Accordion("Execute playground", open=False):
+            gr.Markdown(
+                "Closed loop: Search → Describe → Execute. Prefill from a "
+                "result **Run** button or **View Details**. Arguments are a "
+                "JSON object; timeout applies to this one-shot call."
+            )
+            exec_tool = gr.Textbox(
+                label="Tool to run",
+                placeholder="e.g. bridge:read_file",
+                elem_id=tool_elem_id,
+            )
+            exec_args = gr.Textbox(
+                label="Arguments (JSON object)",
+                value="{}",
+                lines=6,
+                elem_id=args_elem_id,
+            )
+            exec_timeout = gr.Slider(
+                minimum=1,
+                maximum=120,
+                value=30,
+                step=1,
+                label="Timeout (seconds)",
+            )
+            exec_btn = gr.Button(
+                "Run tool",
+                variant="primary",
+                elem_id=run_elem_id,
+            )
+            exec_result = gr.Code(
+                label="Result",
+                language="json",
+                lines=12,
+                elem_id=result_elem_id,
+            )
+    exec_btn.click(
+        fn=execute_tool_ui,
+        inputs=[exec_tool, exec_args, exec_timeout],
+        outputs=[exec_result],
+        show_progress="minimal",
+    )
+    return exec_tool, exec_args
+
+
+# =============================================================================
 # ANALYTICS FUNCTIONS
 # =============================================================================
 
@@ -1426,8 +1783,18 @@ def get_filter_choices():
         return ["All"], ["All"]
 
 
-def create_ui() -> gr.Blocks:
-    """Create the Gradio UI."""
+def create_ui(share: bool = False) -> gr.Blocks:
+    """Create the Gradio UI.
+
+    ``share`` is the Gradio public-tunnel flag. Execute playground is
+    hidden on --share unless allow/deny policy is enforced on this path
+    (F-5d41ce59). Default False so ``create_ui()`` construction tests stay
+    unchanged.
+    """
+    global _ui_share_mode, _ui_execute_visible
+    _ui_share_mode = bool(share)
+    show_execute = _execute_playground_visible(_ui_share_mode)
+    _ui_execute_visible = show_execute
 
     servers, categories = get_filter_choices()
 
@@ -1460,6 +1827,12 @@ def create_ui() -> gr.Blocks:
         css="""
         .gradio-container { max-width: 1400px !important; }
         .tool-result { border: 1px solid #444; border-radius: 8px; padding: 12px; margin: 8px 0; }
+        .tc-run-tool {
+            background: #1e3a5f; color: #e8e8f0; border: 1px solid #38bdf8;
+            border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 0.85em;
+        }
+        .tc-run-tool:hover { background: #2563eb; }
+        .tc-run-tool:focus { outline: 2px solid #38bdf8; outline-offset: 2px; }
         """,
     ) as demo:
         # FE-B-016: pull the count from the indexer's O(1) COUNT(*) via
@@ -1580,6 +1953,15 @@ def create_ui() -> gr.Blocks:
                     with gr.Column(scale=1):
                         results_json = gr.Code(label="JSON", language="json", lines=15)
 
+                if show_execute:
+                    _execute_accordion(
+                        tool_elem_id="tc-exec-tool",
+                        args_elem_id="tc-exec-args",
+                        run_elem_id="tc-exec-run",
+                        result_elem_id="tc-exec-result",
+                        accordion_elem_id="tc-exec-search",
+                    )
+
                 # Search for chains
                 gr.Markdown("---")
                 gr.Markdown("### 🔗 Workflow Search")
@@ -1682,17 +2064,35 @@ def create_ui() -> gr.Blocks:
                     """
                 )
 
+                browser_exec_tool = None
+                browser_exec_args = None
+                if show_execute:
+                    browser_exec_tool, browser_exec_args = _execute_accordion(
+                        tool_elem_id="tc-exec-tool-browser",
+                        args_elem_id="tc-exec-args-browser",
+                        run_elem_id="tc-exec-run-browser",
+                        result_elem_id="tc-exec-result-browser",
+                        accordion_elem_id="tc-exec-browser",
+                    )
+
                 # Wire up browser
                 browser_btn.click(
                     fn=filter_tools,
                     inputs=[browser_server, browser_category, browser_search],
                     outputs=[browser_results],
                 )
-                detail_btn.click(
-                    fn=get_tool_details,
-                    inputs=[tool_name_input],
-                    outputs=[tool_details],
-                )
+                if show_execute and browser_exec_tool is not None:
+                    detail_btn.click(
+                        fn=view_details_and_prefill,
+                        inputs=[tool_name_input],
+                        outputs=[tool_details, browser_exec_tool, browser_exec_args],
+                    )
+                else:
+                    detail_btn.click(
+                        fn=get_tool_details,
+                        inputs=[tool_name_input],
+                        outputs=[tool_details],
+                    )
 
             # =================================================================
             # ANALYTICS TAB
@@ -1888,18 +2288,57 @@ def create_ui() -> gr.Blocks:
         });
     }
 
+    // F-5d41ce59: search-card Run prefills the Search-tab execute form.
+    function fillExecField(elemId, value) {
+        const wrap = document.getElementById(elemId);
+        if (!wrap) return;
+        const input = wrap.querySelector('input, textarea');
+        if (!input) return;
+        const setter = Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+        ) || Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value'
+        );
+        if (setter && setter.set) setter.set.call(input, value);
+        else input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    function wireRunButtons() {
+        document.querySelectorAll('.tc-run-tool').forEach((btn) => {
+            if (btn.dataset.tcRun) return;
+            btn.dataset.tcRun = '1';
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                fillExecField('tc-exec-tool', btn.getAttribute('data-tool') || '');
+                fillExecField('tc-exec-args', btn.getAttribute('data-args') || '{}');
+                const acc = document.getElementById('tc-exec-search');
+                if (acc) {
+                    const toggle = acc.querySelector(
+                        'button, .label-wrap, .gr-panel-header, .accordion-toggle'
+                    );
+                    const open = acc.querySelector('.open, [aria-expanded="true"]');
+                    if (toggle && !open) toggle.click();
+                }
+            });
+        });
+    }
+
     // MutationObserver wakes all three enhancements as Gradio swaps HTML.
     const target = document.body;
     const obs = new MutationObserver(() => {
         enhanceTabs();
         enhanceCombobox();
         focusResultsCount();
+        wireRunButtons();
     });
     obs.observe(target, { childList: true, subtree: true });
 
     // Run once on load.
     enhanceTabs();
     enhanceCombobox();
+    wireRunButtons();
 })();
 </script>
             """,
@@ -1961,7 +2400,7 @@ def main():
             f"for user '{user}'. Anyone with the URL and credentials can access."
         )
 
-    demo = create_ui()
+    demo = create_ui(share=args.share)
     try:
         demo.launch(
             server_name=args.host,
