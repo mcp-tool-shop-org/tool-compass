@@ -37,7 +37,8 @@ import logging
 import os
 import subprocess
 import sys
-from typing import Dict, List, Optional, Any, Literal
+import time
+from typing import Dict, List, Optional, Any, Literal, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -77,8 +78,19 @@ logger = logging.getLogger(__name__)
 # Timeout constants (in seconds)
 CONNECTION_TIMEOUT = 10
 TOOL_CALL_TIMEOUT = 15
-KEEPALIVE_INTERVAL = 30  # Reserved — not wired today; see BR-A-008 / BR-B-015
+KEEPALIVE_INTERVAL = 30  # F-414d48d4: ping / tools/list so idle sessions stay up
 MAX_RETRIES = 2
+
+# F-51e46b4c: per-backend circuit breaker (NOT the embedder breaker).
+BREAKER_CLOSED = "closed"
+BREAKER_OPEN = "open"
+BREAKER_HALF_OPEN = "half_open"
+BREAKER_FAILURE_THRESHOLD = 3  # consecutive transport/timeout
+BREAKER_OPEN_SECONDS = 30.0
+# Bound tools/list, resources/list, prompts/list pagination.
+MAX_LIST_PAGES = 32
+# Bound progress message / streamed content forwarded to the gateway.
+PROGRESS_MESSAGE_LIMIT = 4096
 
 # Stream bounds — guard the gateway against a malicious/buggy backend that
 # writes a massive single line (would otherwise OOM the parent process).
@@ -245,6 +257,7 @@ def make_error_envelope(
     data: Optional[Any] = None,
     retryable: Optional[bool] = None,
     content: Optional[List[Any]] = None,
+    retry_after_seconds: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Build a structured error envelope.
 
@@ -279,7 +292,60 @@ def make_error_envelope(
         envelope["retryable"] = retryable
     if content is not None:
         envelope["content"] = content
+    if retry_after_seconds is not None:
+        envelope["retry_after_seconds"] = float(retry_after_seconds)
     return envelope
+
+
+def _bound_progress_message(message: Optional[str]) -> Optional[str]:
+    """Cap progress text so a noisy backend cannot flood the MCP client."""
+    if message is None:
+        return None
+    if not isinstance(message, str):
+        message = str(message)
+    encoded = message.encode("utf-8", errors="replace")
+    if len(encoded) <= PROGRESS_MESSAGE_LIMIT:
+        return message
+    return encoded[:PROGRESS_MESSAGE_LIMIT].decode("utf-8", errors="replace") + "…"
+
+
+def _bound_content_list(content: List[Any]) -> List[Any]:
+    """Cap serialized content at STDOUT_LINE_LIMIT (F-6580241e)."""
+    if not isinstance(content, list):
+        return []
+    total = 0
+    out: List[Any] = []
+    for item in content:
+        try:
+            encoded = json.dumps(item, default=str).encode("utf-8")
+        except (TypeError, ValueError):
+            encoded = str(item).encode("utf-8", errors="replace")
+        if total + len(encoded) > STDOUT_LINE_LIMIT:
+            out.append({
+                "type": "text",
+                "text": "[truncated: content exceeded STDOUT_LINE_LIMIT]",
+            })
+            break
+        out.append(item)
+        total += len(encoded)
+    return out
+
+
+async def _invoke_progress(
+    callback: Optional[Any],
+    progress: float,
+    total: Optional[float] = None,
+    message: Optional[str] = None,
+) -> None:
+    """Best-effort progress fan-out. Never raise into the call path."""
+    if callback is None:
+        return
+    try:
+        result = callback(progress, total, _bound_progress_message(message))
+        if asyncio.iscoroutine(result):
+            await result
+    except Exception as e:
+        logger.debug(f"progress callback failed: {e}")
 
 
 @dataclass
@@ -334,6 +400,11 @@ class ConnectionStats:
     outcomes: Dict[str, int] = field(default_factory=dict)
     inflight_count: int = 0
     inflight_peak: int = 0
+    # F-51e46b4c: Hystrix-style breaker. Distinct from the embedder breaker.
+    breaker_state: str = BREAKER_CLOSED
+    consecutive_failures: int = 0
+    breaker_opened_at: Optional[float] = None
+    breaker_transitions: Dict[str, int] = field(default_factory=dict)
 
     def record_call(
         self,
@@ -405,6 +476,60 @@ class ConnectionStats:
                 self.avg_latency_ms * (self.total_calls - 1) + latency_ms
             ) / self.total_calls
 
+        # Breaker is driven only by transport/timeout (not tool_error).
+        if outcome in (OUTCOME_TRANSPORT_ERROR, OUTCOME_TIMEOUT):
+            self.consecutive_failures += 1
+            if self.breaker_state == BREAKER_HALF_OPEN:
+                self._set_breaker(BREAKER_OPEN)
+            elif (
+                self.breaker_state == BREAKER_CLOSED
+                and self.consecutive_failures >= BREAKER_FAILURE_THRESHOLD
+            ):
+                self._set_breaker(BREAKER_OPEN)
+        elif outcome in (OUTCOME_SUCCESS, OUTCOME_TOOL_ERROR):
+            self.consecutive_failures = 0
+            if self.breaker_state in (BREAKER_OPEN, BREAKER_HALF_OPEN):
+                self._set_breaker(BREAKER_CLOSED)
+
+    def _set_breaker(self, new_state: str) -> None:
+        old = self.breaker_state
+        if old == new_state:
+            return
+        self.breaker_state = new_state
+        key = f"{old}->{new_state}"
+        self.breaker_transitions[key] = self.breaker_transitions.get(key, 0) + 1
+        if new_state == BREAKER_OPEN:
+            self.breaker_opened_at = time.time()
+        elif new_state == BREAKER_CLOSED:
+            self.breaker_opened_at = None
+            self.consecutive_failures = 0
+        logger.warning(
+            f"backend breaker {old} -> {new_state} "
+            f"(consecutive_failures={self.consecutive_failures})"
+        )
+
+    def breaker_retry_after(self) -> Optional[float]:
+        """Seconds until a half-open probe is allowed; None if not OPEN."""
+        if self.breaker_state != BREAKER_OPEN:
+            return None
+        opened = self.breaker_opened_at
+        if opened is None:
+            return BREAKER_OPEN_SECONDS
+        remaining = BREAKER_OPEN_SECONDS - (time.time() - opened)
+        return max(0.0, remaining)
+
+    def breaker_can_attempt(self) -> bool:
+        """True if connect/execute may proceed (closed, half-open, or OPEN expired)."""
+        if self.breaker_state in (BREAKER_CLOSED, BREAKER_HALF_OPEN):
+            return True
+        if self.breaker_state == BREAKER_OPEN:
+            retry = self.breaker_retry_after()
+            if retry is not None and retry <= 0:
+                self._set_breaker(BREAKER_HALF_OPEN)
+                return True
+            return False
+        return True
+
 
 class SimpleBackendConnection:
     """Per-backend JSON-RPC connection over an MCP server subprocess.
@@ -459,6 +584,13 @@ class SimpleBackendConnection:
         # BR-B-008: track PIDs we had to abandon after the post-kill wait
         # exceeded KILL_WAIT_TIMEOUT, so the operator can see them in stats.
         self._abandoned_pids: List[int] = []
+        # F-414d48d4 / F-6580241e: notifications + keepalive + progress.
+        self._progress_callbacks: Dict[Any, Any] = {}
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._last_notification_at: Optional[datetime] = None
+        self._on_catalog_changed: Optional[Callable[[str], Any]] = None
+        self._resources: List[Dict[str, Any]] = []
+        self._prompts: List[Dict[str, Any]] = []
 
     def _ensure_async_primitives(self) -> None:
         """Lazily construct loop-bound asyncio primitives.
@@ -552,12 +684,15 @@ class SimpleBackendConnection:
 
                 msg_id = msg.get("id") if isinstance(msg, dict) else None
                 if msg_id is None:
-                    # Notification or malformed. Ignore — we don't route those
-                    # to the caller, but log at debug so they're not invisible.
-                    logger.debug(
-                        f"Backend {self.name} sent id-less message "
-                        f"(method={msg.get('method') if isinstance(msg, dict) else None})"
-                    )
+                    # F-414d48d4 / F-6580241e: notifications have no id.
+                    # Route tools/list_changed, progress, etc. instead of
+                    # dropping them on the floor.
+                    if isinstance(msg, dict):
+                        self._handle_notification(msg)
+                    else:
+                        logger.debug(
+                            f"Backend {self.name} sent id-less non-object message"
+                        )
                     continue
 
                 fut = self._pending.pop(msg_id, None)
@@ -702,14 +837,12 @@ class SimpleBackendConnection:
             # Send initialized notification
             await self._send_notification("notifications/initialized")
 
-            # Get tools list
-            tools_result = await asyncio.wait_for(
-                self._send_request("tools/list", {}, timeout=timeout),
-                timeout=timeout
+            # Get tools list (follow nextCursor so list_changed + first
+            # connect see the full catalog — F-414d48d4).
+            self._tools = await asyncio.wait_for(
+                self._list_paginated("tools/list", "tools", timeout=timeout),
+                timeout=timeout,
             )
-
-            if "result" in tools_result and "tools" in tools_result["result"]:
-                self._tools = tools_result["result"]["tools"]
 
             self._connected = True
             self._stats.connected_at = datetime.now()
@@ -762,6 +895,7 @@ class SimpleBackendConnection:
         # Signal in-flight requests BEFORE we start tearing anything down.
         self._shutting_down = True
         self._connected = False
+        await self._stop_keepalive()
 
         # Fail any pending futures immediately so callers stuck in
         # asyncio.wait_for(fut) wake with BackendShuttingDownError rather
@@ -944,11 +1078,166 @@ class SimpleBackendConnection:
         except Exception as e:
             logger.debug(f"Stderr reader error for {self.name}: {e}")
 
+    def _handle_notification(self, msg: Dict[str, Any]) -> None:
+        """Dispatch JSON-RPC notifications (method, no id).
+
+        F-414d48d4: ``notifications/tools/list_changed`` refreshes the
+        cached catalog. F-6580241e: ``notifications/progress`` fans out to
+        the in-flight request's progress callback.
+        """
+        method = msg.get("method") or ""
+        params = msg.get("params") if isinstance(msg.get("params"), dict) else {}
+        self._last_notification_at = datetime.now()
+
+        if method in (
+            "notifications/progress",
+            "notifications/cancelled",
+        ) or method.endswith("/progress"):
+            token = params.get("progressToken")
+            callback = self._progress_callbacks.get(token)
+            if callback is None and token is not None:
+                # Some servers echo the request id as a string.
+                callback = self._progress_callbacks.get(str(token))
+                if callback is None:
+                    try:
+                        callback = self._progress_callbacks.get(int(token))
+                    except (TypeError, ValueError):
+                        callback = None
+            if callback is not None:
+                progress = params.get("progress", 0)
+                total = params.get("total")
+                message = params.get("message")
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(
+                        _invoke_progress(callback, float(progress), total, message)
+                    )
+                except Exception as e:
+                    logger.debug(f"progress dispatch for {self.name} failed: {e}")
+            return
+
+        if method in (
+            "notifications/tools/list_changed",
+            "notifications/prompts/list_changed",
+            "notifications/resources/list_changed",
+        ):
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._refresh_catalog(method))
+            except Exception as e:
+                logger.debug(f"catalog refresh schedule for {self.name} failed: {e}")
+            return
+
+        logger.debug(
+            f"Backend {self.name} sent id-less message (method={method})"
+        )
+
+    async def _refresh_catalog(self, notification_method: str) -> None:
+        """Re-list tools/prompts/resources after a list_changed notification."""
+        if self._shutting_down or not self._connected:
+            return
+        try:
+            if notification_method.endswith("tools/list_changed"):
+                self._tools = await self._list_paginated("tools/list", "tools")
+            elif notification_method.endswith("prompts/list_changed"):
+                self._prompts = await self._list_paginated("prompts/list", "prompts")
+            elif notification_method.endswith("resources/list_changed"):
+                self._resources = await self._list_paginated(
+                    "resources/list", "resources"
+                )
+            cb = self._on_catalog_changed
+            if cb is not None:
+                maybe = cb(self.name)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+        except Exception as e:
+            logger.warning(
+                f"Backend {self.name} catalog refresh after {notification_method} "
+                f"failed: {e}"
+            )
+
+    async def _list_paginated(
+        self,
+        method: str,
+        result_key: str,
+        timeout: Optional[float] = None,
+    ) -> List[Any]:
+        """Follow nextCursor for tools/list, resources/list, prompts/list."""
+        items: List[Any] = []
+        cursor: Optional[str] = None
+        for _ in range(MAX_LIST_PAGES):
+            params: Dict[str, Any] = {}
+            if cursor:
+                params["cursor"] = cursor
+            resp = await self._send_request(method, params, timeout=timeout)
+            if "error" in resp:
+                logger.warning(
+                    f"Backend {self.name} {method} error: {resp.get('error')}"
+                )
+                break
+            result = resp.get("result") if isinstance(resp.get("result"), dict) else {}
+            chunk = result.get(result_key) or []
+            if isinstance(chunk, list):
+                items.extend(chunk)
+            cursor = result.get("nextCursor")
+            if not isinstance(cursor, str) or not cursor:
+                break
+        return items
+
+    async def _keepalive_loop(self) -> None:
+        """F-414d48d4: ping (fallback tools/list) on KEEPALIVE_INTERVAL."""
+        try:
+            while not self._shutting_down and self._connected:
+                await asyncio.sleep(KEEPALIVE_INTERVAL)
+                if self._shutting_down or not self._connected:
+                    break
+                try:
+                    await self._send_request(
+                        "ping", {}, timeout=HEALTH_PROBE_TIMEOUT
+                    )
+                except Exception:
+                    try:
+                        await self._send_request(
+                            "tools/list", {}, timeout=HEALTH_PROBE_TIMEOUT
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Keepalive failed for {self.name}: {e}"
+                        )
+                        self._connected = False
+                        break
+        except asyncio.CancelledError:
+            raise
+
+    def _start_keepalive(self) -> None:
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        try:
+            self._keepalive_task = asyncio.get_running_loop().create_task(
+                self._keepalive_loop()
+            )
+        except Exception as e:
+            logger.debug(f"keepalive start for {self.name} failed: {e}")
+
+    async def _stop_keepalive(self) -> None:
+        task = self._keepalive_task
+        self._keepalive_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"keepalive stop for {self.name}: {e}")
+
     async def _send_request(
         self,
         method: str,
         params: Dict[str, Any],
         timeout: Optional[float] = None,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Send a JSON-RPC request and wait for its response.
 
@@ -1011,11 +1300,19 @@ class SimpleBackendConnection:
 
                 request_id = self._next_id()
                 self._pending[request_id] = fut
+                send_params = params
+                if progress_callback is not None:
+                    send_params = dict(params)
+                    meta = dict(send_params.get("_meta") or {})
+                    meta["progressToken"] = request_id
+                    send_params["_meta"] = meta
+                    self._progress_callbacks[request_id] = progress_callback
+                    self._progress_callbacks[str(request_id)] = progress_callback
                 request = {
                     "jsonrpc": "2.0",
                     "id": request_id,
                     "method": method,
-                    "params": params,
+                    "params": send_params,
                 }
                 request_str = json.dumps(request) + "\n"
                 try:
@@ -1053,6 +1350,8 @@ class SimpleBackendConnection:
             # Whether we succeeded or timed out, don't leak an entry.
             if request_id is not None:
                 self._pending.pop(request_id, None)
+                self._progress_callbacks.pop(request_id, None)
+                self._progress_callbacks.pop(str(request_id), None)
             self._stats.inflight_count = max(0, self._stats.inflight_count - 1)
             self._inflight_sem.release()
 
@@ -1120,6 +1419,7 @@ class SimpleBackendConnection:
         tool_name: str,
         arguments: Dict[str, Any],
         timeout: Optional[float] = None,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Call a tool on this backend.
 
@@ -1149,7 +1449,7 @@ class SimpleBackendConnection:
             result = await self._send_request("tools/call", {
                 "name": tool_name,
                 "arguments": arguments,
-            }, timeout=timeout)
+            }, timeout=timeout, progress_callback=progress_callback)
 
             latency_ms = (asyncio.get_event_loop().time() - start_time) * 1000
 
@@ -1216,10 +1516,13 @@ class SimpleBackendConnection:
                 self._stats.record_call(
                     latency_ms=latency_ms, outcome=OUTCOME_SUCCESS
                 )
+                bounded = _bound_content_list(
+                    content_list if isinstance(content_list, list) else []
+                )
                 return {
                     "success": True,
                     "result": "\n".join(text_parts) if text_parts else "Tool executed successfully",
-                    "content": content_list if isinstance(content_list, list) else [],
+                    "content": bounded,
                 }
 
             self._stats.record_call(
@@ -1291,6 +1594,68 @@ class SimpleBackendConnection:
                     "on next call"
                 )
             raise
+
+    async def list_resources(self) -> List[Dict[str, Any]]:
+        """Live-backend resources/list (F-e126a298). Follows nextCursor."""
+        if not self._connected:
+            raise BackendNotConnectedError(self.name)
+        self._resources = await self._list_paginated("resources/list", "resources")
+        return list(self._resources)
+
+    async def read_resource(self, uri: str) -> Dict[str, Any]:
+        """Live-backend resources/read (F-e126a298)."""
+        if not self._connected:
+            raise BackendNotConnectedError(self.name)
+        resp = await self._send_request("resources/read", {"uri": uri})
+        if "error" in resp:
+            err = resp["error"]
+            message = err.get("message") if isinstance(err, dict) else str(err)
+            return make_error_envelope(
+                error_kind=OUTCOME_PROTOCOL_ERROR,
+                error=message or f"resources/read failed for {uri}",
+                backend=self.name,
+                retryable=False,
+            )
+        result = resp.get("result") or {}
+        contents = result.get("contents") or []
+        if isinstance(contents, list):
+            contents = _bound_content_list(contents)
+        return {"success": True, "uri": uri, "contents": contents, "backend": self.name}
+
+    async def list_prompts(self) -> List[Dict[str, Any]]:
+        """Live-backend prompts/list (F-e126a298). Follows nextCursor."""
+        if not self._connected:
+            raise BackendNotConnectedError(self.name)
+        self._prompts = await self._list_paginated("prompts/list", "prompts")
+        return list(self._prompts)
+
+    async def get_prompt(
+        self, name: str, arguments: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Live-backend prompts/get (F-e126a298)."""
+        if not self._connected:
+            raise BackendNotConnectedError(self.name)
+        params: Dict[str, Any] = {"name": name}
+        if arguments:
+            params["arguments"] = arguments
+        resp = await self._send_request("prompts/get", params)
+        if "error" in resp:
+            err = resp["error"]
+            message = err.get("message") if isinstance(err, dict) else str(err)
+            return make_error_envelope(
+                error_kind=OUTCOME_PROTOCOL_ERROR,
+                error=message or f"prompts/get failed for {name}",
+                backend=self.name,
+                retryable=False,
+            )
+        result = resp.get("result") or {}
+        return {
+            "success": True,
+            "name": name,
+            "description": result.get("description"),
+            "messages": result.get("messages") or [],
+            "backend": self.name,
+        }
 
     async def active_probe(self, timeout: float = HEALTH_PROBE_TIMEOUT) -> Dict[str, Any]:
         """Send a lightweight ``tools/list`` request and measure latency.
@@ -1426,6 +1791,189 @@ class HttpBackendConnection:
         # attribute present (empty) so the stdio-shaped stats path does not
         # AttributeError on an HTTP backend.
         self._abandoned_pids: List[int] = []
+        self._last_notification_at: Optional[datetime] = None
+        self._on_catalog_changed: Optional[Callable[[str], Any]] = None
+        self._keepalive_task: Optional[asyncio.Task] = None
+        self._resources: List[Dict[str, Any]] = []
+        self._prompts: List[Dict[str, Any]] = []
+        self._progress_callback: Optional[Any] = None
+        self._shutting_down: bool = False
+
+    async def _http_message_handler(self, message: Any) -> None:
+        """F-414d48d4: honor tools/list_changed (and sibling) notifications."""
+        try:
+            root = getattr(message, "root", message)
+            inner = getattr(root, "root", None)
+            method = getattr(root, "method", None) or getattr(message, "method", None)
+            if not method:
+                method = getattr(inner, "method", None)
+            if not method:
+                return
+            self._last_notification_at = datetime.now()
+            method_s = str(method)
+            if method_s.endswith("tools/list_changed"):
+                await self._refresh_http_tools()
+            elif method_s.endswith("prompts/list_changed"):
+                await self._refresh_http_prompts()
+            elif method_s.endswith("resources/list_changed"):
+                await self._refresh_http_resources()
+            elif method_s.endswith("/progress"):
+                params = getattr(root, "params", None)
+                if params is None and inner is not None:
+                    params = getattr(inner, "params", None)
+                if params is not None and self._progress_callback is not None:
+                    await _invoke_progress(
+                        self._progress_callback,
+                        float(getattr(params, "progress", 0) or 0),
+                        getattr(params, "total", None),
+                        getattr(params, "message", None),
+                    )
+        except Exception as e:
+            logger.debug(f"HTTP message handler for {self.name} failed: {e}")
+
+    async def _refresh_http_tools(self) -> None:
+        if self._session is None or not self._connected:
+            return
+        try:
+            self._tools = await self._http_list_tools_paginated()
+            cb = self._on_catalog_changed
+            if cb is not None:
+                maybe = cb(self.name)
+                if asyncio.iscoroutine(maybe):
+                    await maybe
+        except Exception as e:
+            logger.warning(f"HTTP tools refresh for {self.name} failed: {e}")
+
+    async def _refresh_http_prompts(self) -> None:
+        if self._session is None or not self._connected:
+            return
+        try:
+            self._prompts = await self._http_list_prompts_paginated()
+        except Exception as e:
+            logger.warning(f"HTTP prompts refresh for {self.name} failed: {e}")
+
+    async def _refresh_http_resources(self) -> None:
+        if self._session is None or not self._connected:
+            return
+        try:
+            self._resources = await self._http_list_resources_paginated()
+        except Exception as e:
+            logger.warning(f"HTTP resources refresh for {self.name} failed: {e}")
+
+    async def _http_list_tools_paginated(self) -> List[Dict[str, Any]]:
+        assert self._session is not None
+        tools: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        for _ in range(MAX_LIST_PAGES):
+            result = (
+                await self._session.list_tools(cursor=cursor)
+                if cursor
+                else await self._session.list_tools()
+            )
+            for tool in result.tools:
+                tools.append({
+                    "name": tool.name,
+                    "description": tool.description or "",
+                    "inputSchema": (
+                        tool.inputSchema
+                        if getattr(tool, "inputSchema", None) is not None
+                        else {}
+                    ),
+                })
+            cursor = getattr(result, "nextCursor", None)
+            if not isinstance(cursor, str) or not cursor:
+                break
+        return tools
+
+    async def _http_list_resources_paginated(self) -> List[Dict[str, Any]]:
+        assert self._session is not None
+        items: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        for _ in range(MAX_LIST_PAGES):
+            result = (
+                await self._session.list_resources(cursor=cursor)
+                if cursor
+                else await self._session.list_resources()
+            )
+            for res in result.resources:
+                dumped = res.model_dump(mode="json") if hasattr(res, "model_dump") else {
+                    "uri": str(getattr(res, "uri", "")),
+                    "name": getattr(res, "name", None),
+                    "description": getattr(res, "description", None),
+                    "mimeType": getattr(res, "mimeType", None),
+                }
+                items.append(dumped)
+            cursor = getattr(result, "nextCursor", None)
+            if not isinstance(cursor, str) or not cursor:
+                break
+        return items
+
+    async def _http_list_prompts_paginated(self) -> List[Dict[str, Any]]:
+        assert self._session is not None
+        items: List[Dict[str, Any]] = []
+        cursor: Optional[str] = None
+        for _ in range(MAX_LIST_PAGES):
+            result = (
+                await self._session.list_prompts(cursor=cursor)
+                if cursor
+                else await self._session.list_prompts()
+            )
+            for prompt in result.prompts:
+                dumped = prompt.model_dump(mode="json") if hasattr(prompt, "model_dump") else {
+                    "name": getattr(prompt, "name", ""),
+                    "description": getattr(prompt, "description", None),
+                    "arguments": getattr(prompt, "arguments", None),
+                }
+                items.append(dumped)
+            cursor = getattr(result, "nextCursor", None)
+            if not isinstance(cursor, str) or not cursor:
+                break
+        return items
+
+    async def _keepalive_loop(self) -> None:
+        try:
+            while not self._shutting_down and self._connected and self._session is not None:
+                await asyncio.sleep(KEEPALIVE_INTERVAL)
+                if self._shutting_down or not self._connected or self._session is None:
+                    break
+                try:
+                    await asyncio.wait_for(
+                        self._session.send_ping(), timeout=HEALTH_PROBE_TIMEOUT
+                    )
+                except Exception:
+                    try:
+                        await asyncio.wait_for(
+                            self._session.list_tools(), timeout=HEALTH_PROBE_TIMEOUT
+                        )
+                    except Exception as e:
+                        logger.warning(f"HTTP keepalive failed for {self.name}: {e}")
+                        self._connected = False
+                        break
+        except asyncio.CancelledError:
+            raise
+
+    def _start_keepalive(self) -> None:
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        try:
+            self._keepalive_task = asyncio.get_running_loop().create_task(
+                self._keepalive_loop()
+            )
+        except Exception as e:
+            logger.debug(f"HTTP keepalive start for {self.name} failed: {e}")
+
+    async def _stop_keepalive(self) -> None:
+        task = self._keepalive_task
+        self._keepalive_task = None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.debug(f"HTTP keepalive stop for {self.name}: {e}")
 
     async def connect(self, timeout: Optional[float] = None) -> bool:
         """Establish the Streamable HTTP session and cache the tool list.
@@ -1486,31 +2034,20 @@ class HttpBackendConnection:
                     client_info=Implementation(
                         name="tool-compass", version=__version__
                     ),
+                    message_handler=self._http_message_handler,
                 )
             )
 
             await asyncio.wait_for(self._session.initialize(), timeout=timeout)
 
-            tools_result = await asyncio.wait_for(
-                self._session.list_tools(), timeout=timeout
+            # Follow nextCursor so list_changed + first connect see the
+            # full catalog (F-414d48d4).
+            self._tools = await asyncio.wait_for(
+                self._http_list_tools_paginated(), timeout=timeout
             )
-            # Normalize SDK Tool objects into the same dict shape the stdio
-            # path stores (name / description / inputSchema), so get_tools()
-            # can be identical and inputSchema fidelity is preserved.
-            self._tools = [
-                {
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "inputSchema": (
-                        tool.inputSchema
-                        if getattr(tool, "inputSchema", None) is not None
-                        else {}
-                    ),
-                }
-                for tool in tools_result.tools
-            ]
 
             self._connected = True
+            self._shutting_down = False
             self._stats.connected_at = datetime.now()
             self._stats.last_used = datetime.now()
             logger.info(
@@ -1549,6 +2086,8 @@ class HttpBackendConnection:
         :meth:`connect` (half-open stack).
         """
         self._connected = False
+        self._shutting_down = True
+        await self._stop_keepalive()
         if self._exit_stack is not None:
             try:
                 await self._exit_stack.aclose()
@@ -1583,6 +2122,7 @@ class HttpBackendConnection:
         tool_name: str,
         arguments: Dict[str, Any],
         timeout: Optional[float] = None,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Call a tool over the HTTP session.
 
@@ -1599,9 +2139,14 @@ class HttpBackendConnection:
 
         start_time = asyncio.get_event_loop().time()
         deadline = _effective_request_timeout(timeout)
+        self._progress_callback = progress_callback
         try:
             res = await asyncio.wait_for(
-                self._session.call_tool(tool_name, arguments),
+                self._session.call_tool(
+                    tool_name,
+                    arguments,
+                    progress_callback=progress_callback,
+                ),
                 timeout=deadline,
             )
 
@@ -1635,7 +2180,7 @@ class HttpBackendConnection:
             return {
                 "success": True,
                 "result": text if text else "Tool executed successfully",
-                "content": _dump_content(content_list),
+                "content": _bound_content_list(_dump_content(content_list)),
             }
 
         except McpError as e:
@@ -1697,6 +2242,90 @@ class HttpBackendConnection:
             )
             self._connected = False
             raise
+        finally:
+            self._progress_callback = None
+
+    async def list_resources(self) -> List[Dict[str, Any]]:
+        """Live-backend resources/list over HTTP (F-e126a298)."""
+        if not self._connected or self._session is None:
+            raise BackendNotConnectedError(self.name)
+        self._resources = await self._http_list_resources_paginated()
+        return list(self._resources)
+
+    async def read_resource(self, uri: str) -> Dict[str, Any]:
+        """Live-backend resources/read over HTTP (F-e126a298)."""
+        if not self._connected or self._session is None:
+            raise BackendNotConnectedError(self.name)
+        from pydantic import AnyUrl
+        try:
+            result = await self._session.read_resource(AnyUrl(uri))
+        except McpError as e:
+            err = e.error
+            return make_error_envelope(
+                error_kind=OUTCOME_PROTOCOL_ERROR,
+                error=getattr(err, "message", str(e)),
+                backend=self.name,
+                code=getattr(err, "code", None),
+                retryable=False,
+            )
+        contents = []
+        for item in result.contents or []:
+            if hasattr(item, "model_dump"):
+                contents.append(item.model_dump(mode="json"))
+            else:
+                contents.append({
+                    "uri": str(getattr(item, "uri", uri)),
+                    "mimeType": getattr(item, "mimeType", None),
+                    "text": getattr(item, "text", None),
+                    "blob": getattr(item, "blob", None),
+                })
+        return {
+            "success": True,
+            "uri": uri,
+            "contents": _bound_content_list(contents),
+            "backend": self.name,
+        }
+
+    async def list_prompts(self) -> List[Dict[str, Any]]:
+        """Live-backend prompts/list over HTTP (F-e126a298)."""
+        if not self._connected or self._session is None:
+            raise BackendNotConnectedError(self.name)
+        self._prompts = await self._http_list_prompts_paginated()
+        return list(self._prompts)
+
+    async def get_prompt(
+        self, name: str, arguments: Optional[Dict[str, Any]] = None
+    ) -> Dict[str, Any]:
+        """Live-backend prompts/get over HTTP (F-e126a298)."""
+        if not self._connected or self._session is None:
+            raise BackendNotConnectedError(self.name)
+        str_args = None
+        if arguments:
+            str_args = {k: str(v) for k, v in arguments.items()}
+        try:
+            result = await self._session.get_prompt(name, str_args)
+        except McpError as e:
+            err = e.error
+            return make_error_envelope(
+                error_kind=OUTCOME_PROTOCOL_ERROR,
+                error=getattr(err, "message", str(e)),
+                backend=self.name,
+                code=getattr(err, "code", None),
+                retryable=False,
+            )
+        messages = []
+        for msg in result.messages or []:
+            if hasattr(msg, "model_dump"):
+                messages.append(msg.model_dump(mode="json"))
+            else:
+                messages.append(msg)
+        return {
+            "success": True,
+            "name": name,
+            "description": getattr(result, "description", None),
+            "messages": messages,
+            "backend": self.name,
+        }
 
     async def active_probe(self, timeout: float = HEALTH_PROBE_TIMEOUT) -> Dict[str, Any]:
         """Lightweight liveness check via ``send_ping``.
@@ -1812,6 +2441,27 @@ class SimpleBackendManager:
         # ensure_connected / connect_backend waiters await this instead of
         # spawning a sibling subprocess / HTTP session.
         self._connecting: Dict[str, "asyncio.Future[bool]"] = {}
+        # F-51e46b4c: breaker + call stats survive reconnect (new Connection
+        # objects would otherwise reset consecutive_failures).
+        self._backend_stats: Dict[str, ConnectionStats] = {}
+
+    def _stats_for(self, name: str) -> ConnectionStats:
+        stats = self._backend_stats.get(name)
+        if stats is None:
+            stats = ConnectionStats()
+            self._backend_stats[name] = stats
+        return stats
+
+    def _reindex_backend(self, name: str) -> None:
+        """Rebuild _tool_index entries for one backend after list_changed."""
+        stale = [k for k, v in self._tool_index.items() if v == name]
+        for k in stale:
+            self._tool_index.pop(k, None)
+        conn = self._backends.get(name)
+        if conn is None:
+            return
+        for tool in conn.get_tools():
+            self._tool_index[tool.qualified_name] = name
 
     def _ensure_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -1836,6 +2486,16 @@ class SimpleBackendManager:
         old_conn = None
         backend = None
         reject_reason: Optional[str] = None
+
+        if self.is_backend_connected(name):
+            return True
+        stats = self._stats_for(name)
+        if not stats.breaker_can_attempt():
+            logger.warning(
+                f"Skipping connect to {name}: breaker {stats.breaker_state} "
+                f"retry_after={stats.breaker_retry_after()}"
+            )
+            return False
 
         async with lock:
             # Check if already connected (cheap registry read).
@@ -1900,20 +2560,30 @@ class SimpleBackendManager:
                 # isinstance(backend, HttpBackend) — guaranteed by the type
                 # gate under the lock above.
                 conn = HttpBackendConnection(name, backend)
+            conn._stats = stats
+            conn._on_catalog_changed = self._reindex_backend
             connected = False
-            for attempt in range(MAX_RETRIES + 1):
+            # Half-open: a single probe, not CONNECTION_TIMEOUT × retries.
+            attempts = 1 if stats.breaker_state == BREAKER_HALF_OPEN else (MAX_RETRIES + 1)
+            for attempt in range(attempts):
                 success = await conn.connect(timeout=timeout)
                 if success:
                     connected = True
                     break
-                if attempt < MAX_RETRIES:
+                if attempt < attempts - 1:
                     logger.warning(
                         f"Retry {attempt + 1}/{MAX_RETRIES} for backend {name}"
                     )
                     await asyncio.sleep(0.5)
 
             if not connected:
+                stats.record_call(
+                    latency_ms=(timeout or CONNECTION_TIMEOUT) * 1000.0,
+                    outcome=OUTCOME_TRANSPORT_ERROR,
+                )
                 return False
+            if stats.breaker_state != BREAKER_CLOSED:
+                stats._set_breaker(BREAKER_CLOSED)
 
             # Swap the new connection back into the registry under the lock.
             # Occupancy check: if another live conn is already stored, keep
@@ -1934,6 +2604,9 @@ class SimpleBackendManager:
                     for tool in conn.get_tools():
                         self._tool_index[tool.qualified_name] = name
                     result = True
+                    starter = getattr(conn, "_start_keepalive", None)
+                    if callable(starter):
+                        starter()
             return result
         except BaseException:
             result = False
@@ -2094,7 +2767,8 @@ class SimpleBackendManager:
         self,
         qualified_name: str,
         arguments: Dict[str, Any],
-        timeout: Optional[float] = None
+        timeout: Optional[float] = None,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Execute a tool by its qualified name with automatic reconnection.
 
@@ -2146,13 +2820,31 @@ class SimpleBackendManager:
                     retryable=False,
                 )
 
+        # F-51e46b4c: fail fast when the breaker is OPEN so we do not pay
+        # CONNECTION_TIMEOUT × retries on every call.
+        breaker = self._stats_for(server_name)
+        if not self.is_backend_connected(server_name) and not breaker.breaker_can_attempt():
+            retry_after = breaker.breaker_retry_after()
+            return make_error_envelope(
+                error_kind=OUTCOME_BACKEND_UNAVAILABLE,
+                error=(
+                    f"Backend {server_name} circuit breaker is open; "
+                    "skipping connect"
+                ),
+                backend=server_name,
+                retryable=True,
+                retry_after_seconds=retry_after,
+            )
+
         # Ensure connected (with automatic reconnection)
         if not await self.ensure_connected(server_name):
+            retry_after = self._stats_for(server_name).breaker_retry_after()
             return make_error_envelope(
                 error_kind=OUTCOME_BACKEND_UNAVAILABLE,
                 error=f"Failed to connect to backend: {server_name}",
                 backend=server_name,
                 retryable=True,
+                retry_after_seconds=retry_after,
             )
 
         conn = self._backends.get(server_name)
@@ -2191,11 +2883,19 @@ class SimpleBackendManager:
         # 30s inner cap. call_tool(name, args) positional contract is
         # unchanged (tests assert that).
         timeout_token = _call_timeout.set(timeout)
+        attempt = 1
         try:
-            return await asyncio.wait_for(
-                conn.call_tool(tool_name, arguments),
-                timeout=timeout,
-            )
+            if progress_callback is not None:
+                call = conn.call_tool(
+                    tool_name, arguments, progress_callback=progress_callback
+                )
+            else:
+                call = conn.call_tool(tool_name, arguments)
+            result = await asyncio.wait_for(call, timeout=timeout)
+            if isinstance(result, dict):
+                result.setdefault("attempt", attempt)
+                result.setdefault("retried", False)
+            return result
         except ToolCallTimeoutError:
             # call_tool already recorded OUTCOME_TIMEOUT. Do not record again.
             logger.error(
@@ -2283,14 +2983,26 @@ class SimpleBackendManager:
                 f"Transport error executing {qualified_name}: {transport_err}"
             )
             logger.info(f"Attempting reconnect to {server_name}...")
+            attempt = 2
             if await self.connect_backend(server_name):
                 retry_conn = self._backends.get(server_name)
                 if retry_conn is not None:
                     try:
-                        return await asyncio.wait_for(
-                            retry_conn.call_tool(tool_name, arguments),
-                            timeout=timeout,
+                        if progress_callback is not None:
+                            retry_call = retry_conn.call_tool(
+                                tool_name,
+                                arguments,
+                                progress_callback=progress_callback,
+                            )
+                        else:
+                            retry_call = retry_conn.call_tool(tool_name, arguments)
+                        retry_result = await asyncio.wait_for(
+                            retry_call, timeout=timeout
                         )
+                        if isinstance(retry_result, dict):
+                            retry_result["retried"] = True
+                            retry_result["attempt"] = attempt
+                        return retry_result
                     except ToolCallTimeoutError:
                         return make_error_envelope(
                             error_kind=OUTCOME_TIMEOUT,
@@ -2319,12 +3031,15 @@ class SimpleBackendManager:
                             retryable=False,
                         )
                     except Exception as retry_error:
-                        return make_error_envelope(
+                        env = make_error_envelope(
                             error_kind=OUTCOME_TRANSPORT_ERROR,
                             error=f"Retry failed: {retry_error}",
                             backend=server_name,
                             retryable=False,
                         )
+                        env["retried"] = True
+                        env["attempt"] = attempt
+                        return env
             return make_error_envelope(
                 error_kind=OUTCOME_TRANSPORT_ERROR,
                 error=str(transport_err),
@@ -2351,28 +3066,68 @@ class SimpleBackendManager:
         connected = []
         stats_by_backend = {}
 
-        for name, conn in self._backends.items():
-            if conn.is_connected:
+        last_notification_at: Optional[str] = None
+        for name in self.config.backends.keys():
+            conn = self._backends.get(name)
+            stats = conn.stats if conn is not None else self._stats_for(name)
+            is_up = bool(conn is not None and conn.is_connected)
+            if is_up:
                 connected.append(name)
-                stats_by_backend[name] = {
-                    "tools": len(conn.get_tools()),
-                    "total_calls": conn.stats.total_calls,
-                    "failed_calls": conn.stats.failed_calls,
-                    "avg_latency_ms": round(conn.stats.avg_latency_ms, 2),
-                    "connected_at": (
-                        conn.stats.connected_at.isoformat()
-                        if conn.stats.connected_at else None
-                    ),
-                    "last_used": (
-                        conn.stats.last_used.isoformat()
-                        if conn.stats.last_used else None
-                    ),
-                    "outcomes": dict(conn.stats.outcomes),
-                    "inflight_count": conn.stats.inflight_count,
-                    "inflight_peak": conn.stats.inflight_peak,
-                    "inflight_cap": MAX_INFLIGHT_REQUESTS_PER_BACKEND,
-                    "abandoned_pids": list(conn._abandoned_pids),
-                }
+            note_at = getattr(conn, "_last_notification_at", None) if conn else None
+            note_iso = None
+            if note_at is not None and hasattr(note_at, "isoformat"):
+                try:
+                    note_iso = note_at.isoformat()
+                except Exception:
+                    note_iso = None
+            if note_iso and (last_notification_at is None or note_iso > last_notification_at):
+                last_notification_at = note_iso
+            connected_at = getattr(stats, "connected_at", None)
+            last_used = getattr(stats, "last_used", None)
+            outcomes = getattr(stats, "outcomes", None)
+            transitions = getattr(stats, "breaker_transitions", None)
+            retry_after = None
+            retry_fn = getattr(stats, "breaker_retry_after", None)
+            if callable(retry_fn):
+                try:
+                    retry_after = retry_fn()
+                    if not isinstance(retry_after, (int, float)):
+                        retry_after = None
+                except Exception:
+                    retry_after = None
+            breaker_state = getattr(stats, "breaker_state", BREAKER_CLOSED)
+            if not isinstance(breaker_state, str):
+                breaker_state = BREAKER_CLOSED
+            consecutive = getattr(stats, "consecutive_failures", 0)
+            if not isinstance(consecutive, (int, float)):
+                consecutive = 0
+            stats_by_backend[name] = {
+                "tools": len(conn.get_tools()) if conn is not None else 0,
+                "connected": is_up,
+                "total_calls": stats.total_calls,
+                "failed_calls": stats.failed_calls,
+                "avg_latency_ms": round(stats.avg_latency_ms, 2),
+                "connected_at": (
+                    connected_at.isoformat()
+                    if connected_at is not None and hasattr(connected_at, "isoformat")
+                    else None
+                ),
+                "last_used": (
+                    last_used.isoformat()
+                    if last_used is not None and hasattr(last_used, "isoformat")
+                    else None
+                ),
+                "outcomes": dict(outcomes) if isinstance(outcomes, dict) else {},
+                "inflight_count": stats.inflight_count,
+                "inflight_peak": stats.inflight_peak,
+                "inflight_cap": MAX_INFLIGHT_REQUESTS_PER_BACKEND,
+                "abandoned_pids": list(conn._abandoned_pids) if conn is not None else [],
+                "breaker_state": breaker_state,
+                "breaker_consecutive_failures": consecutive,
+                "breaker_retry_after": retry_after,
+                "breaker_transitions": dict(transitions) if isinstance(transitions, dict) else {},
+                "last_notification_at": note_iso,
+            }
 
         return {
             "configured_backends": list(self.config.backends.keys()),
@@ -2384,6 +3139,7 @@ class SimpleBackendManager:
                 if conn.is_connected
             },
             "stats": stats_by_backend,
+            "last_notification_at": last_notification_at,
         }
 
     async def health_check(self, *, active: bool = False) -> Dict[str, Any]:
@@ -2466,6 +3222,7 @@ class SimpleBackendManager:
                     "outcomes": dict(conn.stats.outcomes),
                     "inflight_count": conn.stats.inflight_count,
                     "inflight_peak": conn.stats.inflight_peak,
+                    "breaker_state": conn.stats.breaker_state,
                 }
                 if name in active_results:
                     entry["probe"] = active_results[name]
@@ -2473,5 +3230,137 @@ class SimpleBackendManager:
                         entry["status"] = "degraded"
                 health[name] = entry
             else:
-                health[name] = {"status": "disconnected"}
+                stats = self._stats_for(name)
+                health[name] = {
+                    "status": "disconnected",
+                    "breaker_state": stats.breaker_state,
+                    "breaker_retry_after": stats.breaker_retry_after(),
+                }
         return health
+
+    async def _ensure_named(self, server_name: str) -> Optional[Any]:
+        if not await self.ensure_connected(server_name):
+            return None
+        return self._backends.get(server_name)
+
+    async def list_resources(
+        self, server_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Live-backend resources/list, qualified as server:uri (F-e126a298)."""
+        names = [server_name] if server_name else list(self.config.backends.keys())
+        resources: List[Dict[str, Any]] = []
+        errors: Dict[str, str] = {}
+        for name in names:
+            if name is None:
+                continue
+            conn = await self._ensure_named(name)
+            if conn is None:
+                errors[name] = "not connected"
+                continue
+            try:
+                items = await conn.list_resources()
+            except Exception as e:
+                errors[name] = str(e)
+                continue
+            for item in items:
+                uri = item.get("uri") if isinstance(item, dict) else getattr(item, "uri", None)
+                qualified = f"{name}:{uri}" if uri else name
+                entry = dict(item) if isinstance(item, dict) else {"uri": str(uri)}
+                entry["server"] = name
+                entry["qualified"] = qualified
+                resources.append(entry)
+        return {"resources": resources, "errors": errors, "total": len(resources)}
+
+    async def read_resource(self, qualified_uri: str) -> Dict[str, Any]:
+        """Read a resource qualified as server:uri (F-e126a298)."""
+        if ":" not in qualified_uri:
+            return make_error_envelope(
+                error_kind=OUTCOME_BACKEND_UNAVAILABLE,
+                error="Use format 'server:uri' (e.g. docs:file://specs/readme.md)",
+                retryable=False,
+            )
+        server_name, uri = qualified_uri.split(":", 1)
+        conn = await self._ensure_named(server_name)
+        if conn is None:
+            return make_error_envelope(
+                error_kind=OUTCOME_BACKEND_UNAVAILABLE,
+                error=f"Failed to connect to backend: {server_name}",
+                backend=server_name,
+                retryable=True,
+            )
+        try:
+            result = await conn.read_resource(uri)
+        except Exception as e:
+            return make_error_envelope(
+                error_kind=OUTCOME_TRANSPORT_ERROR,
+                error=str(e),
+                backend=server_name,
+                retryable=True,
+            )
+        if isinstance(result, dict):
+            result.setdefault("qualified", qualified_uri)
+            result.setdefault("server", server_name)
+        return result
+
+    async def list_prompts(
+        self, server_name: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Live-backend prompts/list, qualified as server:name (F-e126a298)."""
+        names = [server_name] if server_name else list(self.config.backends.keys())
+        prompts: List[Dict[str, Any]] = []
+        errors: Dict[str, str] = {}
+        for name in names:
+            if name is None:
+                continue
+            conn = await self._ensure_named(name)
+            if conn is None:
+                errors[name] = "not connected"
+                continue
+            try:
+                items = await conn.list_prompts()
+            except Exception as e:
+                errors[name] = str(e)
+                continue
+            for item in items:
+                pname = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+                qualified = f"{name}:{pname}" if pname else name
+                entry = dict(item) if isinstance(item, dict) else {"name": str(pname)}
+                entry["server"] = name
+                entry["qualified"] = qualified
+                prompts.append(entry)
+        return {"prompts": prompts, "errors": errors, "total": len(prompts)}
+
+    async def get_prompt(
+        self,
+        qualified_name: str,
+        arguments: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Get a prompt qualified as server:name (F-e126a298)."""
+        if ":" not in qualified_name:
+            return make_error_envelope(
+                error_kind=OUTCOME_BACKEND_UNAVAILABLE,
+                error="Use format 'server:prompt_name'",
+                retryable=False,
+            )
+        server_name, prompt_name = qualified_name.split(":", 1)
+        conn = await self._ensure_named(server_name)
+        if conn is None:
+            return make_error_envelope(
+                error_kind=OUTCOME_BACKEND_UNAVAILABLE,
+                error=f"Failed to connect to backend: {server_name}",
+                backend=server_name,
+                retryable=True,
+            )
+        try:
+            result = await conn.get_prompt(prompt_name, arguments)
+        except Exception as e:
+            return make_error_envelope(
+                error_kind=OUTCOME_TRANSPORT_ERROR,
+                error=str(e),
+                backend=server_name,
+                retryable=True,
+            )
+        if isinstance(result, dict):
+            result.setdefault("qualified", qualified_name)
+            result.setdefault("server", server_name)
+        return result
