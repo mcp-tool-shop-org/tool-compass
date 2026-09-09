@@ -129,3 +129,4 @@ npm/*.tgz
 
 # Dogfood swarm working artifacts (manifest, wave outputs) — not shipped
 swarms/
+.swarm/
