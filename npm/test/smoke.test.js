@@ -52,3 +52,41 @@ test("package.json version matches bin shim version", () => {
     "bin shim version must equal package.json version"
   );
 });
+
+test("bin intercepts bare help before requiring npm-launcher", () => {
+  const binPath = path.join(__dirname, "..", "bin", "tool-compass.js");
+  const source = fs.readFileSync(binPath, "utf8");
+  const requireIdx = source.indexOf(
+    'require("@mcptoolshop/npm-launcher/bin/mcptoolshop-launch.js")'
+  );
+  const helpIdx = source.indexOf("HELP_TOKENS");
+  assert.ok(requireIdx > 0, "bin must still require npm-launcher for real commands");
+  assert.ok(helpIdx > 0, "bin must define HELP_TOKENS");
+  assert.ok(helpIdx < requireIdx, "help intercept must run before require()");
+  assert.match(source, /try\s*\{/);
+  assert.match(source, /MODULE_NOT_FOUND/);
+  assert.match(source, /pip install tool-compass/);
+});
+
+const { spawnSync } = require("node:child_process");
+
+function runBin(...cliArgs) {
+  const binPath = path.join(__dirname, "..", "bin", "tool-compass.js");
+  return spawnSync(process.execPath, [binPath, ...cliArgs], {
+    encoding: "utf8",
+    timeout: 5000,
+    windowsHide: true,
+  });
+}
+
+for (const flag of ["--help", "-h", "help"]) {
+  test(`bin ${flag} prints local usage and exits 0 without launching`, () => {
+    const r = runBin(flag);
+    assert.equal(r.status, 0, r.stderr || r.stdout);
+    for (const cmd of ["doctor", "search", "sync", "ui", "serve"]) {
+      assert.match(r.stdout, new RegExp(`\\b${cmd}\\b`));
+    }
+    assert.match(r.stdout, /GitHub Release/i);
+    assert.doesNotMatch(r.stdout, /Downloading|checksum/i);
+  });
+}
