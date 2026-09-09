@@ -3,8 +3,8 @@
 > Score a repo before remediation. Fill this out first, then use SHIP_GATE.md to fix.
 
 **Repo:** tool-compass
-**Date:** 2026-06-20
-**Version:** 2.4.0
+**Date:** 2026-09-09
+**Version:** 2.5.1
 **Type tags:** [pypi] [mcp] [cli]
 
 <!-- SHIPCHECK-AUTO-START -->
