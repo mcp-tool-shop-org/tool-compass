@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -256,11 +257,33 @@ class TestPrintHelpers:
 class TestBuildParser:
     """Smoke tests for the argparse tree shape."""
 
-    def test_parser_has_version(self):
+    def test_parser_has_version(self, capsys):
         parser = cli._build_parser()
-        # --version action raises SystemExit on parse.
-        with pytest.raises(SystemExit):
+        # --version action raises SystemExit(0) and prints the version.
+        # Matching any SystemExit also passes for an unregistered flag
+        # (argparse exits 2); pin the code and the stdout banner.
+        with pytest.raises(SystemExit) as exc:
             parser.parse_args(["--version"])
+        assert exc.value.code == 0
+        captured = capsys.readouterr()
+        from _version import __version__
+
+        assert __version__ in captured.out
+        assert "tool-compass" in captured.out
+
+    def test_cli_version_subprocess(self):
+        """`python cli.py --version` must exit 0 and print the version string."""
+        result = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "cli.py"), "--version"],
+            capture_output=True,
+            text=True,
+            cwd=str(REPO_ROOT),
+        )
+        assert result.returncode == 0, result.stderr
+        from _version import __version__
+
+        assert __version__ in result.stdout
+        assert "tool-compass" in result.stdout
 
     def test_parser_has_no_color(self):
         parser = cli._build_parser()

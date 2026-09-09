@@ -13,12 +13,13 @@ Kept intentionally tight (under 50 lines of actual test logic).
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 
-from config import CompassConfig
+from backend_client_simple import SimpleBackendManager
+from config import CompassConfig, StdioBackend
 from indexer import CompassIndex
+from tests.golden_set.deterministic_embedder import build_deterministic_embedder
 from tool_manifest import ToolDefinition
 
 
@@ -53,10 +54,26 @@ FAKE_TOOLS = [
 ]
 
 
+class _RecordingConn:
+    """Stub backend connection that records the qualified name it was given.
+
+    SimpleBackendManager.execute_tool splits `server:tool` and calls
+    ``call_tool(bare_name, arguments)``. Reconstruct the qualified name
+    so the smoke path can assert routing, not just a canned success dict.
+    """
+
+    def __init__(self, server_name: str = "smoke"):
+        self.name = server_name
+        self.is_connected = True
+        self.qualified_names: list[str] = []
+
+    async def call_tool(self, tool_name, arguments):
+        self.qualified_names.append(f"{self.name}:{tool_name}")
+        return {"success": True, "result": "smoke-ok", "arguments": arguments}
+
+
 @pytest.mark.asyncio
-async def test_e2e_build_search_describe_execute(
-    tmp_path: Path, mock_embedder, mock_backend_manager
-):
+async def test_e2e_build_search_describe_execute(tmp_path: Path):
     """Build index → search → describe → execute happy path.
 
     Any assertion failure here names exactly which step of the user journey
@@ -64,7 +81,7 @@ async def test_e2e_build_search_describe_execute(
     """
     # 1. Real CompassConfig rooted in tmp_path — no global paths touched.
     config = CompassConfig(
-        backends={},
+        backends={"smoke": StdioBackend(command="true", args=[], env={})},
         index_dir=str(tmp_path / "db"),
         auto_sync=False,
         analytics_enabled=False,
@@ -72,11 +89,15 @@ async def test_e2e_build_search_describe_execute(
     )
     assert config.index_dir.startswith(str(tmp_path)), "config must be sandboxed"
 
-    # 2. Build the index with the fake tools.
+    # 2. Build the index with the fake tools + golden deterministic embedder.
+    # Concept-basis vectors make "read a file" rank smoke:tool_one first
+    # (read+file overlap); the hash()-salted mock_embedder prefixes
+    # embed_query with `search_query:` so ranking was coincidental.
+    embedder = build_deterministic_embedder()
     index = CompassIndex(
         index_path=tmp_path / "smoke.hnsw",
         db_path=tmp_path / "smoke.db",
-        embedder=mock_embedder,
+        embedder=embedder,
     )
     try:
         build_result = await index.build_index(FAKE_TOOLS)
@@ -84,14 +105,12 @@ async def test_e2e_build_search_describe_execute(
             "build step failed — wrong tool count indexed"
         )
 
-        # 3. Search for "tool one" — deterministic mock embedder means
-        # the tool whose text contains "tool one" (smoke:tool_one) will
-        # be the top match since mock_embed hashes on the exact string.
-        results = await index.search("tool one", top_k=3)
+        # 3. Search — golden embedder, exact top hit (not "any of FAKE_TOOLS").
+        results = await index.search("read a file", top_k=3)
         assert results, "search step failed — no results returned"
         top = results[0]
-        assert top.tool.name in {t.name for t in FAKE_TOOLS}, (
-            f"search returned unknown tool: {top.tool.name}"
+        assert top.tool.name == "smoke:tool_one", (
+            f"search step failed — expected smoke:tool_one on top, got {top.tool.name}"
         )
 
         # 4. Describe the matched tool (direct DB path, matches gateway.describe).
@@ -101,14 +120,20 @@ async def test_e2e_build_search_describe_execute(
             )
         )
         assert described is not None, "describe step failed — tool id → schema lookup"
-        assert described.name == top.tool.name
+        assert described.name == "smoke:tool_one"
         assert described.parameters, "describe step returned empty parameters"
 
-        # 5. Execute via the mocked backend manager (what gateway.execute does).
-        mock_backend_manager.execute_tool = AsyncMock(
-            return_value={"success": True, "result": "smoke-ok"}
+        # 5. Execute via SimpleBackendManager against a stub connection that
+        # records the qualified name. Assigning AsyncMock.return_value and
+        # awaiting that same mock cannot fail.
+        conn = _RecordingConn("smoke")
+        manager = SimpleBackendManager(config)
+        manager._backends["smoke"] = conn
+        manager._tool_index[described.name] = "smoke"
+        exec_result = await manager.execute_tool(described.name, {})
+        assert conn.qualified_names == ["smoke:tool_one"], (
+            f"execute step failed — stub saw {conn.qualified_names!r}"
         )
-        exec_result = await mock_backend_manager.execute_tool(described.name, {})
         assert exec_result["success"] is True, (
             "execute step failed — backend returned unsuccessful"
         )
