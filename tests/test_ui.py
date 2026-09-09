@@ -642,6 +642,35 @@ class TestGetChainIndexerInstance:
         assert out is fake_ci
         assert ui._chain_indexer is fake_ci
 
+    def test_missing_index_returns_none(self):
+        """Cold start (no HNSW) must not raise — Docker production has no index."""
+        ui._chain_indexer = None
+        ui._config = MagicMock(chain_indexing_enabled=True)
+        with patch.object(
+            ui, "get_index",
+            side_effect=RuntimeError("Failed to load index. Run: tool-compass sync"),
+        ):
+            out = ui.get_chain_indexer_instance()
+        assert out is None
+        assert ui._chain_indexer is None
+
+    def test_analytics_failure_still_builds(self):
+        ui._chain_indexer = None
+        ui._config = MagicMock(chain_indexing_enabled=True)
+        fake_index = MagicMock()
+        fake_index.embedder = "emb"
+        fake_ci = MagicMock()
+        fake_ci.load_chain_index = AsyncMock(return_value=None)
+        with patch.object(ui, "get_index", return_value=fake_index), \
+             patch.object(
+                 ui, "get_analytics_instance",
+                 side_effect=sqlite3.OperationalError("db locked"),
+             ), \
+             patch.object(ui, "get_chain_indexer", return_value=fake_ci) as mock_ci:
+            out = ui.get_chain_indexer_instance()
+        assert out is fake_ci
+        mock_ci.assert_called_once_with("emb", None)
+
 
 # =============================================================================
 # _check_ollama_banner
@@ -1481,6 +1510,15 @@ class TestGetChainsView:
             out = ui.get_chains_view()
         assert "Could not load workflows" in out
 
+    def test_get_index_runtime_error_renders_error_html(self):
+        with patch.object(
+            ui, "get_chain_indexer_instance",
+            side_effect=RuntimeError("Failed to load index. Run: tool-compass sync"),
+        ):
+            out = ui.get_chains_view()
+        assert "Index not ready" in out
+        assert "tool-compass sync" in out
+
 
 # =============================================================================
 # get_system_status
@@ -1903,4 +1941,39 @@ class TestCreateUi:
         ]
         assert image_blocks, "create_ui must attach the in-tree logo.png lockup"
         assert any(getattr(b, "elem_id", None) == "tc-logo" for b in image_blocks)
+
+
+def test_create_ui_constructs_without_index():
+    """Docker production has no baked HNSW; Blocks construction must still succeed."""
+    env = {**os.environ, "GRADIO_ANALYTICS_ENABLED": "False"}
+    ui._index = None
+    ui._analytics = None
+    ui._chain_indexer = None
+    ui._config = MagicMock(
+        ollama_url="http://localhost:11434",
+        embedding_model="nomic-embed-text",
+        chain_indexing_enabled=True,
+        backends={},
+    )
+    with patch.dict(os.environ, env, clear=True), \
+         patch.object(
+             ui, "get_index",
+             side_effect=RuntimeError("Failed to load index. Run: tool-compass sync"),
+         ), \
+         patch.object(
+             ui, "get_analytics_instance",
+             side_effect=RuntimeError("analytics unavailable"),
+         ), \
+         patch.object(ui, "_check_ollama_banner", return_value=""), \
+         patch("embedder.Embedder") as mock_embedder, \
+         patch.object(ui.gr.Blocks, "launch") as launch_mock:
+        fake_embedder = MagicMock()
+        fake_embedder.health_check = AsyncMock(return_value=False)
+        fake_embedder.close = AsyncMock()
+        mock_embedder.return_value = fake_embedder
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            demo = ui.create_ui()
+        launch_mock.assert_not_called()
+    assert isinstance(demo, ui.gr.Blocks)
 

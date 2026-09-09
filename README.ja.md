@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/lockup.png" alt="Tool Compass Logo" width="480"></p>
+<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="640"></p>
 
 **MCPツールのためのセマンティックナビゲーター - 記憶ではなく、意図に基づいて適切なツールを見つける**
 

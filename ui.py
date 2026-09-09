@@ -163,8 +163,18 @@ def get_chain_indexer_instance() -> Optional[ChainIndexer]:
         return None
 
     def _build():
-        index = get_index()
-        analytics = get_analytics_instance()
+        # Mirror gateway.get_chain_indexer_instance: a missing index is a
+        # cold start, not a UI crash. Docker production has no baked HNSW.
+        try:
+            index = get_index()
+        except RuntimeError as e:
+            logger.warning("chain indexer unavailable on cold start: %s", e)
+            return None
+        try:
+            analytics = get_analytics_instance()
+        except Exception as e:
+            logger.warning("chain indexer: analytics unavailable: %s", e)
+            analytics = None
         ci = get_chain_indexer(index.embedder, analytics)
         run_async(ci.load_chain_index())
         return ci
@@ -1538,7 +1548,10 @@ def get_analytics_dashboard(timeframe: str = "24h") -> str:
 
 def get_chains_view() -> str:
     """Display all tool chains."""
-    chain_indexer = get_chain_indexer_instance()
+    try:
+        chain_indexer = get_chain_indexer_instance()
+    except RuntimeError as e:
+        return format_error(e, "Could not load workflows")
     if not chain_indexer:
         return """
         <div style="text-align: center; padding: 40px; color: #b0b0b0;">

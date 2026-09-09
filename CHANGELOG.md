@@ -40,6 +40,8 @@ covered back to the 80% bar.
 
 ### Fixed
 - Fail-open auth on corrupt config, empty-backend hash, allow/deny incremental rebuild, timeout cap, process leak on cancel, torn HNSW, loop-bound asyncio locks, startup-sync latch on first failure.
+- Gradio UI starts without a baked HNSW index (Docker production smoke): chain indexer degrades instead of crashing Blocks construction.
+- README lockup is the Director 2000×800 banner again (not a square-padded crop).
 
 ## [2.5.0] - 2026-07-04
 
