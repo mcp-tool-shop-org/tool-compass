@@ -4,6 +4,7 @@ Makes tool chains (workflows) searchable via semantic search.
 """
 
 import json
+import os
 import sqlite3
 import numpy as np
 import logging
@@ -105,6 +106,13 @@ class ChainIndexer:
         # Ensure db directory exists
         DB_DIR.mkdir(parents=True, exist_ok=True)
 
+    def _embedding_dim(self) -> int:
+        """Provider/embedder dim, falling back to the nomic 768 default."""
+        dim = getattr(self.embedder, "embedding_dim", None)
+        if isinstance(dim, int) and dim > 0:
+            return dim
+        return EMBEDDING_DIM
+
     def _get_db(self) -> sqlite3.Connection:
         """Get database connection (uses analytics DB).
 
@@ -198,40 +206,58 @@ class ChainIndexer:
                 chain.embedding = embedding
                 chain.embedding_text = embedding_text
 
-        # Initialize HNSW index
-        self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+        dim = self._embedding_dim()
+        # F-57869654 sibling: build into a local Index; assign self.index
+        # only after the on-disk save commits via os.replace.
+        new_index = hnswlib.Index(space="cosine", dim=dim)
         # BE-A2-002: allow_replace_deleted=True permits the ON CONFLICT path
         # in add_chain to mark the old label deleted and re-add with
         # replace_deleted=True. Without this flag, hnswlib raises on duplicate
         # labels and the DB row updates while HNSW stays stale.
-        self.index.init_index(
+        new_index.init_index(
             max_elements=max(len(chains) * 2, 100),
             M=CHAIN_HNSW_M,
             ef_construction=CHAIN_HNSW_EF_CONSTRUCTION,
             allow_replace_deleted=True,
         )
-        self.index.set_ef(CHAIN_HNSW_EF_SEARCH)
+        new_index.set_ef(CHAIN_HNSW_EF_SEARCH)
 
         # Add chains to index
-        self._id_to_chain = {}
+        id_to_chain: Dict[int, ToolChain] = {}
         embeddings = []
         ids = []
 
         for chain in chains:
-            self._id_to_chain[chain.id] = chain
+            id_to_chain[chain.id] = chain
             embeddings.append(chain.embedding)
             ids.append(chain.id)
 
         if embeddings:
             embeddings_array = np.vstack(embeddings).astype(np.float32)
-            self.index.add_items(embeddings_array, ids)
+            if embeddings_array.shape[1] != dim:
+                raise RuntimeError(
+                    f"Chain embedding shape mismatch: got "
+                    f"{embeddings_array.shape}, expected (*, {dim}). "
+                    f"Rebuild the chain index after setting embedding_dim."
+                )
+            new_index.add_items(embeddings_array, ids)
 
-        # Save index
-        self.index.save_index(str(CHAIN_INDEX_PATH))
+        tmp_path = Path(str(CHAIN_INDEX_PATH) + ".tmp")
+        new_index.save_index(str(tmp_path))
+        try:
+            os.replace(str(tmp_path), str(CHAIN_INDEX_PATH))
+        except OSError:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self.index = new_index
+        self._id_to_chain = id_to_chain
         # SC-004: persist the build-time embedding dim so a later load can
         # detect a model-dim change with an actionable message.
         try:
-            _chain_index_dim_path().write_text(str(EMBEDDING_DIM), encoding="utf-8")
+            _chain_index_dim_path().write_text(str(dim), encoding="utf-8")
         except OSError as e:
             logger.debug(f"failed to write chain index dim sidecar: {e}")
         logger.info(f"Chain index saved to {CHAIN_INDEX_PATH}")
@@ -274,20 +300,21 @@ class ChainIndexer:
             # load with an actionable rebuild message instead of swallowing
             # an opaque error in the bare except below.
             persisted_dim = self._read_persisted_index_dim()
-            if persisted_dim is not None and persisted_dim != EMBEDDING_DIM:
+            expected_dim = self._embedding_dim()
+            if persisted_dim is not None and persisted_dim != expected_dim:
                 logger.error(
                     "Chain index was built with %d-dim vectors but the "
                     "embedder now produces %d-dim vectors. The embedding "
                     "model likely changed. Delete %s (and %s) and rebuild "
                     "the chain index via build_chain_index().",
                     persisted_dim,
-                    EMBEDDING_DIM,
+                    expected_dim,
                     CHAIN_INDEX_PATH,
                     _chain_index_dim_path(),
                 )
                 return False
 
-            self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+            self.index = hnswlib.Index(space="cosine", dim=expected_dim)
             # BE-A2-002: pass allow_replace_deleted=True at load so the
             # restored chain index supports mark_deleted + replace_deleted on
             # add_chain's ON CONFLICT path after a restart.
@@ -394,6 +421,15 @@ class ChainIndexer:
 
         # Generate embedding (use embed() for documents, embed_query() for searches)
         embedding = await self.embedder.embed(embedding_text)
+        expected_dim = self._embedding_dim()
+        if (
+            getattr(embedding, "shape", None) is not None
+            and embedding.shape[-1] != expected_dim
+        ):
+            raise RuntimeError(
+                f"Chain embedding dim {embedding.shape[-1]} != {expected_dim}. "
+                f"Rebuild the chain index after setting embedding_dim."
+            )
 
         # BE-A2-002: detect UPDATE vs INSERT BEFORE the write, so the HNSW
         # branch below can mark_deleted + replace_deleted on the duplicate-

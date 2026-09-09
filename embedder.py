@@ -113,13 +113,16 @@ def _get_global_embed_semaphore() -> asyncio.Semaphore:
 # An EmbeddingProvider isolates the provider-specific request/response details.
 # It is intentionally tiny and stateless w.r.t. the orchestration layer: it
 # does NOT own the httpx client, the breaker, retries, or the cache. The
-# Embedder calls into it for exactly five things:
+# Embedder calls into it for:
 #
 #   endpoint_path                -> path appended to base_url for the POST
 #   request_headers()            -> auth/content headers for the POST
 #   build_body(text)             -> the JSON body dict
 #   parse_vector(json_response)  -> the raw embedding list out of the JSON
 #   apply_prefix(text, kind)     -> retrieval prefix ('query' | 'document')
+#   embedding_dim                -> vector width used by HNSW + length checks
+#   health_check(client)         -> provider-native liveness (not Ollama-only)
+#   pull_model(client)           -> pull if the backend can; no-op otherwise
 #
 # This keeps the seam at the smallest possible surface — the same retry +
 # breaker + concurrency + cache + metrics path serves every provider.
@@ -144,6 +147,7 @@ class EmbeddingProvider:
         api_key: Optional[str] = None,
         query_prefix: Optional[str] = None,
         document_prefix: Optional[str] = None,
+        embedding_dim: Optional[int] = None,
     ):
         # base_url is normalized (no trailing slash) so endpoint joins are
         # predictable regardless of how the operator wrote it in config.
@@ -160,10 +164,20 @@ class EmbeddingProvider:
             if document_prefix is not None
             else self.default_document_prefix
         )
+        # F-01019c5c: dim is a provider value (override via Embedder /
+        # create_provider). CompassConfig.embedding_dim is not wired here —
+        # that knob lives in config.py (cross-domain; skipped this wave).
+        if embedding_dim is not None:
+            self.embedding_dim = int(embedding_dim)
+        else:
+            self.embedding_dim = int(self.default_embedding_dim)
 
     # --- prefix convention -------------------------------------------------
     default_query_prefix: str = ""
     default_document_prefix: str = ""
+    # nomic-embed-text / module default. OpenAI 1536-d models pass
+    # embedding_dim=1536 into Embedder until config.py grows the knob.
+    default_embedding_dim: int = EMBEDDING_DIM
 
     def apply_prefix(self, text: str, kind: str) -> str:
         """Prefix ``text`` per the retrieval convention for ``kind``.
@@ -193,6 +207,18 @@ class EmbeddingProvider:
         """Pull the raw embedding list out of the parsed JSON response."""
         raise NotImplementedError
 
+    async def health_check(self, client: httpx.AsyncClient) -> bool:
+        """Return True if this backend can serve embeddings for ``self.model``."""
+        raise NotImplementedError
+
+    async def pull_model(self, client: httpx.AsyncClient) -> bool:
+        """Pull ``self.model`` when the backend supports it.
+
+        Default is a no-op success: hosted OpenAI-compatible APIs do not
+        expose a pull endpoint. Ollama overrides this with POST /api/pull.
+        """
+        return True
+
 
 class OllamaProvider(EmbeddingProvider):
     """Default provider — Ollama's ``POST /api/embed`` (byte-for-byte legacy).
@@ -216,6 +242,31 @@ class OllamaProvider(EmbeddingProvider):
         # Legacy parse — kept exactly as the pre-seam code:
         # data["embeddings"][0].
         return data["embeddings"][0]
+
+    async def health_check(self, client: httpx.AsyncClient) -> bool:
+        """GET /api/tags and look for ``self.model`` (legacy Ollama probe)."""
+        response = await client.get("/api/tags")
+        if response.status_code != 200:
+            return False
+        data = response.json()
+        names = [m.get("name", "") for m in data.get("models", [])]
+        if any(
+            n == self.model
+            or n == f"{self.model}:latest"
+            or n.startswith(f"{self.model}:")
+            for n in names
+        ):
+            return True
+        # Defensive: substring fallback.
+        return any(self.model in n for n in names if n)
+
+    async def pull_model(self, client: httpx.AsyncClient) -> bool:
+        response = await client.post(
+            "/api/pull",
+            json={"name": self.model},
+            timeout=300.0,  # Model download can take time
+        )
+        return response.status_code == 200
 
 
 class OpenAICompatibleProvider(EmbeddingProvider):
@@ -250,6 +301,39 @@ class OpenAICompatibleProvider(EmbeddingProvider):
     def parse_vector(self, data: dict) -> list:
         # OpenAI embeddings contract: data["data"][0]["embedding"].
         return data["data"][0]["embedding"]
+
+    async def health_check(self, client: httpx.AsyncClient) -> bool:
+        """Probe GET /v1/models, then POST /v1/embeddings if needed.
+
+        OpenAI and LM Studio do not speak Ollama's /api/tags. A 200 on
+        either probe means embeddings can be served; pull is a no-op.
+        """
+        headers = self.request_headers()
+        try:
+            response = await client.get("/v1/models", headers=headers)
+            if response.status_code == 200:
+                payload = response.json() if response.content else {}
+                models = payload.get("data") or payload.get("models") or []
+                names = [
+                    (m.get("id") or m.get("name") or "")
+                    for m in models
+                    if isinstance(m, dict)
+                ]
+                if any(
+                    n == self.model or n.startswith(f"{self.model}:")
+                    for n in names
+                ):
+                    return True
+            elif response.status_code in (401, 403):
+                return False
+        except Exception:
+            pass
+        response = await client.post(
+            self.endpoint_path,
+            json=self.build_body("health"),
+            headers=headers,
+        )
+        return response.status_code == 200
 
 
 # --- registry / factory ----------------------------------------------------
@@ -292,6 +376,7 @@ def create_provider(
     api_key: Optional[str] = None,
     query_prefix: Optional[str] = None,
     document_prefix: Optional[str] = None,
+    embedding_dim: Optional[int] = None,
 ) -> EmbeddingProvider:
     """Factory: build the EmbeddingProvider for ``provider``.
 
@@ -317,6 +402,7 @@ def create_provider(
         api_key=api_key,
         query_prefix=query_prefix,
         document_prefix=document_prefix,
+        embedding_dim=embedding_dim,
     )
 
 
@@ -345,6 +431,7 @@ class Embedder:
         api_key: Optional[str] = None,
         query_prefix: Optional[str] = None,
         document_prefix: Optional[str] = None,
+        embedding_dim: Optional[int] = None,
     ):
         """Initialize embedder.
 
@@ -366,6 +453,10 @@ class Embedder:
             query_prefix / document_prefix: override the retrieval prefix
                 convention. None -> the provider's default (nomic search_* for
                 ollama, empty for openai).
+            embedding_dim: vector width. None -> the provider's default
+                (768 for shipped providers). Pass 1536 for
+                text-embedding-3-small / ada-002 until CompassConfig grows
+                the knob (config.py is out of this domain).
         """
         self.base_url = base_url
         self.model = model
@@ -381,6 +472,7 @@ class Embedder:
             api_key=api_key,
             query_prefix=query_prefix,
             document_prefix=document_prefix,
+            embedding_dim=embedding_dim,
         )
         # Reflect the actually-resolved provider name (post fallback) so
         # callers/metrics report the truth, not the requested-but-unknown name.
@@ -406,7 +498,18 @@ class Embedder:
         )
         self._on_breaker_transition = on_breaker_transition
 
+        # F-acaa41a6: httpx.AsyncClient is loop-bound. SyncEmbedder._run and
+        # CompassIndex.search_sync spin a fresh asyncio.run() loop on a
+        # worker thread; reusing one instance client across those loops (and
+        # the gateway loop) drives a dead/wrong loop. Key clients the same
+        # way as _get_global_embed_semaphore. ``_client`` is the current
+        # loop's client (tests read this field).
         self._client: Optional[httpx.AsyncClient] = None
+        self._loop_clients: Dict[int, httpx.AsyncClient] = {}
+        self._loop_client_owners: "weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, httpx.AsyncClient]" = (
+            weakref.WeakKeyDictionary()
+        )
+        self._loop_client_janitors: Dict[int, "asyncio.Task[None]"] = {}
 
         # Circuit breaker state (IDX-B-002 + BE-B-006).
         # States: closed | half_open | open.
@@ -438,58 +541,125 @@ class Embedder:
         }
         self._inflight_lock = asyncio.Lock()
 
+    @property
+    def embedding_dim(self) -> int:
+        """Vector width for HNSW init, cache self-heal, and parse checks."""
+        return int(self._provider.embedding_dim)
+
+    def _bind_client_janitor(
+        self, loop: asyncio.AbstractEventLoop, key: int, client: httpx.AsyncClient
+    ) -> None:
+        """aclose ``client`` when this loop shuts down (asyncio.run cancel)."""
+
+        async def _aclose_on_shutdown() -> None:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                try:
+                    if not client.is_closed:
+                        await client.aclose()
+                except Exception as e:
+                    logger.debug(f"embedder client aclose on loop shutdown: {e}")
+                raise
+            finally:
+                if self._loop_clients.get(key) is client:
+                    self._loop_clients.pop(key, None)
+                if self._loop_client_janitors.get(key) is asyncio.current_task():
+                    self._loop_client_janitors.pop(key, None)
+                if self._client is client:
+                    self._client = None
+
+        old = self._loop_client_janitors.pop(key, None)
+        if old is not None and not old.done():
+            old.cancel()
+        try:
+            task = loop.create_task(
+                _aclose_on_shutdown(), name="embedder-client-aclose"
+            )
+        except RuntimeError:
+            return
+        self._loop_client_janitors[key] = task
+
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create async HTTP client."""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
+        """Get or create an httpx client bound to the *running* event loop.
+
+        F-acaa41a6: do not share one AsyncClient across search_sync worker
+        threads and the main loop. Reuse only within the same loop.
+        """
+        loop = asyncio.get_running_loop()
+        key = id(loop)
+        client = self._loop_clients.get(key)
+        if client is None or client.is_closed:
+            client = httpx.AsyncClient(
                 base_url=self.base_url, timeout=self.timeout
             )
-        return self._client
+            self._loop_clients[key] = client
+            try:
+                self._loop_client_owners[loop] = client
+            except TypeError:
+                pass
+            self._bind_client_janitor(loop, key, client)
+        self._client = client
+        return client
 
     async def close(self):
-        """Close the HTTP client."""
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-            self._client = None
+        """Close HTTP clients for every loop this embedder touched."""
+        janitors = list(self._loop_client_janitors.values())
+        self._loop_client_janitors.clear()
+        clients = list(self._loop_clients.values())
+        self._loop_clients.clear()
+        self._client = None
+        current: Optional[asyncio.AbstractEventLoop] = None
+        try:
+            current = asyncio.get_running_loop()
+        except RuntimeError:
+            current = None
+        for task in janitors:
+            task.cancel()
+            if current is not None and task.get_loop() is current:
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
+        for client in clients:
+            if client is None or client.is_closed:
+                continue
+            try:
+                await client.aclose()
+            except Exception as e:
+                logger.debug(f"embedder client aclose failed: {e}")
 
     async def health_check(self) -> bool:
-        """Check if Ollama is available and model is loaded.
+        """Check that the configured embedding backend can serve this model.
 
-        BE-A-021: prefer exact match (with or without ':latest' suffix) over
-        substring containment so 'foo-nomic-embed-text-v2' doesn't accidentally
-        match 'nomic-embed-text'. Substring fallback remains for backward
-        compat with already-tagged-but-renamed models.
+        BE-A-021 (Ollama): prefer exact match (with or without ':latest'
+        suffix) over substring containment so 'foo-nomic-embed-text-v2'
+        doesn't accidentally match 'nomic-embed-text'. Substring fallback
+        remains for backward compat with already-tagged-but-renamed models.
+
+        F-01019c5c: the probe itself lives on EmbeddingProvider — Ollama
+        GET /api/tags, OpenAI GET /v1/models or POST /v1/embeddings — so
+        provider='openai' does not 404 against /api/tags.
         """
         try:
             client = await self._get_client()
-            response = await client.get("/api/tags")
-            if response.status_code == 200:
-                data = response.json()
-                names = [m.get("name", "") for m in data.get("models", [])]
-                if any(
-                    n == self.model
-                    or n == f"{self.model}:latest"
-                    or n.startswith(f"{self.model}:")
-                    for n in names
-                ):
-                    return True
-                # Defensive: substring fallback.
-                return any(self.model in n for n in names if n)
-            return False
+            return await self._provider.health_check(client)
         except Exception as e:
-            logger.error(f"Ollama health check failed: {e}")
+            logger.error(
+                "Embedding health check failed (%s): %s",
+                self.provider_name,
+                e,
+            )
             return False
 
     async def pull_model(self) -> bool:
-        """Pull the embedding model if not present."""
+        """Pull the embedding model if the backend supports it.
+
+        Ollama POST /api/pull. OpenAI-compatible providers no-op (True).
+        """
         try:
             client = await self._get_client()
-            response = await client.post(
-                "/api/pull",
-                json={"name": self.model},
-                timeout=300.0,  # Model download can take time
-            )
-            return response.status_code == 200
+            return await self._provider.pull_model(client)
         except Exception as e:
             logger.error(f"Failed to pull model: {e}")
             return False
@@ -793,7 +963,24 @@ class Embedder:
 
         data = response.json()
         # BE-FT-PE-001: provider knows where the vector lives in the JSON.
-        embedding = np.array(self._provider.parse_vector(data), dtype=np.float32)
+        raw = self._provider.parse_vector(data)
+        try:
+            n = len(raw)
+        except TypeError as e:
+            raise RuntimeError(
+                f"Embedding provider {self.provider_name!r} parse_vector "
+                f"did not return a sequence"
+            ) from e
+        expected = self.embedding_dim
+        if n != expected:
+            raise RuntimeError(
+                f"Embedding provider {self.provider_name!r} returned a "
+                f"{n}-dim vector but embedding_dim is {expected}. The "
+                f"embedding model likely changed or embedding_dim is "
+                f"misconfigured. Rebuild the index after setting "
+                f"embedding_dim={n}."
+            )
+        embedding = np.array(raw, dtype=np.float32)
 
         # Normalize for cosine similarity
         norm = np.linalg.norm(embedding)

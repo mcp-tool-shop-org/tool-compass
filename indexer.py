@@ -8,6 +8,7 @@ import sqlite3
 import json
 import asyncio
 import hashlib
+import os
 import threading
 import numpy as np
 from collections import deque
@@ -114,10 +115,61 @@ class CompassIndex:
         # connection is opened with check_same_thread=False (below in _init_db)
         # so cross-thread access is permitted, but concurrent writes would
         # still race; this lock guards mutating execs and commits.
+        # F-5ce336e7: search() also takes this lock around knn_query +
+        # tools-table reads so a rebuild's DELETE+INSERT is never visible
+        # mid-transaction, and hnswlib add_items/knn_query are serialized.
         self._db_write_lock = threading.Lock()
 
         # Ensure db directory exists
         self.index_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _embedding_dim(self) -> int:
+        """Provider/embedder dim, falling back to the nomic 768 default.
+
+        Mock embedders in tests are unittest.mock.Mock and would otherwise
+        invent a Mock for ``embedding_dim``. Only a positive int is trusted.
+        """
+        dim = getattr(self.embedder, "embedding_dim", None)
+        if isinstance(dim, int) and dim > 0:
+            return dim
+        return EMBEDDING_DIM
+
+    def _hnsw_tmp_path(self) -> Path:
+        return Path(str(self.index_path) + ".tmp")
+
+    def _unlink_quietly(self, path: Path) -> None:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            logger.debug(f"failed to remove {path}: {e}")
+
+    def _publish_hnsw(self, new_index: "hnswlib.Index", tmp_path: Path) -> None:
+        """os.replace tmp onto the live HNSW path, then assign self.index.
+
+        Called only AFTER sqlite commit (F-57869654). A replace failure still
+        publishes the in-memory index so search matches the committed tools
+        table; the next successful save heals disk.
+        """
+        try:
+            os.replace(str(tmp_path), str(self.index_path))
+        except OSError as e:
+            logger.error(
+                "sqlite committed but HNSW os.replace(%s -> %s) failed: %s. "
+                "Using in-memory index; disk HNSW may be stale until next save.",
+                tmp_path,
+                self.index_path,
+                e,
+            )
+        self.index = new_index
+
+    def _reload_hnsw_from_disk(self) -> None:
+        """Restore self.index from the last committed HNSW file."""
+        if not self.index_path.exists():
+            return
+        restored = hnswlib.Index(space="cosine", dim=self._embedding_dim())
+        restored.load_index(str(self.index_path), allow_replace_deleted=True)
+        restored.set_ef(self.hnsw_ef_search)
+        self.index = restored
 
     def _compute_text_hash(self, text: str) -> str:
         """Compute stable cache key from (text, provider, base_url, model).
@@ -130,7 +182,7 @@ class CompassIndex:
         entry written by one provider can never be served to another, so
         switching ``embedding_provider`` / ``embedding_base_url`` can't return
         a stale cross-provider vector. The dim self-heal in ``_cache_get`` is
-        unaffected (it keys on EMBEDDING_DIM + BLOB byte length, not this hash).
+        unaffected (it keys on embedding_dim + BLOB byte length, not this hash).
 
         ``provider_name`` is read defensively: test mocks and any embedder
         predating the seam expose only ``base_url`` / ``model``, so a missing
@@ -161,12 +213,13 @@ class CompassIndex:
         if row is None:
             return None
         dim = int(row["dim"])
-        if dim != EMBEDDING_DIM:
+        expected_dim = self._embedding_dim()
+        if dim != expected_dim:
             # Stale entry from a different-dim model — drop and miss.
             self._delete_cache_row(text_hash)
             return None
         # SC-002: the column-dim check above is NOT sufficient. A row whose
-        # dim==EMBEDDING_DIM but whose BLOB byte length is inconsistent
+        # dim==expected but whose BLOB byte length is inconsistent
         # (truncated / corrupt write) makes reshape(dim) raise ValueError.
         # Because _cache_get runs inside build_index's BEGIN IMMEDIATE txn,
         # an uncaught ValueError there rolls back and re-raises EVERY rebuild
@@ -379,38 +432,44 @@ class CompassIndex:
         # Initialize database
         self._init_db()
 
+        dim = self._embedding_dim()
+
         # Empty tool set: clear state and initialize an empty HNSW index so
         # search() returns [] cleanly (see IDX-A-002 regression).
         if not tools:
             built_at = time.time()
+            tmp_path = self._hnsw_tmp_path()
             with self._db_write_lock:
                 self.db.execute("BEGIN IMMEDIATE")
                 try:
                     self.db.execute("DELETE FROM tools")
-                    self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+                    new_index = hnswlib.Index(space="cosine", dim=dim)
                     # BE-A2-001: allow_replace_deleted=True permits re-adding a
                     # previously-deleted label on the UPDATE path in
                     # add_single_tool. Without it, hnswlib raises on duplicate
                     # labels and silently breaks updates of changed tools.
-                    self.index.init_index(
+                    new_index.init_index(
                         max_elements=1000,
                         ef_construction=self.hnsw_ef_construction,
                         M=self.hnsw_m,
                         allow_replace_deleted=True,
                     )
-                    self.index.set_ef(self.hnsw_ef_search)
-                    self.index.save_index(str(self.index_path))
+                    new_index.set_ef(self.hnsw_ef_search)
+                    new_index.save_index(str(tmp_path))
                     # BE-A-013: persist a wall-clock timestamp so
                     # tool_compass_index_age_seconds can compute real age.
                     self.db.execute(
                         "INSERT OR REPLACE INTO index_meta (key, value) VALUES "
-                        "('built_at_unix', ?), ('tool_count', '0')",
-                        (str(built_at),),
+                        "('built_at_unix', ?), ('tool_count', '0'), "
+                        "('embedding_dim', ?)",
+                        (str(built_at), str(dim)),
                     )
                     self.db.commit()
                 except Exception:
                     self.db.rollback()
+                    self._unlink_quietly(tmp_path)
                     raise
+                self._publish_hnsw(new_index, tmp_path)
             self._id_to_name = {}
             logger.info("build_index completed with 0 tools")
             # BE-A-012: callers (gateway.sync_from_backends) read
@@ -425,202 +484,184 @@ class CompassIndex:
                 "db_path": str(self.db_path),
             }
 
-        # Wrap the DELETE → INSERT → embed → add_items sequence in a single
-        # transaction. Only commit AFTER HNSW save succeeds, so a failure
-        # leaves the previous DB state intact (no orphan SQLite rows).
-        #
-        # IDX-COMPOSED-002: route embedding-cache mutations made during this
-        # rebuild into a deferred list so _cache_put / _cache_get's self-heal
-        # can't commit the shared connection mid-transaction (which would
-        # prematurely persist the DELETE + INSERTs and defeat the atomic
-        # rollback below). The list is flushed AFTER the rebuild's own commit
-        # on success, and discarded on failure. _deferred_cache_ops is always
-        # reset to None (post-rebuild cache writes commit immediately again).
-        self._deferred_cache_ops = []
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            # Clear existing data
-            self.db.execute("DELETE FROM tools")
+        # F-5ce336e7: embed FIRST (no tools-table txn), then take
+        # _db_write_lock for a short DELETE+INSERT+add_items+save+commit.
+        # Awaiting embed_batch while BEGIN IMMEDIATE was open let search()
+        # and add_single_tool see a half-rebuilt catalog / nested txn.
+        embedding_texts = [tool.embedding_text() for tool in tools]
 
-            # Insert tools and collect texts for embedding
-            embedding_texts = []
-            tool_ids = []
+        provider = getattr(self.embedder, "base_url", "unknown")
+        hashes: List[str] = []
+        cached_vecs: Dict[int, np.ndarray] = {}
+        miss_indices: List[int] = []
+        miss_texts: List[str] = []
 
-            for i, tool in enumerate(tools):
-                embedding_text = tool.embedding_text()
-                embedding_texts.append(embedding_text)
+        for i, text in enumerate(embedding_texts):
+            h = self._compute_text_hash(text) if use_cache else ""
+            hashes.append(h)
+            hit = self._cache_get(h) if use_cache else None
+            if hit is not None:
+                cached_vecs[i] = hit
+                self._cache_hits += 1
+            else:
+                miss_indices.append(i)
+                miss_texts.append(text)
+                if use_cache:
+                    self._cache_misses += 1
 
-                # Insert into SQLite (still inside the open transaction).
-                # FEAT-01: persist the full inputSchema as JSON in raw_schema,
-                # or SQL NULL when the tool carries no schema. The collapsed
-                # `parameters` column is kept exactly as before.
-                raw_schema = getattr(tool, "raw_schema", None)
-                raw_schema_json = (
-                    json.dumps(raw_schema) if raw_schema is not None else None
+        logger.info(
+            f"Embedding cache: {len(cached_vecs)} hits, {len(miss_texts)} misses"
+        )
+
+        embed_start = time.time()
+        if miss_texts:
+            logger.info(
+                f"Generating {len(miss_texts)} embeddings via Ollama..."
+            )
+            miss_embeddings = await self.embedder.embed_batch(miss_texts)
+            if miss_embeddings.shape != (len(miss_texts), dim):
+                raise RuntimeError(
+                    f"Embedding shape mismatch: got {miss_embeddings.shape}, "
+                    f"expected ({len(miss_texts)}, {dim}). Rebuild after "
+                    f"setting embedding_dim to the model's width."
                 )
-                cursor = self.db.execute(
+            if use_cache:
+                for j, mi in enumerate(miss_indices):
+                    self._cache_put(
+                        hashes[mi],
+                        miss_embeddings[j],
+                        dim,
+                        provider,
+                    )
+        else:
+            miss_embeddings = np.zeros((0, dim), dtype=np.float32)
+        embed_time = time.time() - embed_start
+
+        embeddings = np.zeros((len(tools), dim), dtype=np.float32)
+        for i, vec in cached_vecs.items():
+            embeddings[i] = vec
+        for j, mi in enumerate(miss_indices):
+            embeddings[mi] = miss_embeddings[j]
+        logger.info(
+            f"Assembled {len(embeddings)} embeddings in {embed_time:.2f}s"
+        )
+
+        if embeddings.shape != (len(tools), dim):
+            raise RuntimeError(
+                f"Embedding shape mismatch: got {embeddings.shape}, "
+                f"expected ({len(tools)}, {dim}). Rebuild after setting "
+                f"embedding_dim to the model's width."
+            )
+
+        if len(tools) >= _HNSW_SCALE_WARN_TOOLS and not self._scale_warn_emitted:
+            logger.warning(
+                f"Indexing {len(tools)} tools — at this scale, consider "
+                f"reviewing hnsw_m ({self.hnsw_m}), hnsw_ef_construction "
+                f"({self.hnsw_ef_construction}), hnsw_ef_search "
+                f"({self.hnsw_ef_search}) in CompassConfig."
+            )
+            self._scale_warn_emitted = True
+
+        # IDX-COMPOSED-002: cache mutations during the short txn still go
+        # through the deferred list so a stray _cache_put cannot commit the
+        # tools-table transaction. Embed-time cache writes already committed
+        # above (no tools txn was open).
+        tmp_path = self._hnsw_tmp_path()
+        pending: Optional[List[tuple]] = None
+        with self._db_write_lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            self._deferred_cache_ops = []
+            try:
+                self.db.execute("DELETE FROM tools")
+
+                tool_ids = []
+                for tool, embedding_text in zip(tools, embedding_texts):
+                    raw_schema = getattr(tool, "raw_schema", None)
+                    raw_schema_json = (
+                        json.dumps(raw_schema)
+                        if raw_schema is not None
+                        else None
+                    )
+                    cursor = self.db.execute(
+                        """
+                        INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text, raw_schema)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                        (
+                            tool.name,
+                            tool.description,
+                            tool.category,
+                            tool.server,
+                            json.dumps(tool.parameters),
+                            json.dumps(tool.examples),
+                            1 if tool.is_core else 0,
+                            embedding_text,
+                            raw_schema_json,
+                        ),
+                    )
+                    tool_ids.append(cursor.lastrowid)
+
+                logger.info(
+                    f"Inserted {len(tools)} tools into database (uncommitted)"
+                )
+
+                logger.info("Building HNSW index...")
+                # F-57869654: build into a local Index; assign self.index
+                # only after sqlite commit. Save to a temp path and
+                # os.replace after commit so disk HNSW cannot move ahead
+                # of the tools table.
+                new_index = hnswlib.Index(space="cosine", dim=dim)
+                # BE-A2-001: allow_replace_deleted=True permits replacing a
+                # label marked deleted on the UPDATE path in add_single_tool.
+                new_index.init_index(
+                    max_elements=max(len(tools) * 2, 1000),
+                    ef_construction=self.hnsw_ef_construction,
+                    M=self.hnsw_m,
+                    allow_replace_deleted=True,
+                )
+                new_index.add_items(embeddings, tool_ids)
+                new_index.set_ef(self.hnsw_ef_search)
+                new_index.save_index(str(tmp_path))
+
+                # BE-A-013: persist both build_time (elapsed seconds; legacy)
+                # and built_at_unix (wall-clock timestamp).
+                self.db.execute(
                     """
-                    INSERT INTO tools (name, description, category, server, parameters, examples, is_core, embedding_text, raw_schema)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT OR REPLACE INTO index_meta (key, value) VALUES
+                    ('tool_count', ?),
+                    ('embedding_dim', ?),
+                    ('hnsw_m', ?),
+                    ('hnsw_ef_construction', ?),
+                    ('hnsw_ef_search', ?),
+                    ('build_time', ?),
+                    ('built_at_unix', ?)
                 """,
                     (
-                        tool.name,
-                        tool.description,
-                        tool.category,
-                        tool.server,
-                        json.dumps(tool.parameters),
-                        json.dumps(tool.examples),
-                        1 if tool.is_core else 0,
-                        embedding_text,
-                        raw_schema_json,
+                        str(len(tools)),
+                        str(dim),
+                        str(self.hnsw_m),
+                        str(self.hnsw_ef_construction),
+                        str(self.hnsw_ef_search),
+                        str(time.time() - start_time),
+                        str(time.time()),
                     ),
                 )
-                tool_ids.append(cursor.lastrowid)
-
-            logger.info(f"Inserted {len(tools)} tools into database (uncommitted)")
-
-            # Partition into cache hits vs. misses (IDX-FT-003). When cache is
-            # disabled, everything is a "miss" and gets embedded fresh.
-            provider = getattr(self.embedder, "base_url", "unknown")
-            hashes: List[str] = []
-            cached_vecs: Dict[int, np.ndarray] = {}
-            miss_indices: List[int] = []
-            miss_texts: List[str] = []
-
-            for i, text in enumerate(embedding_texts):
-                h = self._compute_text_hash(text) if use_cache else ""
-                hashes.append(h)
-                hit = self._cache_get(h) if use_cache else None
-                if hit is not None:
-                    cached_vecs[i] = hit
-                    self._cache_hits += 1
-                else:
-                    miss_indices.append(i)
-                    miss_texts.append(text)
-                    if use_cache:
-                        self._cache_misses += 1
-
-            logger.info(
-                f"Embedding cache: {len(cached_vecs)} hits, {len(miss_texts)} misses"
-            )
-
-            # Generate embeddings only for misses
-            embed_start = time.time()
-            if miss_texts:
-                logger.info(
-                    f"Generating {len(miss_texts)} embeddings via Ollama..."
+                self.db.commit()
+            except Exception:
+                self.db.rollback()
+                self._deferred_cache_ops = None
+                self._unlink_quietly(tmp_path)
+                logger.error(
+                    "build_index failed; rolled back SQLite transaction"
                 )
-                miss_embeddings = await self.embedder.embed_batch(miss_texts)
-                if miss_embeddings.shape != (len(miss_texts), EMBEDDING_DIM):
-                    raise RuntimeError(
-                        f"Embedding shape mismatch: got {miss_embeddings.shape}, "
-                        f"expected ({len(miss_texts)}, {EMBEDDING_DIM})"
-                    )
-                # Populate cache for misses
-                if use_cache:
-                    for j, mi in enumerate(miss_indices):
-                        self._cache_put(
-                            hashes[mi],
-                            miss_embeddings[j],
-                            EMBEDDING_DIM,
-                            provider,
-                        )
-            else:
-                miss_embeddings = np.zeros((0, EMBEDDING_DIM), dtype=np.float32)
-            embed_time = time.time() - embed_start
-
-            # Stitch the full embedding matrix back together
-            embeddings = np.zeros((len(tools), EMBEDDING_DIM), dtype=np.float32)
-            for i, vec in cached_vecs.items():
-                embeddings[i] = vec
-            for j, mi in enumerate(miss_indices):
-                embeddings[mi] = miss_embeddings[j]
-            logger.info(
-                f"Assembled {len(embeddings)} embeddings in {embed_time:.2f}s"
-            )
-
-            # Validate shape before add_items to fail fast on partial embeds.
-            if embeddings.shape != (len(tools), EMBEDDING_DIM):
-                raise RuntimeError(
-                    f"Embedding shape mismatch: got {embeddings.shape}, "
-                    f"expected ({len(tools)}, {EMBEDDING_DIM})"
-                )
-
-            # Build HNSW index
-            logger.info("Building HNSW index...")
-            # BE-B-008: scale warning when corpus is large enough to warrant
-            # operator review of the HNSW knobs.
-            if len(tools) >= _HNSW_SCALE_WARN_TOOLS and not self._scale_warn_emitted:
-                logger.warning(
-                    f"Indexing {len(tools)} tools — at this scale, consider "
-                    f"reviewing hnsw_m ({self.hnsw_m}), hnsw_ef_construction "
-                    f"({self.hnsw_ef_construction}), hnsw_ef_search "
-                    f"({self.hnsw_ef_search}) in CompassConfig."
-                )
-                self._scale_warn_emitted = True
-
-            self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
-            # BE-A2-001: allow_replace_deleted=True permits replacing a label
-            # marked deleted on the UPDATE path in add_single_tool. Without
-            # this flag, hnswlib raises on duplicate labels and silently fails
-            # updates of changed tools.
-            self.index.init_index(
-                max_elements=max(len(tools) * 2, 1000),  # Room to grow
-                ef_construction=self.hnsw_ef_construction,
-                M=self.hnsw_m,
-                allow_replace_deleted=True,
-            )
-
-            # Add vectors with tool IDs
-            self.index.add_items(embeddings, tool_ids)
-            self.index.set_ef(self.hnsw_ef_search)
-
-            # Save index — only after this succeeds do we commit SQLite.
-            self.index.save_index(str(self.index_path))
-
-            # Update metadata.
-            # BE-A-013: persist both build_time (elapsed seconds; legacy) and
-            # built_at_unix (wall-clock timestamp). get_stats() reads
-            # built_at_unix so tool_compass_index_age_seconds is accurate.
-            self.db.execute(
-                """
-                INSERT OR REPLACE INTO index_meta (key, value) VALUES
-                ('tool_count', ?),
-                ('embedding_dim', ?),
-                ('hnsw_m', ?),
-                ('hnsw_ef_construction', ?),
-                ('hnsw_ef_search', ?),
-                ('build_time', ?),
-                ('built_at_unix', ?)
-            """,
-                (
-                    str(len(tools)),
-                    str(EMBEDDING_DIM),
-                    str(self.hnsw_m),
-                    str(self.hnsw_ef_construction),
-                    str(self.hnsw_ef_search),
-                    str(time.time() - start_time),
-                    str(time.time()),
-                ),
-            )
-            self.db.commit()
-        except Exception:
-            self.db.rollback()
-            # IDX-COMPOSED-002: discard deferred cache ops — the rebuild rolled
-            # back, so its cache writes/self-heals must not be applied.
-            self._deferred_cache_ops = None
-            logger.error("build_index failed; rolled back SQLite transaction")
-            raise
-        else:
-            # IDX-COMPOSED-002: the rebuild's own commit landed — now (and only
-            # now) flush the deferred cache puts/deletes in their own batch.
+                raise
+            self._publish_hnsw(new_index, tmp_path)
+            self._load_id_mapping()
             pending = self._deferred_cache_ops
             self._deferred_cache_ops = None
-            if pending:
-                self._flush_deferred_cache_ops_list(pending)
 
-        # Load ID mapping
-        self._load_id_mapping()
+        if pending:
+            self._flush_deferred_cache_ops_list(pending)
 
         total_time = time.time() - start_time
         logger.info(f"Index built in {total_time:.2f}s")
@@ -638,7 +679,7 @@ class CompassIndex:
         Load existing index from disk.
 
         Integrity checks (IDX-B-001):
-        - Compare persisted embedding_dim to the code's EMBEDDING_DIM and
+        - Compare persisted embedding_dim to the embedder's embedding_dim and
           raise RuntimeError on mismatch, so the gateway can degrade to
           lexical search instead of crashing searches silently with bad
           vectors.
@@ -663,15 +704,16 @@ class CompassIndex:
             )
             meta = {row["key"]: row["value"] for row in cursor.fetchall()}
             saved_dim = meta.get("embedding_dim")
+            expected_dim = self._embedding_dim()
             if saved_dim is not None:
                 try:
                     saved_dim_int = int(saved_dim)
                 except (TypeError, ValueError):
                     saved_dim_int = None
-                if saved_dim_int is not None and saved_dim_int != EMBEDDING_DIM:
+                if saved_dim_int is not None and saved_dim_int != expected_dim:
                     msg = (
                         f"Index file uses {saved_dim}-dim vectors but code "
-                        f"expects {EMBEDDING_DIM}. The embedding model likely "
+                        f"expects {expected_dim}. The embedding model likely "
                         f"changed. Delete {self.index_path} and run sync to "
                         f"rebuild."
                     )
@@ -679,7 +721,7 @@ class CompassIndex:
                     raise RuntimeError(msg)
 
             # Load HNSW index
-            self.index = hnswlib.Index(space="cosine", dim=EMBEDDING_DIM)
+            self.index = hnswlib.Index(space="cosine", dim=expected_dim)
             # BE-A2-001: pass allow_replace_deleted=True at load so the
             # restored index supports mark_deleted + replace_deleted on the
             # add_single_tool UPDATE path. Without it, persisted indexes
@@ -774,58 +816,69 @@ class CompassIndex:
                 "Index not loaded. Call load_index() or build_index() first."
             )
 
-        # Generate query embedding
+        # Generate query embedding outside the DB/HNSW lock — embed may
+        # await, and F-5ce336e7 forbids awaiting while a tools-table txn
+        # (or this lock's rebuild section) is held on the search connection.
         query_embedding = await self.embedder.embed_query(query)
 
-        # Guard against empty index — knn_query crashes on k=0 or k > count.
-        count = self.index.get_current_count()
-        if count == 0:
-            return []
+        with self._db_write_lock:
+            index = self.index
+            if index is None:
+                raise RuntimeError(
+                    "Index not loaded. Call load_index() or build_index() first."
+                )
 
-        # Search HNSW (get more than needed for filtering), clamped to [1, count].
-        search_k = max(1, min(top_k * 3, count))
-        # BE-B-002: time the HNSW search separately from Ollama-side latency
-        # so dashboards can split slow-HNSW-with-healthy-Ollama from the
-        # inverse failure mode.
-        knn_start = time.monotonic()
-        labels, distances = self.index.knn_query(
-            query_embedding.reshape(1, -1), k=search_k
-        )
-        knn_latency_ms = (time.monotonic() - knn_start) * 1000.0
-        if not hasattr(self, "_hnsw_latency_samples"):
-            self._hnsw_latency_samples = deque(maxlen=1000)
-        self._hnsw_latency_samples.append(knn_latency_ms)
+            # Guard against empty index — knn_query crashes on k=0 or k > count.
+            count = index.get_current_count()
+            if count == 0:
+                return []
 
-        # Convert distances to similarities (hnswlib returns 1 - cosine for cosine space)
-        similarities = 1 - distances[0]
-        # BE-B-008: track score samples so a leftward drift in p50 surfaces
-        # degrading recall (e.g. corpus outgrew the HNSW knobs).
-        for s in similarities[: min(top_k, len(similarities))]:
-            try:
-                self._score_samples.append(float(s))
-            except Exception:
-                pass
-
-        results = []
-        for label, similarity in zip(labels[0], similarities):
-            tool = self._get_tool_by_id(int(label))
-            if tool is None:
-                continue
-
-            # Apply filters
-            if category_filter and tool.category != category_filter:
-                continue
-            if server_filter and tool.server != server_filter:
-                continue
-
-            results.append(
-                SearchResult(tool=tool, score=float(similarity), rank=len(results) + 1)
+            # Search HNSW (get more than needed for filtering), clamped to [1, count].
+            search_k = max(1, min(top_k * 3, count))
+            # BE-B-002: time the HNSW search separately from Ollama-side latency
+            # so dashboards can split slow-HNSW-with-healthy-Ollama from the
+            # inverse failure mode.
+            knn_start = time.monotonic()
+            labels, distances = index.knn_query(
+                query_embedding.reshape(1, -1), k=search_k
             )
+            knn_latency_ms = (time.monotonic() - knn_start) * 1000.0
+            if not hasattr(self, "_hnsw_latency_samples"):
+                self._hnsw_latency_samples = deque(maxlen=1000)
+            self._hnsw_latency_samples.append(knn_latency_ms)
 
-            if len(results) >= top_k:
-                break
+            # Convert distances to similarities (hnswlib returns 1 - cosine for cosine space)
+            similarities = 1 - distances[0]
+            # BE-B-008: track score samples so a leftward drift in p50 surfaces
+            # degrading recall (e.g. corpus outgrew the HNSW knobs).
+            for s in similarities[: min(top_k, len(similarities))]:
+                try:
+                    self._score_samples.append(float(s))
+                except Exception:
+                    pass
 
-        return results
+            results = []
+            for label, similarity in zip(labels[0], similarities):
+                tool = self._get_tool_by_id(int(label))
+                if tool is None:
+                    continue
+
+                # Apply filters
+                if category_filter and tool.category != category_filter:
+                    continue
+                if server_filter and tool.server != server_filter:
+                    continue
+
+                results.append(
+                    SearchResult(
+                        tool=tool, score=float(similarity), rank=len(results) + 1
+                    )
+                )
+
+                if len(results) >= top_k:
+                    break
+
+            return results
 
     def search_sync(self, query: str, top_k: int = 5, **kwargs) -> List[SearchResult]:
         """Synchronous search wrapper.
@@ -985,7 +1038,19 @@ class CompassIndex:
                 self._cache_misses += 1
                 embedding = await self.embedder.embed(embedding_text)
                 provider = getattr(self.embedder, "base_url", "unknown")
-                self._cache_put(text_hash, embedding, EMBEDDING_DIM, provider)
+                self._cache_put(
+                    text_hash, embedding, self._embedding_dim(), provider
+                )
+
+            expected_dim = self._embedding_dim()
+            if (
+                getattr(embedding, "shape", None) is not None
+                and embedding.shape[-1] != expected_dim
+            ):
+                raise RuntimeError(
+                    f"Embedding dim {embedding.shape[-1]} != {expected_dim}. "
+                    f"Rebuild the index after setting embedding_dim."
+                )
 
             # Now do DB write + HNSW add inside a single transaction.
             # Check if tool already exists
@@ -1081,13 +1146,33 @@ class CompassIndex:
                     else:
                         self.index.add_items(embedding.reshape(1, -1), [tool_id])
 
-                    # Save index before committing SQLite.
-                    self.index.save_index(str(self.index_path))
+                    # F-57869654 sibling: save to a temp path; os.replace
+                    # only after sqlite commit so disk HNSW cannot move
+                    # ahead of the tools table. In-memory add_items already
+                    # mutated self.index — reload from disk on rollback.
+                    tmp_path = self._hnsw_tmp_path()
+                    self.index.save_index(str(tmp_path))
 
                     self.db.commit()
                 except Exception:
                     self.db.rollback()
+                    self._unlink_quietly(self._hnsw_tmp_path())
+                    try:
+                        self._reload_hnsw_from_disk()
+                    except Exception as reload_err:
+                        logger.error(
+                            "add_single_tool rollback: failed to reload HNSW: %s",
+                            reload_err,
+                        )
                     raise
+                else:
+                    try:
+                        os.replace(str(tmp_path), str(self.index_path))
+                    except OSError as e:
+                        logger.error(
+                            "sqlite committed but HNSW os.replace failed: %s",
+                            e,
+                        )
 
             # Update ID mapping (post-commit, in-memory only)
             self._id_to_name[tool_id] = tool.name
