@@ -464,22 +464,24 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     # init — scaffold a compass_config.json at the resolved user config path
-    # and print a ready-to-paste Claude Desktop MCP snippet. The onboarding
-    # entry point: a first-run user types `tool-compass init`, gets a config
-    # file plus the next three commands, and can paste the mcpServers block
-    # straight into their client.
+    # and print paste-ready MCP client snippets. The onboarding entry point:
+    # a first-run user types `tool-compass init`, gets a config file plus the
+    # next three commands, and can paste the npx serve block into Claude
+    # Desktop, Cursor, VS Code Copilot Chat, or Claude Code.
     p_init = sub.add_parser(
         "init",
         help="Scaffold compass_config.json + print MCP client setup",
         epilog=(
             "Examples:\n"
-            "  tool-compass init                # write config + print next steps\n"
+            "  tool-compass init                # write config + print all client snippets\n"
+            "  tool-compass init --client cursor\n"
             "  tool-compass init --force        # overwrite an existing config\n"
-            "  tool-compass init --json | jq .created\n"
+            "  tool-compass init --json | jq .clients.vscode\n"
             "\n"
             "Writes to the resolved user config path (see `tool-compass doctor`).\n"
             "Refuses to clobber an existing config unless --force is passed.\n"
-            "Prints a Claude Desktop mcpServers snippet you can paste verbatim."
+            "Prints paste-ready MCP snippets (npx -y @mcptoolshop/tool-compass serve).\n"
+            "Backends and tokens stay in compass_config.json, never in the snippet."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -491,7 +493,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p_init.add_argument(
         "--json",
         action="store_true",
-        help="JSON output ({created, force, overwrote}) for script pipelines.",
+        help="JSON output ({created, force, overwrote, clients}) for script pipelines.",
+    )
+    p_init.add_argument(
+        "--client",
+        choices=("claude-desktop", "cursor", "vscode", "claude-code", "all"),
+        default="all",
+        help=(
+            "MCP client snippet to print: claude-desktop, cursor, vscode, "
+            "claude-code, or all (default all in text mode)."
+        ),
     )
 
     # ui — launch the Gradio web UI. Thin wrapper around `tool-compass-ui`.
@@ -1229,10 +1240,50 @@ def _cmd_sync(args: argparse.Namespace) -> int:
 # =============================================================================
 
 
-# Server key + npx package name used in the pasteable Claude Desktop snippet.
+# Server key + npx package name used in the pasteable MCP client snippets.
 # Kept as module constants so the handler and tests reference one source.
 _MCP_SERVER_KEY = "tool-compass"
 _NPX_PACKAGE = "@mcptoolshop/tool-compass"
+# F-76113125: paste-ready clients. argv is identical; only the wrapper
+# object changes (mcpServers vs mcp.servers).
+_MCP_CLIENT_IDS = ("claude-desktop", "cursor", "vscode", "claude-code")
+_MCP_CLIENT_LABELS = {
+    "claude-desktop": "Claude Desktop",
+    "cursor": "Cursor",
+    "vscode": "VS Code Copilot Chat",
+    "claude-code": "Claude Code",
+}
+_MCP_CLIENT_PASTE_HINTS = {
+    "claude-desktop": "paste into claude_desktop_config.json",
+    "cursor": "paste into ~/.cursor/mcp.json or .cursor/mcp.json",
+    "vscode": "paste into settings.json (mcp.servers) or .vscode/mcp.json",
+    "claude-code": "paste into .mcp.json (project) or Claude Code MCP settings",
+}
+
+
+def _mcp_server_entry() -> dict:
+    """Shared npx argv for every MCP client snippet. No tokens."""
+    return {
+        "command": "npx",
+        "args": ["-y", _NPX_PACKAGE, "serve"],
+    }
+
+
+def _client_snippet_obj(client: str) -> dict:
+    """Return the wrapper object for one MCP client.
+
+    Claude Desktop, Cursor, and Claude Code use ``mcpServers``. VS Code
+    Copilot Chat uses ``mcp.servers``. The inner command/args are identical.
+    """
+    entry = {_MCP_SERVER_KEY: _mcp_server_entry()}
+    if client == "vscode":
+        return {"mcp": {"servers": entry}}
+    return {"mcpServers": entry}
+
+
+def _all_client_snippet_objs() -> dict:
+    """Map of client id → paste-ready config object (JSON ``clients``)."""
+    return {client: _client_snippet_obj(client) for client in _MCP_CLIENT_IDS}
 
 
 def _claude_desktop_snippet() -> str:
@@ -1245,15 +1296,7 @@ def _claude_desktop_snippet() -> str:
     anything. Built via ``json.dumps`` so the indentation is always valid
     JSON the user can drop straight into ``claude_desktop_config.json``.
     """
-    block = {
-        "mcpServers": {
-            _MCP_SERVER_KEY: {
-                "command": "npx",
-                "args": ["-y", _NPX_PACKAGE, "serve"],
-            }
-        }
-    }
-    return json.dumps(block, indent=2)
+    return json.dumps(_claude_desktop_snippet_obj(), indent=2)
 
 
 def _minimal_config_json() -> str:
@@ -1305,8 +1348,10 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
     Refuses to overwrite an existing config unless ``--force`` is passed
     (exit 1 + hint). On success prints the written path, the next three
-    commands, and a Claude Desktop ``mcpServers`` snippet. ``--json`` emits a
-    ``{created, force, overwrote}`` shape with zero decoration for scripts.
+    commands, and paste-ready MCP snippets for Claude Desktop, Cursor,
+    VS Code Copilot Chat, and Claude Code. ``--client`` selects one
+    (default ``all`` in text mode). ``--json`` emits a
+    ``{created, force, overwrote, clients}`` shape with zero decoration.
     """
     err_console = _make_console(stderr=True, no_color_flag=_no_color(args))
     out_console = _make_console(no_color_flag=_no_color(args))
@@ -1348,16 +1393,25 @@ def _cmd_init(args: argparse.Namespace) -> int:
             exit_code=1,
         )
 
-    snippet = _claude_desktop_snippet()
+    clients = _all_client_snippet_objs()
+    selected = getattr(args, "client", "all") or "all"
+    if selected == "all":
+        selected_ids = list(_MCP_CLIENT_IDS)
+    else:
+        selected_ids = [selected]
 
     if json_mode:
         # Pure JSON on stdout — no decoration so `... --json | jq` works.
+        # clients{} is the F-76113125 surface; claude_desktop_config stays
+        # for existing scripts.
         payload = {
             "created": str(config_path),
             "source": source,
             "force": force,
             "overwrote": existed,
+            "client": selected,
             "claude_desktop_config": _claude_desktop_snippet_obj(),
+            "clients": clients,
         }
         print(json.dumps(payload, indent=2))
         return 0
@@ -1383,25 +1437,29 @@ def _cmd_init(args: argparse.Namespace) -> int:
     )
     out_console.print()
     out_console.print(
-        "[bold]Register with Claude Desktop[/bold] "
-        f"[{_C_DIM}](paste into claude_desktop_config.json):[/{_C_DIM}]"
+        "[bold]Register with an MCP client[/bold] "
+        f"[{_C_DIM}](npx -y {_NPX_PACKAGE} serve; backends stay in "
+        "compass_config.json):[/{_C_DIM}]"
     )
-    # Print the snippet via a plain print so Rich never reflows / styles the
+    # Print snippets via plain print so Rich never reflows / styles the
     # JSON — the user must be able to copy it byte-for-byte.
-    print(snippet)
+    for client_id in selected_ids:
+        label = _MCP_CLIENT_LABELS.get(client_id, client_id)
+        hint = _MCP_CLIENT_PASTE_HINTS.get(client_id, "")
+        out_console.print()
+        if hint:
+            out_console.print(
+                f"[bold]{label}[/bold] [{_C_DIM}]({hint}):[/{_C_DIM}]"
+            )
+        else:
+            out_console.print(f"[bold]{label}[/bold]")
+        print(json.dumps(clients[client_id], indent=2))
     return 0
 
 
 def _claude_desktop_snippet_obj() -> dict:
     """The Claude Desktop snippet as a dict (for the --json payload)."""
-    return {
-        "mcpServers": {
-            _MCP_SERVER_KEY: {
-                "command": "npx",
-                "args": ["-y", _NPX_PACKAGE, "serve"],
-            }
-        }
-    }
+    return _client_snippet_obj("claude-desktop")
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
