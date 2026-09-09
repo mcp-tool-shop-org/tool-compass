@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
+<p align="center"><img src="assets/logo-lockup.png" alt="Tool Compass Logo" width="400"></p>
 
 **用于 MCP 工具的语义导航器——通过意图而非记忆来查找正确的工具**
 

@@ -4,7 +4,7 @@
 
 <div align="center">
 
-<p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="400"></p>
+<p align="center"><img src="assets/logo-lockup.png" alt="Tool Compass Logo" width="400"></p>
 
 **Navigateur sémantique pour les outils MCP – Trouvez l’outil approprié en fonction de l’intention, et non de la mémoire.**
 

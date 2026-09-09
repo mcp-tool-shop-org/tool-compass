@@ -1469,8 +1469,18 @@ def create_ui() -> gr.Blocks:
             _tool_count = get_index().get_stats().get("total_tools", 0)
         except Exception:
             _tool_count = 0
+        _logo = Path(__file__).resolve().parent / "logo.png"
+        if _logo.is_file():
+            gr.Image(
+                value=str(_logo),
+                show_label=False,
+                container=False,
+                height=96,
+                interactive=False,
+                elem_id="tc-logo",
+            )
         gr.Markdown(f"""
-        # 🧭 Tool Compass
+        # Tool Compass
         **Semantic search across {_tool_count} MCP tools** | Progressive discovery: Search → Describe → Execute
         """)
 

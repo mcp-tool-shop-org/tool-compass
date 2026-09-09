@@ -1775,7 +1775,7 @@ class TestCreateUi:
     def test_heading_hierarchy_snapshot(self, created_ui):
         headings = _markdown_heading_snapshot(created_ui)
         assert headings, "create_ui must render a page-level Markdown heading"
-        assert headings[0] == (1, "🧭 Tool Compass")
+        assert headings[0] == (1, "Tool Compass")
         # Shell chrome uses h1 then h3 section titles; no h2 in the layout.
         assert (3, "🔗 Workflow Search") in headings
         assert (3, "🔎 Tool Details") in headings
@@ -1814,12 +1814,11 @@ class TestCreateUi:
         assert "aria-controls" in blob
         assert "enhanceTabs" in blob
 
-    def test_no_logo_image_component(self, created_ui):
-        # create_ui does not wire gr.Image / a logo path; the brand mark is
-        # the Markdown h1 emoji. Do not invent a logo assertion.
+    def test_logo_image_component(self, created_ui):
         image_blocks = [
             b for b in created_ui.blocks.values()
             if type(b).__name__ == "Image"
         ]
-        assert image_blocks == []
+        assert image_blocks, "create_ui must attach the in-tree logo.png lockup"
+        assert any(getattr(b, "elem_id", None) == "tc-logo" for b in image_blocks)
 
