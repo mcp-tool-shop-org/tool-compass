@@ -52,11 +52,14 @@ jobs:
           node-version: 22
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install npm >=11.5 in sandbox for OIDC trusted-publishing auth
+      - name: Install npm 11.5.2 in sandbox for OIDC trusted-publishing auth
         run: |
           # Node 22 ships npm 10.9, which signs Sigstore provenance fine but
           # cannot negotiate the OIDC auth path for trusted publishing — the
-          # PUT returns a misleading 404 "not in this registry".
+          # PUT returns a misleading 404 "not in this registry". npm 11.5+ is
+          # required. Pin an exact 11.5.x — never @latest — so a compromised
+          # or unexpected latest tarball cannot inherit this job's OIDC identity.
+          # Bump via PR / manual review (sandbox is not a Dependabot ecosystem).
           #
           # An in-place `npm install -g npm@latest` races on Node 22's bundled
           # npm 10.9 arborist rebuild and breaks irrecoverably (MODULE_NOT_FOUND:
@@ -65,10 +68,15 @@ jobs:
           mkdir -p "$SANDBOX"
           pushd "$SANDBOX" >/dev/null
           echo '{"name":"npm-cli-sandbox","version":"0.0.0","private":true}' > package.json
-          npm install --no-save --no-audit --no-fund --silent npm@latest
+          npm install --no-save --no-audit --no-fund --silent npm@11.5.2
           popd >/dev/null
           echo "$SANDBOX/node_modules/.bin" >> "$GITHUB_PATH"
-          "$SANDBOX/node_modules/.bin/npm" --version
+          INSTALLED="$("$SANDBOX/node_modules/.bin/npm" --version)"
+          echo "sandboxed npm ${INSTALLED}"
+          if [ "$INSTALLED" != "11.5.2" ]; then
+            echo "::error::sandboxed npm is ${INSTALLED}, expected 11.5.2 (do not float @latest)"
+            exit 1
+          fi
 
       - name: Verify tag matches npm/package.json version
         run: |
@@ -126,7 +134,7 @@ jobs:
       - name: Publish to npm with provenance (OIDC trusted publisher)
         working-directory: npm
         # OIDC trusted publisher — NO token, NO NODE_AUTH_TOKEN. The
-        # id-token: write permission + the npm@latest installed above negotiate
+        # id-token: write permission + the npm@11.5.2 installed above negotiate
         # the auth path. --access public is required for the scoped package.
         run: npm publish --provenance --access public
 

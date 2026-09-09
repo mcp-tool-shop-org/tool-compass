@@ -77,11 +77,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install package + PyInstaller
+      - name: Install package[ui] + PyInstaller
         shell: bash
         run: |
           python -m pip install --upgrade pip
-          pip install . "pyinstaller>=6.9.0"
+          # [ui] pulls Gradio. A core-only `pip install .` freezes a binary
+          # that cannot serve `tool-compass ui` (the npx zero-prerequisite path).
+          pip install ".[ui]" "pyinstaller>=6.9.0"
+          python -c "import ui, gradio"
 
       - name: Resolve version
         id: version
@@ -101,6 +104,8 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           # --collect-submodules covers dynamic imports MCP / Gradio / Rich pull in.
+          # --hidden-import ui: cli._cmd_ui imports ui inside try/except ImportError,
+          # which PyInstaller treats as optional and would drop from the freeze.
           # --console keeps stdout/stderr behavior identical to `python cli.py`.
           pyinstaller --onefile \
             --name "${{ env.TOOL_NAME }}" \
@@ -114,6 +119,8 @@ jobs:
             --collect-submodules hnswlib \
             --collect-submodules numpy \
             --collect-submodules httpx \
+            --hidden-import ui \
+            --collect-submodules gradio \
             "${{ env.ENTRYPOINT }}"
           OUTNAME="${{ env.TOOL_NAME }}-${VERSION}-${{ matrix.target }}${{ matrix.ext }}"
           mv "dist/${{ env.TOOL_NAME }}${{ matrix.ext }}" "dist/${OUTNAME}"
@@ -128,6 +135,10 @@ jobs:
           # --version is wired on the root parser as of v2.2.1 (a942a67).
           "$BIN" --version
           "$BIN" --help
+          # Zero-prerequisite `npx … ui` path. argparse prints this without
+          # importing ui.py; the freeze still needs [ui] + --hidden-import ui
+          # + --collect-submodules gradio or the launched binary cannot serve.
+          "$BIN" ui --help
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
