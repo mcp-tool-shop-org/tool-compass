@@ -418,6 +418,15 @@ class TestChainSearch:
         assert results == []
 
     @pytest.mark.asyncio
+    async def test_search_chains_no_index_down_embedder(
+        self, test_chain_indexer, down_embedder
+    ):
+        """Empty chain index + down embedder must return [] without raising."""
+        test_chain_indexer.embedder = down_embedder
+        results = await test_chain_indexer.search_chains("file operations")
+        assert results == []
+
+    @pytest.mark.asyncio
     async def test_search_chains_basic(self, chain_indexer, sample_chains):
         """Should return search results."""
         # Build index first

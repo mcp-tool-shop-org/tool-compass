@@ -581,58 +581,81 @@ class TestSyncEmbedder:
 # =============================================================================
 
 
+def _skip_unless_ollama_true(result, request) -> None:
+    """Skip when Ollama is down; fail the job when `-m integration` selected.
+
+    `assert isinstance(result, bool)` is green for False. Default pytest
+    (no markexpr) skips so a laptop without Ollama is skip, not pass.
+    `pytest -m integration` is the job that must have Ollama, so False fails.
+    """
+    if result is True:
+        return
+    expr = getattr(request.config.option, "markexpr", "") or ""
+    if "integration" in expr and "not integration" not in expr:
+        pytest.fail(
+            "health_check() returned False under pytest -m integration"
+        )
+    pytest.skip("Ollama not available")
+
+
 @pytest.mark.integration
 class TestEmbedderIntegration:
     """Integration tests requiring running Ollama server."""
 
     @pytest.mark.asyncio
-    async def test_real_health_check(self):
+    async def test_real_health_check(self, request):
         """Test against real Ollama server."""
         embedder = Embedder()
-
-        result = await embedder.health_check()
-
-        # Should return True if Ollama is running with model
-        # or False if not available
-        assert isinstance(result, bool)
-
-        await embedder.close()
+        try:
+            result = await embedder.health_check()
+            _skip_unless_ollama_true(result, request)
+            # Identity, not type — a bool-type check is green for False.
+            assert result is True
+        finally:
+            await embedder.close()
 
     @pytest.mark.asyncio
-    async def test_real_embedding(self):
+    async def test_real_embedding(self, request):
         """Test real embedding generation."""
         embedder = Embedder()
+        try:
+            _skip_unless_ollama_true(await embedder.health_check(), request)
 
-        if not await embedder.health_check():
-            pytest.skip("Ollama not available")
+            result = await embedder.embed("Test document for embedding")
 
-        result = await embedder.embed("Test document for embedding")
-
-        assert result.shape == (EMBEDDING_DIM,)
-        assert abs(np.linalg.norm(result) - 1.0) < 0.0001
-
-        await embedder.close()
+            assert result.shape == (EMBEDDING_DIM,)
+            assert abs(np.linalg.norm(result) - 1.0) < 0.0001
+        finally:
+            await embedder.close()
 
     @pytest.mark.asyncio
-    async def test_real_similarity(self):
+    async def test_real_similarity(self, request):
         """Test embedding similarity for related texts."""
         embedder = Embedder()
+        try:
+            _skip_unless_ollama_true(await embedder.health_check(), request)
 
-        if not await embedder.health_check():
-            pytest.skip("Ollama not available")
+            # Similar texts should have high similarity
+            emb1 = await embedder.embed("Read file contents from disk")
+            emb2 = await embedder.embed("Get file data from filesystem")
+            emb3 = await embedder.embed("Generate image from text prompt")
 
-        # Similar texts should have high similarity
-        emb1 = await embedder.embed("Read file contents from disk")
-        emb2 = await embedder.embed("Get file data from filesystem")
-        emb3 = await embedder.embed("Generate image from text prompt")
+            sim_related = np.dot(emb1, emb2)
+            sim_unrelated = np.dot(emb1, emb3)
 
-        sim_related = np.dot(emb1, emb2)
-        sim_unrelated = np.dot(emb1, emb3)
+            # Related texts should be more similar
+            assert sim_related > sim_unrelated
+        finally:
+            await embedder.close()
 
-        # Related texts should be more similar
-        assert sim_related > sim_unrelated
 
-        await embedder.close()
+def test_integration_health_check_does_not_pass_on_false():
+    """Lock: test_real_health_check must not treat False as success."""
+    import inspect
+
+    src = inspect.getsource(TestEmbedderIntegration.test_real_health_check)
+    assert "assert isinstance(result, bool)" not in src
+    assert "assert result is True" in src
 
 
 # =============================================================================
