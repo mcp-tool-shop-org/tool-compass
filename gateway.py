@@ -3179,9 +3179,6 @@ def _run_http(port: int) -> None:
     import os
     from mcp.server.transport_security import TransportSecuritySettings
 
-    # Build + register the ops routes (idempotent) before the server starts.
-    app = build_http_app()
-
     host = os.environ.get("HOST", "127.0.0.1")
     if host not in ("127.0.0.1", "localhost", "::1"):
         logger.warning(
@@ -3192,16 +3189,33 @@ def _run_http(port: int) -> None:
 
     mcp.settings.host = host
     mcp.settings.port = port
-    # Allow Fly.io and Smithery proxy hosts (0.0.0.0 intentionally omitted — never a valid Host header)
+
+    # Wildcard bind addresses are never valid Host headers; skip them so
+    # DNS-rebinding protection is not bypassed. Known public proxy names
+    # stay on the list because Fly/Smithery set HOST to a wildcard bind and
+    # send the public hostname as Host. The actual HOST is included when it
+    # is a usable hostname.
+    _not_host_headers = frozenset({"0.0.0.0", "::", "*", ""})
+    allowed = [
+        "localhost",
+        "127.0.0.1",
+        "::1",
+        "tool-compass-gateway.fly.dev",
+        "tool-compass-gateway--mcp-tool-shop.run.tools",
+    ]
+    if host not in _not_host_headers and host not in allowed:
+        allowed.append(host)
+
+    # FastMCP snapshots TransportSecuritySettings at app construction.
+    # Assign host/port/transport_security BEFORE build_http_app() so the
+    # auth path (uvicorn serving the already-built app) sees the allowlist.
     mcp.settings.transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
-        allowed_hosts=[
-            "tool-compass-gateway.fly.dev",
-            "tool-compass-gateway--mcp-tool-shop.run.tools",
-            "localhost",
-            "127.0.0.1",
-        ],
+        allowed_hosts=allowed,
     )
+
+    # Build + register the ops routes (idempotent) after settings are live.
+    app = build_http_app()
 
     # OPS-1: resolve the auth token (config field + env override already
     # applied by apply_env_overrides). Only when a non-empty token is present
