@@ -113,22 +113,27 @@ class SyncManager:
     def _mark_backend_error(self, backend_name: str, message: str) -> None:
         """DEG-02: persist a per-backend failure so triage isn't blind.
 
-        Writes sync_status='error' plus a truncated last_error / last_error_at
-        without disturbing the cached tool_count/tool_hash (those still reflect
-        the last *good* sync). Best-effort: a failure to record the failure
-        must never mask the original error, so DB problems are only logged.
+        Writes sync_status='error' plus a truncated last_error / last_error_at.
+        F-5ceaec1a: also NULL out tool_hash. Leaving the last-good fingerprint
+        in place made check_backend_changes return False after reconnect
+        (live list still matched the preserved hash), so dropped tools never
+        re-entered the index. tool_count is kept as last-known for triage.
+        Best-effort: a failure to record the failure must never mask the
+        original error, so DB problems are only logged.
         """
         try:
             db = self._get_db()
             db.execute(
                 """
                 INSERT INTO backend_sync_state
-                    (backend_name, sync_status, last_error, last_error_at)
-                VALUES (?, 'error', ?, CURRENT_TIMESTAMP)
+                    (backend_name, sync_status, last_error, last_error_at,
+                     tool_hash)
+                VALUES (?, 'error', ?, CURRENT_TIMESTAMP, NULL)
                 ON CONFLICT(backend_name) DO UPDATE SET
                     sync_status = 'error',
                     last_error = excluded.last_error,
-                    last_error_at = CURRENT_TIMESTAMP
+                    last_error_at = CURRENT_TIMESTAMP,
+                    tool_hash = NULL
             """,
                 (backend_name, message[:200]),
             )
@@ -221,13 +226,28 @@ class SyncManager:
 
         # Per-tool fingerprint: (qualified_name, description, canonical schema).
         # sort_keys canonicalizes nested dicts so key reordering is a no-op.
+        # F-19fbf0e3 sibling: one non-dict / non-JSON schema must not abort
+        # hashing for the rest of the backend.
         fingerprints = []
         for t in tools:
-            schema = getattr(t, "input_schema", None) or {}
-            canonical_schema = json.dumps(schema, sort_keys=True)
-            fingerprints.append(
-                (t.qualified_name, t.description or "", canonical_schema)
-            )
+            try:
+                schema = getattr(t, "input_schema", None)
+                if not isinstance(schema, dict):
+                    schema = {}
+                try:
+                    canonical_schema = json.dumps(schema, sort_keys=True)
+                except (TypeError, ValueError):
+                    canonical_schema = "{}"
+                fingerprints.append(
+                    (
+                        getattr(t, "qualified_name", None) or "",
+                        getattr(t, "description", None) or "",
+                        canonical_schema,
+                    )
+                )
+            except Exception as e:
+                logger.debug(f"_compute_tool_hash: skipping malformed tool: {e}")
+                continue
 
         # Sort the tuples for deterministic ordering independent of the
         # backend's tool-list ordering.
@@ -414,59 +434,216 @@ class SyncManager:
         applied so denied tools are NEVER indexed (skipped here → never
         embedded, never in the index). Sibling B2 enforces the same filter at
         the execute() boundary for defense-in-depth.
+
+        F-19fbf0e3: conversion is per-tool. Non-dict ``properties`` yields
+        empty collapsed params while a dict ``input_schema`` is still kept as
+        raw_schema; a bad tool is logged and skipped so the rest convert.
         """
         from tool_manifest import ToolDefinition
 
         definitions: List[Any] = []
         for tool in tools:
-            # Parse server from the qualified name ("server:tool"). The short
-            # name is intentionally dropped — ToolDefinition.name uses
-            # tool.qualified_name (fully-qualified) to keep names globally
-            # unique across backends.
-            if ":" in tool.qualified_name:
-                server, _short_name = tool.qualified_name.split(":", 1)
-            else:
-                # No colon — fall back to the backend-reported server.
-                server = tool.server
+            # F-19fbf0e3: one malformed tool (non-dict properties, non-dict
+            # property value, missing attrs) must skip itself, not abort
+            # conversion for the rest of the backend.
+            try:
+                qualified = getattr(tool, "qualified_name", None) or getattr(
+                    tool, "name", None
+                )
+                if not qualified:
+                    logger.warning(
+                        "Skipping tool with no name during schema conversion"
+                    )
+                    continue
 
-            # FEAT-06: apply the resolving backend's allow/deny globs against
-            # the BARE tool name. Denied tools are skipped entirely (not
-            # indexed, not embedded).
-            if not self._tool_allowed(server, tool.name):
-                logger.debug(
-                    f"Tool {tool.qualified_name} filtered out by "
-                    f"allow/deny globs for backend {server}"
+                # Parse server from the qualified name ("server:tool"). The
+                # short name is intentionally dropped — ToolDefinition.name
+                # uses the fully-qualified name to keep names globally unique
+                # across backends.
+                if ":" in qualified:
+                    server, _short_name = qualified.split(":", 1)
+                else:
+                    server = getattr(tool, "server", None) or ""
+
+                tool_name = getattr(tool, "name", None) or (
+                    qualified.split(":", 1)[-1] if ":" in qualified else qualified
+                )
+
+                # FEAT-06: apply the resolving backend's allow/deny globs
+                # against the BARE tool name. Denied tools are skipped
+                # entirely (not indexed, not embedded).
+                if not self._tool_allowed(server, tool_name):
+                    logger.debug(
+                        f"Tool {qualified} filtered out by "
+                        f"allow/deny globs for backend {server}"
+                    )
+                    continue
+
+                params: Dict[str, Any] = {}
+                input_schema = getattr(tool, "input_schema", None)
+                # FEAT-01: carry the full inputSchema verbatim when it is a
+                # dict. Empty/falsy dict → None so the DB stores SQL NULL.
+                # Non-dict schema is not preserved.
+                raw_schema = (
+                    input_schema
+                    if isinstance(input_schema, dict) and input_schema
+                    else None
+                )
+                if isinstance(input_schema, dict):
+                    properties = input_schema.get("properties")
+                    # Non-dict properties: no collapsed params, raw_schema kept.
+                    if isinstance(properties, dict):
+                        for param_name, param_info in properties.items():
+                            if not isinstance(param_info, dict):
+                                params[str(param_name)] = "any"
+                                continue
+                            param_type = param_info.get("type", "any")
+                            if isinstance(param_type, list):
+                                param_type = "/".join(str(x) for x in param_type)
+                            params[str(param_name)] = param_type
+
+                description = getattr(tool, "description", None) or ""
+                definitions.append(
+                    ToolDefinition(
+                        name=qualified,
+                        description=description,
+                        category=self._categorize_tool(tool_name, description),
+                        server=server,
+                        parameters=params,
+                        examples=[],
+                        is_core=False,
+                        raw_schema=raw_schema,
+                    )
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Skipping malformed tool during schema conversion: {e}"
                 )
                 continue
-
-            params = {}
-            if tool.input_schema and "properties" in tool.input_schema:
-                for param_name, param_info in tool.input_schema[
-                    "properties"
-                ].items():
-                    param_type = param_info.get("type", "any")
-                    if isinstance(param_type, list):
-                        param_type = "/".join(param_type)
-                    params[param_name] = param_type
-
-            # FEAT-01: carry the full inputSchema verbatim. Normalize an empty
-            # / falsy schema to None so the DB stores SQL NULL rather than "{}"
-            # — "no schema captured" reads cleanly downstream.
-            raw_schema = tool.input_schema if tool.input_schema else None
-
-            definitions.append(
-                ToolDefinition(
-                    name=tool.qualified_name,
-                    description=tool.description,
-                    category=self._categorize_tool(tool.name, tool.description),
-                    server=server,
-                    parameters=params,
-                    examples=[],
-                    is_core=False,
-                    raw_schema=raw_schema,
-                )
-            )
         return definitions
+
+    def _row_get(self, row: Any, key: str, default: Any = None) -> Any:
+        """Read a sqlite3.Row or mapping column; missing keys return default."""
+        if row is None:
+            return default
+        if isinstance(row, dict):
+            return row.get(key, default)
+        try:
+            return row[key]
+        except (KeyError, IndexError, TypeError):
+            return default
+
+    def _parse_json_field(self, value: Any, fallback: Any) -> Any:
+        """Best-effort JSON decode of an index-table TEXT column."""
+        if value is None or value == "":
+            return fallback
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            return json.loads(value)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            return fallback
+
+    def _load_indexed_definitions_for_backend(self, backend_name: str) -> List[Any]:
+        """Reconstruct last-known ToolDefinitions from the index DB.
+
+        F-5ceaec1a: a full-replace rebuild (full_sync / compaction) must not
+        drop a backend that failed to connect this pass. We rehydrate the
+        previously indexed rows so search keeps last-known tools. Incomplete
+        or unparseable rows are skipped rather than inventing a catalog.
+        """
+        from tool_manifest import ToolDefinition
+
+        definitions: List[Any] = []
+        idx_db = getattr(self.index, "db", None)
+        if idx_db is None:
+            return definitions
+        try:
+            with self._index_read_lock():
+                try:
+                    cursor = idx_db.execute(
+                        "SELECT name, description, category, server, "
+                        "parameters, examples, is_core, raw_schema "
+                        "FROM tools WHERE server = ?",
+                        (backend_name,),
+                    )
+                except Exception:
+                    cursor = idx_db.execute(
+                        "SELECT name, description, category, server, "
+                        "parameters, examples, is_core "
+                        "FROM tools WHERE server = ?",
+                        (backend_name,),
+                    )
+                rows = cursor.fetchall()
+        except Exception as e:
+            logger.debug(
+                f"_load_indexed_definitions_for_backend({backend_name}) "
+                f"failed: {e}"
+            )
+            return definitions
+
+        for row in rows:
+            try:
+                name = self._row_get(row, "name")
+                description = self._row_get(row, "description")
+                category = self._row_get(row, "category")
+                server = self._row_get(row, "server") or backend_name
+                if not name or description is None or category is None:
+                    continue
+                if server != backend_name:
+                    continue
+                params = self._parse_json_field(
+                    self._row_get(row, "parameters"), {}
+                )
+                if not isinstance(params, dict):
+                    params = {}
+                examples = self._parse_json_field(
+                    self._row_get(row, "examples"), []
+                )
+                if not isinstance(examples, list):
+                    examples = []
+                raw_schema = self._parse_json_field(
+                    self._row_get(row, "raw_schema"), None
+                )
+                if raw_schema is not None and not isinstance(raw_schema, dict):
+                    raw_schema = None
+                definitions.append(
+                    ToolDefinition(
+                        name=str(name),
+                        description=str(description),
+                        category=str(category),
+                        server=str(server),
+                        parameters=params,
+                        examples=examples,
+                        is_core=bool(self._row_get(row, "is_core", 0)),
+                        raw_schema=raw_schema,
+                    )
+                )
+            except Exception as e:
+                logger.debug(
+                    f"_load_indexed_definitions_for_backend: skip row for "
+                    f"{backend_name}: {e}"
+                )
+                continue
+        return definitions
+
+    def _carry_forward_unreachable(
+        self, backend_name: str, reason: str
+    ) -> List[Any]:
+        """Keep last-known tools for an unreachable backend and invalidate hash.
+
+        F-5ceaec1a: full replace + compaction both call this instead of
+        skipping the backend (which deleted its rows). _mark_backend_error
+        NULLs tool_hash so the next successful connect is a detected change.
+        """
+        self._mark_backend_error(backend_name, reason)
+        carried = self._load_indexed_definitions_for_backend(backend_name)
+        logger.warning(
+            f"Backend {backend_name} is UNREACHABLE ({reason}); "
+            f"carrying forward {len(carried)} last-known tool(s). "
+            f"tool_hash cleared so reconnect re-syncs."
+        )
+        return carried
 
     def _collect_all_connected_tools(self) -> List[Any]:
         """Collect ToolDefinitions from EVERY currently-connected backend.
@@ -477,16 +654,34 @@ class SyncManager:
         tools from those that are connected (get_backend_tools already returns
         [] for a disconnected backend, so an explicit is_backend_connected
         check keeps us defensive when the manager exposes it).
+
+        F-5ceaec1a: a backend that is not connected this pass is NOT skipped
+        into oblivion — last-known index rows are carried forward and its
+        tool_hash is invalidated so reconnect re-syncs.
         """
         all_tools: List[Any] = []
         for backend_name in self.config.backends.keys():
             is_connected = getattr(self.backends, "is_backend_connected", None)
             if callable(is_connected) and not is_connected(backend_name):
+                all_tools.extend(
+                    self._carry_forward_unreachable(
+                        backend_name, "unreachable during compaction rebuild"
+                    )
+                )
                 continue
             tools = self.backends.get_backend_tools(backend_name)
             if not tools:
                 continue
-            all_tools.extend(self._tool_infos_to_definitions(tools))
+            try:
+                all_tools.extend(self._tool_infos_to_definitions(tools))
+            except Exception as e:
+                logger.error(
+                    f"Tool conversion failed for backend {backend_name}: {e}"
+                )
+                self._mark_backend_error(
+                    backend_name, f"conversion failed: {e}"
+                )
+                continue
         return all_tools
 
     async def _rebuild_for_backends(self, backend_names: List[str]):
@@ -514,7 +709,18 @@ class SyncManager:
             # Convert first so new_names is the post-filter (FEAT-06) set.
             # F-302f6853: denied tools must not stay in new_names or they
             # survive the incremental remove pass.
-            definitions = self._tool_infos_to_definitions(tools)
+            # F-19fbf0e3: one backend's conversion failure must not abort
+            # the rest of the changed set.
+            try:
+                definitions = self._tool_infos_to_definitions(tools)
+            except Exception as e:
+                logger.error(
+                    f"Tool conversion failed for backend {backend_name}: {e}"
+                )
+                self._mark_backend_error(
+                    backend_name, f"conversion failed: {e}"
+                )
+                continue
 
             # Diff: old names in this backend vs. new names — anything
             # that vanished (or is now denied) is removed from the index
@@ -714,12 +920,15 @@ class SyncManager:
                 except Exception as e:
                     logger.debug(f"full_sync: baseline fetch failed: {e}")
 
-            # DEG-02: a configured backend that failed to connect this pass is
-            # a durable health signal — persist 'error' so get_sync_status
-            # surfaces it instead of leaving a stale 'synced'.
+            # DEG-02 + F-5ceaec1a: a configured backend that failed to connect
+            # this pass is a durable health signal (persist 'error') AND must
+            # not lose its last-known index rows. Carry those ToolDefinitions
+            # into the full replace and NULL tool_hash so reconnect re-syncs.
             for backend_name in failed_backends:
-                self._mark_backend_error(
-                    backend_name, "connect failed during full_sync"
+                all_tools.extend(
+                    self._carry_forward_unreachable(
+                        backend_name, "connect failed during full_sync"
+                    )
                 )
 
             # Per-backend diff counters (IDX-FT-004).
@@ -731,7 +940,6 @@ class SyncManager:
 
             for backend_name, connected in connect_results.items():
                 if not connected:
-                    logger.warning(f"Skipping {backend_name} - not connected")
                     continue
 
                 tools = self.backends.get_backend_tools(backend_name) or []
@@ -742,7 +950,18 @@ class SyncManager:
 
                 # Convert first so new_names is the post-filter set
                 # (F-302f6853 sibling of the incremental path).
-                definitions = self._tool_infos_to_definitions(tools)
+                # F-19fbf0e3: one backend's conversion failure must not abort
+                # the remaining backends.
+                try:
+                    definitions = self._tool_infos_to_definitions(tools)
+                except Exception as e:
+                    logger.error(
+                        f"Tool conversion failed for backend {backend_name}: {e}"
+                    )
+                    self._mark_backend_error(
+                        backend_name, f"conversion failed: {e}"
+                    )
+                    continue
 
                 # Diff this backend's old vs. new names.
                 old_names = self._get_backend_tool_names(backend_name)
@@ -785,12 +1004,10 @@ class SyncManager:
                     f"{stats['updated']} updated, {stats['removed']} removed"
                 )
             # Also note globally removed tools (tools present last pass but not
-            # this one). DEG-03: a full_sync rebuilds from ONLY the backends
-            # that connected, so a transiently-unreachable backend's tools get
-            # dropped too. Distinguish "removed because the backend is gone"
-            # from "removed because the backend was unreachable this pass" so
-            # the log doesn't claim an unreachable backend's tools were
-            # intentionally retired.
+            # this one). F-5ceaec1a / DEG-03: unreachable backends are carried
+            # forward (not dropped). Anything still missing from a failed
+            # backend is a carry-forward miss (no last-known row), not a
+            # retirement — tool_hash was already NULLed so reconnect re-syncs.
             new_all_names = {t.name for t in all_tools}
             globally_removed = old_all_names - new_all_names
             failed_set = set(failed_backends)
@@ -806,16 +1023,10 @@ class SyncManager:
                     f"from removed backends"
                 )
             if dropped_unreachable:
-                # Conservative: still rebuild (build_index is the contract),
-                # but WARN loudly that these drops are due to unreachable
-                # backends, not intentional removal — so a transient outage
-                # reads as an outage in the logs, not a retirement.
                 logger.warning(
-                    f"Full sync is dropping {len(dropped_unreachable)} tool(s) "
-                    f"from {len(failed_set & {s for _, s in old_name_server})} "
-                    f"backend(s) that failed to connect this pass "
-                    f"({sorted(failed_set)}); these were UNREACHABLE, not "
-                    f"removed — they will reappear once the backend(s) reconnect."
+                    f"Could not carry forward {len(dropped_unreachable)} "
+                    f"UNREACHABLE tool(s) from {sorted(failed_set)}; "
+                    f"tool_hash invalidated so they re-sync on reconnect."
                 )
 
             # Rebuild entire index
