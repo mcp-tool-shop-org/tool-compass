@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.2] - 2026-09-09
+
+### Added
+
+- The container now warns when `/app/tool_compass/db` is not a mounted volume.
+  The semantic index lives there, and building it means embedding every tool in
+  every configured server — without a volume that work is discarded when the
+  container exits and paid again on the next start, which reads as "Tool
+  Compass is slow" rather than as a missing flag. `docker-compose.yml` already
+  mounts the `compass-data` named volume, so this only ever fires on the bare
+  `docker run ghcr.io/...` path, which is what someone trying the published
+  image reaches for first.
+
+  The warning goes to **stderr**, so it cannot corrupt anything piping the
+  container's output. `publish.yml`'s post-publish handshake uses
+  `--entrypoint tool-compass`, which overrides the entrypoint entirely and is
+  unaffected; verified against both stage CMDs.
+
+- README documents running the published image directly with a volume, not
+  only the clone-and-compose path.
+
+### Fixed
+
+- `.gitattributes` pins LF on `*.sh`, the `Dockerfile` and the entrypoint. A
+  shell script checked out with CRLF on Windows makes the shebang
+  `#!/bin/sh`, and Linux then fails with "no such file or directory" naming
+  the script rather than the line endings — invisible to CI, which checks out
+  LF on Linux, and visible only to a contributor building the image on Windows.
+  Caught on the sibling xrpl-camp repo the same day.
+
 ## [2.5.1] - 2026-09-09
 
 Dogfood swarm `swarm-1788918264-9859` — health Stages A–D, a 23-item
