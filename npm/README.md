@@ -21,9 +21,12 @@
 
 ```bash
 npx @mcptoolshop/tool-compass --help
+npx @mcptoolshop/tool-compass --version
 ```
 
-This package is an `npx`-friendly launcher for the [`tool-compass`](https://github.com/mcp-tool-shop-org/tool-compass) Python CLI. It downloads the verified platform-specific binary from the GitHub Release, caches it locally, and runs it with full argument passthrough.
+`--help` / `-h` / `help` and `--version` / `-V` print locally and do not download a binary.
+
+This package is an `npx`-friendly launcher for the [`tool-compass`](https://github.com/mcp-tool-shop-org/tool-compass) Python CLI. Real commands download the verified platform-specific binary from the GitHub Release, cache it locally, and run it with full argument passthrough.
 
 **No Python install required.** The binary is self-contained.
 
@@ -80,21 +83,33 @@ Every binary is SHA256-verified against `checksums-<version>.txt` from the GitHu
 
 ## Configuration
 
-Configuration lives in `compass_config.json` in the working directory. Start from the [example](https://github.com/mcp-tool-shop-org/tool-compass/blob/main/compass_config.example.json):
+Configuration is a name-keyed object (not an array). The loader reads `TOOL_COMPASS_CONFIG` if set, otherwise the user-config dir:
+
+| OS      | Default config path |
+|---------|---------------------|
+| Linux   | `~/.config/tool-compass/compass_config.json` (or `$XDG_CONFIG_HOME/tool-compass/`) |
+| macOS   | `~/Library/Application Support/tool-compass/compass_config.json` |
+| Windows | `%LOCALAPPDATA%\tool-compass\compass_config.json` |
+
+Start from the [example](https://github.com/mcp-tool-shop-org/tool-compass/blob/main/compass_config.example.json):
 
 ```json
 {
-  "backends": [
-    {
-      "name": "my-mcp-server",
+  "backends": {
+    "my-mcp-server": {
+      "type": "stdio",
       "command": "python",
       "args": ["-m", "my_server"]
+    },
+    "remote-tools": {
+      "type": "http",
+      "url": "http://127.0.0.1:8081/mcp"
     }
-  ]
+  }
 }
 ```
 
-See the [Configuration handbook page](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/) for the full schema.
+`type` is `stdio` or `http`. See the [Configuration handbook page](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/) for the full schema.
 
 ## MCP client setup
 
@@ -141,7 +156,11 @@ The npm wrapper downloads and executes a binary from GitHub Releases. Here's wha
 
 - **Network:** HTTPS only, to `github.com` and GitHub's CDN.
 - **Filesystem:** Writes to the local cache only. Does not modify system files.
-- **Verification:** SHA256-checked against the official Release checksums.
+- **Verification:** SHA256-checked against the official Release checksums. The binaries and `checksums-<version>.txt` also carry GitHub artifact attestations (SLSA build provenance). Verify a downloaded binary with:
+  ```bash
+  gh attestation verify ./tool-compass-<version>-<os>-<arch> \
+    --repo mcp-tool-shop-org/tool-compass
+  ```
 - **No telemetry.** No credentials handled.
 - **No elevated permissions.**
 
@@ -150,7 +169,17 @@ See [SECURITY.md](https://github.com/mcp-tool-shop-org/tool-compass/blob/main/SE
 ## Alternative installs
 
 - **PyPI:** `pip install tool-compass`
-- **Docker:** `docker run ghcr.io/mcp-tool-shop-org/tool-compass:latest`
+- **Docker (MCP gateway, port 8080):**
+  ```bash
+  docker run --rm -p 8080:8080 ghcr.io/mcp-tool-shop-org/tool-compass:latest
+  docker run --rm -p 8080:8080 ghcr.io/mcp-tool-shop-org/tool-compass:gateway
+  ```
+- **Docker (Gradio UI, port 7860):**
+  ```bash
+  docker run --rm -p 7860:7860 ghcr.io/mcp-tool-shop-org/tool-compass:ui
+  docker build --target production -t tool-compass:ui . && docker run --rm -p 7860:7860 tool-compass:ui
+  ```
+- **Compose:** `docker compose up` (UI) or `docker compose --profile gateway up`
 - **From source:** clone + `pip install -e .` — see [CONTRIBUTING.md](https://github.com/mcp-tool-shop-org/tool-compass/blob/main/CONTRIBUTING.md)
 
 ## Documentation

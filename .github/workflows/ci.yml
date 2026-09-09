@@ -26,6 +26,12 @@ on:
       - 'requirements*.txt'
       - 'pyproject.toml'
       - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - 'fly.toml'
+      - '.pre-commit-config.yaml'
+      - '.dockerignore'
+      - 'npm/**'
       - 'site/**'
       - '.github/workflows/**'
   pull_request:
@@ -37,6 +43,12 @@ on:
       - 'requirements*.txt'
       - 'pyproject.toml'
       - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - 'fly.toml'
+      - '.pre-commit-config.yaml'
+      - '.dockerignore'
+      - 'npm/**'
       - 'site/**'
       - '.github/workflows/**'
   # TST-FT-002: nightly-fuzz job runs Hypothesis in `nightly` profile
@@ -133,15 +145,24 @@ jobs:
     timeout-minutes: 15
     # PR-scoped concurrency (see workflow-top NOTE).
     concurrency:
-      group: test-${{ matrix.python-version }}-${{ github.event.pull_request.number || github.run_id }}
+      group: test-${{ matrix.python-version }}-${{ matrix.os }}-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
+    # Windows runners default to pwsh, which does not accept `\` line
+    # continuations used below. Git Bash is on the image.
+    defaults:
+      run:
+        shell: bash
 
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        # Two-cell OS matrix (ubuntu + windows). macos-latest is x10 billable
+        # and is covered by the release-binaries darwin-arm64 freeze, not
+        # every-push pytest. Do not revive 3.11/3.13: those were dropped for
+        # runner SIGILL on hnswlib/numpy wheels (see comment below).
+        os: [ubuntu-latest, windows-latest]
         # One version, because one is all this repo can currently test.
         #
         # 3.13 was dropped earlier: hnswlib 0.8.0's cp313 wheel SIGILLs on
@@ -185,14 +206,14 @@ jobs:
       - name: Run tests
         run: |
           pytest -v --tb=short -m "not integration" \
-            --junitxml=junit-${{ matrix.python-version }}.xml
+            --junitxml=junit-${{ matrix.python-version }}-${{ matrix.os }}.xml
 
       - name: Upload JUnit report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: junit-reports-${{ matrix.python-version }}
-          path: junit-${{ matrix.python-version }}.xml
+          name: junit-reports-${{ matrix.python-version }}-${{ matrix.os }}
+          path: junit-${{ matrix.python-version }}-${{ matrix.os }}.xml
           if-no-files-found: warn
           # CT-B-012: JUnit reports are short-lived diagnostic data — only
           # useful for the most recent few runs. Default 90d is wasted.
@@ -234,6 +255,30 @@ jobs:
         if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
         run: |
           pip-audit -r requirements.txt
+
+  npm-wrapper:
+    name: npm wrapper tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: npm-wrapper-${{ github.event.pull_request.number || github.run_id }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      - name: Setup Node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6
+        with:
+          node-version: 22
+
+      - name: Install and test npm wrapper
+        working-directory: npm
+        run: |
+          npm install --no-audit --no-fund
+          npm test
 
   # TST-FT-002: nightly Hypothesis fuzzing. Runs on schedule (Mon/Wed/Fri 09:00
   # UTC) or manually via workflow_dispatch. Never runs on push/PR — nightly-only.
@@ -364,14 +409,26 @@ jobs:
         continue-on-error: true  # Integration tests may be flaky
 
   docker:
-    name: Docker Build
+    name: Docker ${{ matrix.target }}
     runs-on: ubuntu-latest
     needs: test
     # CT-B-011: docker buildx + gha cache; 20 min covers a cold-cache build.
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: mcp-gateway
+            tag: tool-compass:test-gateway
+            port: 8080
+            smoke: health
+          - target: production
+            tag: tool-compass:test-ui
+            port: 7860
+            smoke: bind
     # PR-scoped concurrency (see workflow-top NOTE).
     concurrency:
-      group: docker-${{ github.event.pull_request.number || github.run_id }}
+      group: docker-${{ matrix.target }}-${{ github.event.pull_request.number || github.run_id }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     permissions:
       contents: read
@@ -387,10 +444,39 @@ jobs:
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
+          target: ${{ matrix.target }}
           push: false
-          tags: tool-compass:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          load: true
+          tags: ${{ matrix.tag }}
+          cache-from: type=gha,scope=ci-${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=ci-${{ matrix.target }}
+
+      - name: Smoke run
+        run: |
+          set -euo pipefail
+          docker run -d --name tc-smoke -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          cleanup() { docker logs tc-smoke || true; docker rm -f tc-smoke || true; }
+          trap cleanup EXIT
+          for _ in $(seq 1 45); do
+            if [ "${{ matrix.smoke }}" = "health" ]; then
+              if curl -sf "http://127.0.0.1:${{ matrix.port }}/health"; then
+                echo "gateway /health ok"
+                exit 0
+              fi
+            else
+              # Bind smoke: any HTTP response (or even a reset after accept)
+              # means the UI process bound 7860. Do not use curl -f — Gradio
+              # may 4xx before the app is fully ready.
+              if curl -sS --connect-timeout 2 -o /dev/null \
+                   "http://127.0.0.1:${{ matrix.port }}/"; then
+                echo "ui port ${{ matrix.port }} bound"
+                exit 0
+              fi
+            fi
+            sleep 2
+          done
+          echo "::error::docker smoke (${{ matrix.target }}) did not become ready on port ${{ matrix.port }}"
+          exit 1
 
   # ===========================================================================
   # GitHub Pages build + deploy (folded in from former pages.yml)
