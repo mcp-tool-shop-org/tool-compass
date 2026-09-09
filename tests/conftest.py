@@ -223,6 +223,33 @@ def mock_embedder():
     return embedder
 
 
+@pytest.fixture
+def down_embedder():
+    """Ollama-down / breaker-open embedder double.
+
+    health_check is False; embed / embed_query / embed_batch raise
+    RuntimeError('circuit breaker open'). IDX-A-002's healthy mock_embedder
+    cannot observe embed_query running before the empty-index guard.
+    """
+    embedder = Mock()
+
+    async def _raise(*_args, **_kwargs):
+        raise RuntimeError("circuit breaker open")
+
+    async def health_check() -> bool:
+        return False
+
+    embedder.embed = AsyncMock(side_effect=_raise)
+    embedder.embed_batch = AsyncMock(side_effect=_raise)
+    embedder.embed_query = AsyncMock(side_effect=_raise)
+    embedder.health_check = AsyncMock(side_effect=health_check)
+    embedder.close = AsyncMock()
+    embedder.base_url = "mock://embedder-down"
+    embedder.model = "mock-embed-test"
+
+    return embedder
+
+
 # =============================================================================
 # Temporary Database Fixtures
 # =============================================================================

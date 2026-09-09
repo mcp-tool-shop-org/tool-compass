@@ -367,6 +367,37 @@ class TestCompassFallback:
                 assert m["degraded"] is True
 
     @pytest.mark.asyncio
+    async def test_compass_falls_back_to_lexical_when_embedder_down(
+        self, test_index, test_config, down_embedder
+    ):
+        """Populated index + down embedder must take the lexical fallback path.
+
+        Unlike the patched search() sibling, this drives CompassIndex.search
+        through a breaker-open embedder so embed_query raising is live.
+        """
+        import gateway
+
+        original = test_index.embedder
+        test_index.embedder = down_embedder
+        try:
+            gateway._compass_index = test_index
+            gateway._config = test_config
+            gateway._startup_sync_done = True
+            gateway._analytics = None
+
+            from gateway import compass
+
+            result = await compass(intent="read_file", top_k=3)
+
+            assert result["degraded"] is True
+            assert "warnings" in result
+            assert any("Ollama" in w for w in result["warnings"])
+            for m in result["matches"]:
+                assert m["degraded"] is True
+        finally:
+            test_index.embedder = original
+
+    @pytest.mark.asyncio
     async def test_compass_clamps_oversize_intent(self, test_index, test_config):
         """A 10MB paste should never reach the embedder."""
         import gateway
