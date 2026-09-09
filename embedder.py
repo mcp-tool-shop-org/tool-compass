@@ -28,6 +28,7 @@ Adding a new backend (e.g. sentence-transformers, Cohere) means writing an
 — the orchestration layer never changes.
 """
 
+import hashlib
 import httpx
 import numpy as np
 from typing import Callable, Dict, List, Optional, Tuple, Type
@@ -76,6 +77,9 @@ _RETRY_BACKOFFS = (0.5, 1.0, 2.0)
 # and removes the cross-loop binding entirely. A WeakValueDictionary lets
 # dead loops' semaphores be garbage-collected once their loop is gone.
 _GLOBAL_EMBED_CONCURRENCY = 8
+# F-c987c9d3: native array POSTs chunk to this size (Ollama/OpenAI accept
+# list[str] input; 32 keeps payloads well under typical request limits).
+_EMBED_BATCH_CHUNK_SIZE = 32
 _loop_embed_semaphores: "weakref.WeakValueDictionary[int, asyncio.Semaphore]" = (
     weakref.WeakValueDictionary()
 )
@@ -139,6 +143,10 @@ class EmbeddingProvider:
 
     #: Provider name as used in config + the registry. Subclasses set this.
     name: str = "base"
+    #: True when POST body `input` may be a list[str] in one round-trip.
+    supports_native_batch: bool = False
+    #: True for in-process providers (hash / local) — skip HTTP entirely.
+    is_in_process: bool = False
 
     def __init__(
         self,
@@ -207,6 +215,34 @@ class EmbeddingProvider:
         """Pull the raw embedding list out of the parsed JSON response."""
         raise NotImplementedError
 
+    def build_body_batch(self, texts: List[str]) -> dict:
+        """JSON body for a native array POST. Default loops build_body.
+
+        HTTP providers that accept ``input: list[str]`` override this to send
+        one array. The orchestration layer only calls this when
+        ``supports_native_batch`` is True.
+        """
+        if len(texts) == 1:
+            return self.build_body(texts[0])
+        # Default: not a native array body. Subclasses that support batch
+        # input override; Embedder falls back to per-item embed() otherwise.
+        return self.build_body(texts[0] if texts else "")
+
+    def parse_vectors(self, data: dict) -> List[list]:
+        """Pull a matrix of embeddings out of the parsed JSON response.
+
+        Default wraps ``parse_vector`` in a one-element list.
+        """
+        return [self.parse_vector(data)]
+
+    def embed_one(self, text: str) -> list:
+        """In-process single-text embed. HTTP providers do not implement this."""
+        raise NotImplementedError
+
+    def embed_batch(self, texts: List[str]) -> List[list]:
+        """In-process batch embed. Default loops embed_one."""
+        return [self.embed_one(t) for t in texts]
+
     async def health_check(self, client: httpx.AsyncClient) -> bool:
         """Return True if this backend can serve embeddings for ``self.model``."""
         raise NotImplementedError
@@ -230,6 +266,7 @@ class OllamaProvider(EmbeddingProvider):
     name = "ollama"
     default_query_prefix = NOMIC_QUERY_PREFIX
     default_document_prefix = NOMIC_DOCUMENT_PREFIX
+    supports_native_batch = True
 
     @property
     def endpoint_path(self) -> str:
@@ -242,6 +279,12 @@ class OllamaProvider(EmbeddingProvider):
         # Legacy parse — kept exactly as the pre-seam code:
         # data["embeddings"][0].
         return data["embeddings"][0]
+
+    def build_body_batch(self, texts: List[str]) -> dict:
+        return {"model": self.model, "input": texts}
+
+    def parse_vectors(self, data: dict) -> List[list]:
+        return list(data["embeddings"])
 
     async def health_check(self, client: httpx.AsyncClient) -> bool:
         """GET /api/tags and look for ``self.model`` (legacy Ollama probe)."""
@@ -284,6 +327,7 @@ class OpenAICompatibleProvider(EmbeddingProvider):
     # Non-nomic models: no retrieval prefix by default.
     default_query_prefix = ""
     default_document_prefix = ""
+    supports_native_batch = True
 
     @property
     def endpoint_path(self) -> str:
@@ -301,6 +345,19 @@ class OpenAICompatibleProvider(EmbeddingProvider):
     def parse_vector(self, data: dict) -> list:
         # OpenAI embeddings contract: data["data"][0]["embedding"].
         return data["data"][0]["embedding"]
+
+    def build_body_batch(self, texts: List[str]) -> dict:
+        return {"model": self.model, "input": texts}
+
+    def parse_vectors(self, data: dict) -> List[list]:
+        items = data["data"]
+        # Contract: each item has `embedding` and optional `index`. Sort so
+        # a server that returns out of order still lines up with `texts`.
+        ordered = sorted(
+            items,
+            key=lambda item: item.get("index", 0) if isinstance(item, dict) else 0,
+        )
+        return [item["embedding"] for item in ordered]
 
     async def health_check(self, client: httpx.AsyncClient) -> bool:
         """Probe GET /v1/models, then POST /v1/embeddings if needed.
@@ -336,6 +393,164 @@ class OpenAICompatibleProvider(EmbeddingProvider):
         return response.status_code == 200
 
 
+def _deterministic_hash_vector(text: str, dim: int) -> np.ndarray:
+    """Stable hash-embedding for offline/CI. Not semantically meaningful."""
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    seed = int.from_bytes(digest[:8], "little") & 0xFFFFFFFF
+    rng = np.random.RandomState(seed)
+    vec = rng.randn(int(dim)).astype(np.float32)
+    for i, b in enumerate(digest):
+        vec[i % dim] += (b - 127.5) / 127.5 * 0.01
+    n = np.linalg.norm(vec)
+    if n > 0:
+        vec = vec / n
+    return vec
+
+
+def _sentence_transformers_available() -> bool:
+    try:
+        import sentence_transformers  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+class HashEmbeddingProvider(EmbeddingProvider):
+    """Deterministic hash vectors. Works fully offline (tests/CI, air-gap).
+
+    Not a semantic model — dummy hash-vectors stay out of the default
+    provider path. Register as ``hash``.
+    """
+
+    name = "hash"
+    is_in_process = True
+    default_query_prefix = ""
+    default_document_prefix = ""
+
+    @property
+    def endpoint_path(self) -> str:
+        return ""
+
+    def build_body(self, text: str) -> dict:
+        return {"model": self.model, "input": text}
+
+    def parse_vector(self, data: dict) -> list:
+        return data["embedding"]
+
+    def embed_one(self, text: str) -> list:
+        return _deterministic_hash_vector(text, self.embedding_dim).tolist()
+
+    def embed_batch(self, texts: List[str]) -> List[list]:
+        return [self.embed_one(t) for t in texts]
+
+    async def health_check(self, client: httpx.AsyncClient) -> bool:
+        return True
+
+    async def pull_model(self, client: httpx.AsyncClient) -> bool:
+        return True
+
+
+class LocalEmbeddingProvider(EmbeddingProvider):
+    """In-process local embeddings.
+
+    Uses sentence-transformers when that package is already importable;
+    otherwise falls back to the deterministic hash backend so ``local``
+    always works offline. Does not pip-install anything.
+    """
+
+    name = "local"
+    is_in_process = True
+    default_query_prefix = ""
+    default_document_prefix = ""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._st_model = None
+        self._st_load_attempted = False
+
+    @property
+    def endpoint_path(self) -> str:
+        return ""
+
+    def build_body(self, text: str) -> dict:
+        return {"model": self.model, "input": text}
+
+    def parse_vector(self, data: dict) -> list:
+        return data["embedding"]
+
+    def _maybe_st_model(self):
+        if self._st_load_attempted:
+            return self._st_model
+        self._st_load_attempted = True
+        if not _sentence_transformers_available():
+            logger.info(
+                "sentence-transformers not importable; local provider using "
+                "deterministic hash embeddings"
+            )
+            return None
+        try:
+            from sentence_transformers import SentenceTransformer
+
+            model_name = self.model or "all-MiniLM-L6-v2"
+            # Skip ST when the operator left the Ollama default model name —
+            # loading nomic-embed-text through sentence-transformers is not
+            # the local-offline path.
+            if model_name in (EMBEDDING_MODEL, "hash"):
+                logger.info(
+                    "local provider model %r is not a sentence-transformers "
+                    "id; using hash embeddings",
+                    model_name,
+                )
+                return None
+            self._st_model = SentenceTransformer(model_name)
+        except Exception as e:
+            logger.warning(
+                "sentence-transformers model load failed (%s); using hash", e
+            )
+            self._st_model = None
+        return self._st_model
+
+    def embed_one(self, text: str) -> list:
+        model = self._maybe_st_model()
+        if model is not None:
+            vec = model.encode(text, convert_to_numpy=True, show_progress_bar=False)
+            return np.asarray(vec, dtype=np.float32).reshape(-1).tolist()
+        return _deterministic_hash_vector(text, self.embedding_dim).tolist()
+
+    def embed_batch(self, texts: List[str]) -> List[list]:
+        model = self._maybe_st_model()
+        if model is not None:
+            arr = model.encode(
+                texts, convert_to_numpy=True, show_progress_bar=False
+            )
+            return [
+                np.asarray(v, dtype=np.float32).reshape(-1).tolist() for v in arr
+            ]
+        return [self.embed_one(t) for t in texts]
+
+    async def health_check(self, client: httpx.AsyncClient) -> bool:
+        if _sentence_transformers_available():
+            model = self.model or ""
+            if model and ("/" in model or "\\" in model):
+                from pathlib import Path
+
+                return Path(model).exists()
+            return True
+        return True
+
+    async def pull_model(self, client: httpx.AsyncClient) -> bool:
+        # HuggingFace download only if sentence-transformers is already
+        # importable; otherwise hash needs no pull.
+        if not _sentence_transformers_available():
+            return True
+        try:
+            self._maybe_st_model()
+            return True
+        except Exception as e:
+            logger.error("local pull_model failed: %s", e)
+            return False
+
+
 # --- registry / factory ----------------------------------------------------
 #
 # The registry is the documented extension point. To add a backend later
@@ -357,11 +572,15 @@ def register_provider(cls: Type[EmbeddingProvider]) -> Type[EmbeddingProvider]:
     return cls
 
 
-# Register the two shipped providers. 'openai-compatible' is an alias so both
-# spellings in config resolve to the same backend.
+# Register the shipped providers. 'openai-compatible' is an alias so both
+# spellings in config resolve to the same backend. 'local' also answers to
+# 'sentence-transformers'; 'hash' is the offline CI stub.
 OpenAICompatibleProvider.aliases = ("openai-compatible",)
+LocalEmbeddingProvider.aliases = ("sentence-transformers",)
 register_provider(OllamaProvider)
 register_provider(OpenAICompatibleProvider)
+register_provider(HashEmbeddingProvider)
+register_provider(LocalEmbeddingProvider)
 
 
 def known_providers() -> Tuple[str, ...]:
@@ -696,6 +915,8 @@ class Embedder:
         provider='openai' does not 404 against /api/tags.
         """
         try:
+            if getattr(self._provider, "is_in_process", False):
+                return await self._provider.health_check(None)  # type: ignore[arg-type]
             client = await self._get_client()
             return await self._provider.health_check(client)
         except Exception as e:
@@ -710,8 +931,11 @@ class Embedder:
         """Pull the embedding model if the backend supports it.
 
         Ollama POST /api/pull. OpenAI-compatible providers no-op (True).
+        Hash/local in-process providers no-op (True).
         """
         try:
+            if getattr(self._provider, "is_in_process", False):
+                return await self._provider.pull_model(None)  # type: ignore[arg-type]
             client = await self._get_client()
             return await self._provider.pull_model(client)
         except Exception as e:
@@ -1074,6 +1298,10 @@ class Embedder:
         data = response.json()
         # BE-FT-PE-001: provider knows where the vector lives in the JSON.
         raw = self._provider.parse_vector(data)
+        return self._finalize_vector(raw)
+
+    def _finalize_vector(self, raw) -> np.ndarray:
+        """Dim-check + L2-normalize a raw embedding list."""
         try:
             n = len(raw)
         except TypeError as e:
@@ -1091,6 +1319,14 @@ class Embedder:
                 f"embedding_dim={n}."
             )
         embedding = np.array(raw, dtype=np.float32)
+        if embedding.ndim != 1:
+            embedding = embedding.reshape(-1)
+        if embedding.shape[0] != expected:
+            raise RuntimeError(
+                f"Embedding provider {self.provider_name!r} returned a "
+                f"{embedding.shape}-shaped vector but embedding_dim is "
+                f"{expected}."
+            )
 
         # Normalize for cosine similarity
         norm = np.linalg.norm(embedding)
@@ -1098,6 +1334,77 @@ class Embedder:
             embedding = embedding / norm
 
         return embedding
+
+    def _embed_is_overridden(self) -> bool:
+        """True when instance.embed is not Embedder.embed (tests patch it)."""
+        bound = getattr(self, "embed", None)
+        func = getattr(bound, "__func__", None)
+        return func is not Embedder.embed
+
+    async def _embed_in_process(
+        self, prefixed_text: str, trace_id: Optional[str]
+    ) -> np.ndarray:
+        start = time.monotonic()
+        self._metrics["total_calls"] += 1
+        raw = self._provider.embed_one(prefixed_text)
+        vec = self._finalize_vector(raw)
+        self._record_success((time.monotonic() - start) * 1000.0)
+        return vec
+
+    async def _embed_batch_chunk(
+        self,
+        prefixed_texts: List[str],
+        trace_id: Optional[str],
+    ) -> List[np.ndarray]:
+        """One native array POST for a chunk, under breaker/retry/semaphore."""
+        self._breaker_check()
+
+        sem = _get_global_embed_semaphore()
+        client = await self._get_client()
+
+        queue_start = time.monotonic()
+        async with sem:
+            queue_wait_ms = (time.monotonic() - queue_start) * 1000.0
+            self._metrics["queue_wait_ms_samples"].append(queue_wait_ms)
+            if self._ollama_breaker["state"] == "open":
+                raise self._circuit_breaker_error(
+                    "re-opened during queue wait"
+                )
+
+            self._metrics["total_calls"] += 1
+            await self._inflight_incr()
+            try:
+                start = time.monotonic()
+                response = await self._post_embed_with_retry(
+                    client,
+                    self._provider.build_body_batch(prefixed_texts),
+                    trace_id=trace_id,
+                )
+                latency_ms = (time.monotonic() - start) * 1000.0
+                self._record_success(latency_ms)
+                logger.debug(
+                    "embed_batch chunk complete",
+                    extra={
+                        "event": "embed_batch",
+                        "latency_ms": latency_ms,
+                        "queue_wait_ms": queue_wait_ms,
+                        "batch_size": len(prefixed_texts),
+                        "model": self.model,
+                        "provider": self.provider_name,
+                        "trace_id": trace_id,
+                    },
+                )
+            finally:
+                await self._inflight_decr()
+
+        data = response.json()
+        raws = self._provider.parse_vectors(data)
+        if len(raws) != len(prefixed_texts):
+            raise RuntimeError(
+                f"Embedding provider {self.provider_name!r} parse_vectors "
+                f"returned {len(raws)} rows for {len(prefixed_texts)} inputs"
+            )
+        return [self._finalize_vector(raw) for raw in raws]
 
     async def embed(
         self, text: str, trace_id: Optional[str] = None
@@ -1115,6 +1422,8 @@ class Embedder:
         # Add task prefix for better retrieval. The provider owns the
         # convention (nomic search_document: for ollama, empty for openai).
         prefixed_text = self._provider.apply_prefix(text, "document")
+        if getattr(self._provider, "is_in_process", False):
+            return await self._embed_in_process(prefixed_text, trace_id)
         return await self._embed_with_concurrency_cap(prefixed_text, trace_id)
 
     async def embed_query(
@@ -1134,6 +1443,8 @@ class Embedder:
         # Query prefix for retrieval tasks — provider owns the convention
         # (nomic search_query: for ollama, empty for openai).
         prefixed_query = self._provider.apply_prefix(query, "query")
+        if getattr(self._provider, "is_in_process", False):
+            return await self._embed_in_process(prefixed_query, trace_id)
         return await self._embed_with_concurrency_cap(prefixed_query, trace_id)
 
     async def embed_batch(
@@ -1149,11 +1460,49 @@ class Embedder:
         Returns:
             numpy array of shape (len(texts), EMBEDDING_DIM)
 
-        BE-A-010 + BE-B-005: concurrency is now enforced at process scope by
-        the module-level semaphore (acquired inside each embed() call), so
-        embed_batch no longer creates its own per-call Semaphore. Indexing
-        rebuild + concurrent query embeddings share the same 8 slots.
+        F-c987c9d3: providers that accept array input (Ollama / OpenAI) send
+        one POST per chunk of ``_EMBED_BATCH_CHUNK_SIZE`` under the same
+        breaker/retry/semaphore as single-text embed. In-process providers
+        call embed_batch on the provider. If embed() is monkeypatched (tests)
+        the legacy gather path is preserved.
         """
+        if not texts:
+            # Keep the historical np.stack([]) contract locked by
+            # test_embed_batch_empty_list.
+            raise ValueError("need at least one array to stack")
+
+        if getattr(self._provider, "is_in_process", False):
+            prefixed = [
+                self._provider.apply_prefix(t, "document") for t in texts
+            ]
+            start = time.monotonic()
+            self._metrics["total_calls"] += 1
+            raws = self._provider.embed_batch(prefixed)
+            vecs = [self._finalize_vector(r) for r in raws]
+            self._record_success((time.monotonic() - start) * 1000.0)
+            return np.stack(vecs)
+
+        if self._embed_is_overridden():
+            tasks = [self.embed(text, trace_id=trace_id) for text in texts]
+            embeddings = await asyncio.gather(*tasks)
+            return np.stack(embeddings)
+
+        if getattr(self._provider, "supports_native_batch", False):
+            prefixed = [
+                self._provider.apply_prefix(t, "document") for t in texts
+            ]
+            chunk = max(1, int(_EMBED_BATCH_CHUNK_SIZE))
+            chunks = [
+                prefixed[i : i + chunk] for i in range(0, len(prefixed), chunk)
+            ]
+            parts = await asyncio.gather(
+                *[self._embed_batch_chunk(c, trace_id) for c in chunks]
+            )
+            flat: List[np.ndarray] = []
+            for part in parts:
+                flat.extend(part)
+            return np.stack(flat)
+
         tasks = [self.embed(text, trace_id=trace_id) for text in texts]
         embeddings = await asyncio.gather(*tasks)
         return np.stack(embeddings)
