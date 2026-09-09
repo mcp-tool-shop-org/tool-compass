@@ -77,6 +77,15 @@ def _recall_at_k(expected: list[str], retrieved: list[str], k: int) -> float:
     return hit / len(expected)
 
 
+def _query_filters(q: dict) -> dict:
+    """Map YAML filter: {category, server} onto CompassIndex.search kwargs."""
+    filt = q.get("filter") or {}
+    return {
+        "category_filter": filt.get("category"),
+        "server_filter": filt.get("server"),
+    }
+
+
 def _ndcg_at_k(expected: list[str], retrieved: list[str], k: int) -> float:
     """nDCG@k with binary relevance. Higher == better; max == 1.0."""
     expected_set = set(expected)
@@ -127,10 +136,54 @@ class TestGoldenSetFixture:
             for tool in q["expected"]:
                 if tool not in names:
                     missing.append(f"{tool} (referenced by query: {q['query']!r})")
+            for tool in q.get("forbidden") or []:
+                if tool not in names:
+                    missing.append(
+                        f"{tool} (forbidden by query: {q['query']!r})"
+                    )
         assert not missing, (
             "queries.yaml references tools not in the golden corpus:\n  "
             + "\n  ".join(missing)
         )
+
+    def test_near_miss_queries_declare_forbidden_siblings(self):
+        """pull/push, read/write, request/fetch, grep/find must have hard-negatives."""
+        queries = _load_queries()
+        pairs = {
+            ("git:pull", "git:push"),
+            ("git:push", "git:pull"),
+            ("fs:read_file", "fs:write_file"),
+            ("fs:write_file", "fs:read_file"),
+            ("http:request", "http:fetch"),
+            ("http:fetch", "http:request"),
+            ("search:grep", "search:find"),
+            ("search:find", "search:grep"),
+        }
+        seen: set[tuple[str, str]] = set()
+        for q in queries:
+            expected = q.get("expected") or []
+            forbidden = q.get("forbidden") or []
+            for e in expected:
+                for f in forbidden:
+                    if (e, f) in pairs:
+                        seen.add((e, f))
+        missing = pairs - seen
+        assert not missing, (
+            "near-miss pair missing a forbidden hard-negative: "
+            + ", ".join(f"{a} vs {b}" for a, b in sorted(missing))
+        )
+
+    def test_multi_expected_and_filter_rows_exist(self):
+        queries = _load_queries()
+        multi = [q for q in queries if len(q.get("expected") or []) >= 2]
+        filtered = [q for q in queries if q.get("filter")]
+        assert multi, "queries.yaml needs a multi-relevant expected list"
+        assert any(
+            q.get("filter", {}).get("category") for q in filtered
+        ), "queries.yaml needs a filter.category row"
+        assert any(
+            q.get("filter", {}).get("server") for q in filtered
+        ), "queries.yaml needs a filter.server row"
 
     def test_corpus_has_at_least_seventeen_tools(self):
         """Corpus size pins the baseline difficulty. Shrinking it makes the
@@ -172,7 +225,9 @@ class TestGoldenSetRetrieval:
         misses: list[str] = []
 
         for q in queries:
-            results = await golden_index.search(q["query"], top_k=5)
+            results = await golden_index.search(
+                q["query"], top_k=5, **_query_filters(q)
+            )
             retrieved = [r.tool.name for r in results]
             r = _recall_at_k(q["expected"], retrieved, 5)
             recalls.append(r)
@@ -198,7 +253,9 @@ class TestGoldenSetRetrieval:
         queries = _load_queries()
         ndcgs: list[float] = []
         for q in queries:
-            results = await golden_index.search(q["query"], top_k=5)
+            results = await golden_index.search(
+                q["query"], top_k=5, **_query_filters(q)
+            )
             retrieved = [r.tool.name for r in results]
             ndcgs.append(_ndcg_at_k(q["expected"], retrieved, 5))
         avg_ndcg = sum(ndcgs) / len(ndcgs)
@@ -210,12 +267,78 @@ class TestGoldenSetRetrieval:
         queries = _load_queries()
         hits = 0
         for q in queries:
-            results = await golden_index.search(q["query"], top_k=5)
+            results = await golden_index.search(
+                q["query"], top_k=5, **_query_filters(q)
+            )
             retrieved = {r.tool.name for r in results}
             if any(e in retrieved for e in q["expected"]):
                 hits += 1
         hit_rate = hits / len(queries)
         assert hit_rate >= 0.85, f"Hit@5 = {hit_rate:.3f} < 0.85 floor"
+
+    @pytest.mark.asyncio
+    async def test_forbidden_tools_do_not_outrank_expected(self, golden_index):
+        """Near-miss siblings must not outrank the expected tool in top-3.
+
+        The concept-basis embedder shares tokens across pull/push etc., so a
+        sibling can still appear at rank 2. Average Recall@5 would still pass
+        if the sibling swapped to rank 1; this per-query check is the
+        hard-negative (F-dfc9708a).
+        """
+        queries = _load_queries()
+        leaks: list[str] = []
+        scored = 0
+        for q in queries:
+            forbidden = q.get("forbidden") or []
+            if not forbidden:
+                continue
+            results = await golden_index.search(
+                q["query"], top_k=5, **_query_filters(q)
+            )
+            retrieved = [r.tool.name for r in results]
+            top3 = retrieved[:3]
+            exp_ranks = [i for i, n in enumerate(top3) if n in q["expected"]]
+            if not exp_ranks:
+                continue
+            scored += 1
+            best = min(exp_ranks)
+            leaked = [n for n in forbidden if n in top3 and top3.index(n) < best]
+            if leaked:
+                leaks.append(
+                    f"  {q['query']!r}\n"
+                    f"    forbidden outranked expected: {leaked}\n"
+                    f"    top-3: {top3}"
+                )
+        assert scored >= 8, (
+            f"too few forbidden rows had expected in top-3 to score ({scored})"
+        )
+        assert not leaks, "hard-negative outranked expected:\n" + "\n".join(leaks)
+
+    @pytest.mark.asyncio
+    async def test_filter_rows_stay_inside_category_or_server(self, golden_index):
+        queries = _load_queries()
+        violations: list[str] = []
+        for q in queries:
+            filt = q.get("filter") or {}
+            if not filt:
+                continue
+            results = await golden_index.search(
+                q["query"], top_k=5, **_query_filters(q)
+            )
+            for r in results:
+                if filt.get("category") and r.tool.category != filt["category"]:
+                    violations.append(
+                        f"{q['query']!r} hit {r.tool.name} category="
+                        f"{r.tool.category!r} != {filt['category']!r}"
+                    )
+                if filt.get("server") and r.tool.server != filt["server"]:
+                    violations.append(
+                        f"{q['query']!r} hit {r.tool.name} server="
+                        f"{r.tool.server!r} != {filt['server']!r}"
+                    )
+        assert not violations, "filter row leaked out-of-family:\n  " + "\n  ".join(
+            violations
+        )
 
     @pytest.mark.asyncio
     async def test_empty_query_returns_no_crash(self, golden_index):
@@ -285,12 +408,25 @@ async def fused_gateway(golden_index):
     return gateway
 
 
-async def _fused_retrieved(query: str, k: int = 5) -> list[str]:
+async def _fused_retrieved(
+    query: str, k: int = 5, category=None, server=None
+) -> list[str]:
     """Run the FUSED compass() path and return the ordered tool names."""
     from gateway import compass
 
-    result = await compass(intent=query, top_k=k, include_chains=False)
+    result = await compass(
+        intent=query,
+        top_k=k,
+        include_chains=False,
+        category=category,
+        server=server,
+    )
     return [m["tool"] for m in result["matches"]]
+
+
+def _fused_kwargs(q: dict) -> dict:
+    filt = q.get("filter") or {}
+    return {"category": filt.get("category"), "server": filt.get("server")}
 
 
 @pytest.mark.golden
@@ -317,7 +453,7 @@ class TestGoldenSetFusedPathDISC02:
         recalls: list[float] = []
         misses: list[str] = []
         for q in queries:
-            retrieved = await _fused_retrieved(q["query"], 5)
+            retrieved = await _fused_retrieved(q["query"], 5, **_fused_kwargs(q))
             r = _recall_at_k(q["expected"], retrieved, 5)
             recalls.append(r)
             if r < 1.0:
@@ -338,7 +474,7 @@ class TestGoldenSetFusedPathDISC02:
         queries = _load_queries()
         ndcgs: list[float] = []
         for q in queries:
-            retrieved = await _fused_retrieved(q["query"], 5)
+            retrieved = await _fused_retrieved(q["query"], 5, **_fused_kwargs(q))
             ndcgs.append(_ndcg_at_k(q["expected"], retrieved, 5))
         avg_ndcg = sum(ndcgs) / len(ndcgs)
         assert avg_ndcg >= 0.70, f"FUSED nDCG@5 = {avg_ndcg:.3f} < 0.70 floor"
@@ -348,7 +484,7 @@ class TestGoldenSetFusedPathDISC02:
         queries = _load_queries()
         hits = 0
         for q in queries:
-            retrieved = set(await _fused_retrieved(q["query"], 5))
+            retrieved = set(await _fused_retrieved(q["query"], 5, **_fused_kwargs(q)))
             if any(e in retrieved for e in q["expected"]):
                 hits += 1
         hit_rate = hits / len(queries)
@@ -360,11 +496,44 @@ class TestGoldenSetFusedPathDISC02:
         fusion/boost reorder regression on the served path."""
         queries = _load_queries()
         rrs = [
-            _mrr(q["expected"], await _fused_retrieved(q["query"], 5))
+            _mrr(
+                q["expected"],
+                await _fused_retrieved(q["query"], 5, **_fused_kwargs(q)),
+            )
             for q in queries
         ]
         avg_mrr = sum(rrs) / len(rrs)
         assert avg_mrr >= 0.75, f"FUSED MRR = {avg_mrr:.3f} < 0.75 floor"
+
+    @pytest.mark.asyncio
+    async def test_fused_forbidden_tools_do_not_outrank_expected(self, fused_gateway):
+        queries = _load_queries()
+        leaks: list[str] = []
+        scored = 0
+        for q in queries:
+            forbidden = q.get("forbidden") or []
+            if not forbidden:
+                continue
+            retrieved = await _fused_retrieved(q["query"], 5, **_fused_kwargs(q))
+            top3 = retrieved[:3]
+            exp_ranks = [i for i, n in enumerate(top3) if n in q["expected"]]
+            if not exp_ranks:
+                continue
+            scored += 1
+            best = min(exp_ranks)
+            leaked = [n for n in forbidden if n in top3 and top3.index(n) < best]
+            if leaked:
+                leaks.append(
+                    f"  {q['query']!r}\n"
+                    f"    forbidden outranked expected: {leaked}\n"
+                    f"    top-3: {top3}"
+                )
+        assert scored >= 4, (
+            f"too few fused forbidden rows had expected in top-3 ({scored})"
+        )
+        assert not leaks, "fused path hard-negative outranked expected:\n" + "\n".join(
+            leaks
+        )
 
     @pytest.mark.asyncio
     async def test_fused_exact_name_paste_pins_tool_at_top(self, fused_gateway):
