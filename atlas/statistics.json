@@ -1,0 +1,772 @@
+{
+  "authorship": {
+    "parts": [],
+    "places": []
+  },
+  "boundaries": [
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": []
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": ".github",
+      "qualifyingSourceCommits": 0,
+      "rebaseline": null
+    },
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": []
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": "assets",
+      "qualifyingSourceCommits": 0,
+      "rebaseline": null
+    },
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": []
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": "docs",
+      "qualifyingSourceCommits": 0,
+      "rebaseline": null
+    },
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": []
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": "npm",
+      "qualifyingSourceCommits": 4,
+      "rebaseline": null
+    },
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": [
+          "tests"
+        ]
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": "root",
+      "qualifyingSourceCommits": 19,
+      "rebaseline": null
+    },
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": []
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": "scripts",
+      "qualifyingSourceCommits": 0,
+      "rebaseline": null
+    },
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": []
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": "site",
+      "qualifyingSourceCommits": 1,
+      "rebaseline": null
+    },
+    {
+      "breakage": {
+        "coChangesOnly": [],
+        "collapsed": false,
+        "confidence": "low",
+        "importsAndCoChanges": [],
+        "importsOnly": []
+      },
+      "cohesion": null,
+      "cohesionDropped": false,
+      "confidence": "low",
+      "highWater": null,
+      "name": "tests",
+      "qualifyingSourceCommits": 15,
+      "rebaseline": null
+    }
+  ],
+  "churn": {
+    "definition": "commits is how many commits in the window touch the file, including merges and commits dropped from coupling. lines is added plus deleted in those commits.",
+    "files": [
+      {
+        "commits": 1,
+        "lines": 28,
+        "path": ".dockerignore"
+      },
+      {
+        "commits": 5,
+        "lines": 59,
+        "path": ".env.example"
+      },
+      {
+        "commits": 1,
+        "lines": 17,
+        "path": ".gitattributes"
+      },
+      {
+        "commits": 6,
+        "lines": 151,
+        "path": ".github/dependabot.yml"
+      },
+      {
+        "commits": 16,
+        "lines": 753,
+        "path": ".github/workflows/ci.yml"
+      },
+      {
+        "commits": 8,
+        "lines": 80,
+        "path": ".github/workflows/pages.yml"
+      },
+      {
+        "commits": 16,
+        "lines": 460,
+        "path": ".github/workflows/publish.yml"
+      },
+      {
+        "commits": 12,
+        "lines": 738,
+        "path": ".github/workflows/release-binaries.yml"
+      },
+      {
+        "commits": 7,
+        "lines": 722,
+        "path": ".github/workflows/release.yml"
+      },
+      {
+        "commits": 7,
+        "lines": 33,
+        "path": ".gitignore"
+      },
+      {
+        "commits": 1,
+        "lines": 55,
+        "path": ".pre-commit-config.yaml"
+      },
+      {
+        "commits": 1,
+        "lines": 245,
+        "path": "AUDIT_REPORT.md"
+      },
+      {
+        "commits": 13,
+        "lines": 519,
+        "path": "CHANGELOG.md"
+      },
+      {
+        "commits": 1,
+        "lines": 71,
+        "path": "CONTRIBUTING.md"
+      },
+      {
+        "commits": 9,
+        "lines": 104,
+        "path": "Dockerfile"
+      },
+      {
+        "commits": 6,
+        "lines": 94,
+        "path": "Makefile"
+      },
+      {
+        "commits": 10,
+        "lines": 772,
+        "path": "README.es.md"
+      },
+      {
+        "commits": 9,
+        "lines": 850,
+        "path": "README.fr.md"
+      },
+      {
+        "commits": 9,
+        "lines": 731,
+        "path": "README.hi.md"
+      },
+      {
+        "commits": 9,
+        "lines": 687,
+        "path": "README.it.md"
+      },
+      {
+        "commits": 10,
+        "lines": 905,
+        "path": "README.ja.md"
+      },
+      {
+        "commits": 13,
+        "lines": 270,
+        "path": "README.md"
+      },
+      {
+        "commits": 9,
+        "lines": 696,
+        "path": "README.pt-BR.md"
+      },
+      {
+        "commits": 10,
+        "lines": 908,
+        "path": "README.zh.md"
+      },
+      {
+        "commits": 5,
+        "lines": 120,
+        "path": "SCORECARD.md"
+      },
+      {
+        "commits": 1,
+        "lines": 29,
+        "path": "SECURITY.md"
+      },
+      {
+        "commits": 3,
+        "lines": 8,
+        "path": "SHIP_GATE.md"
+      },
+      {
+        "commits": 8,
+        "lines": 1361,
+        "path": "analytics.py"
+      },
+      {
+        "commits": 2,
+        "lines": 0,
+        "path": "assets/logo-lockup.png"
+      },
+      {
+        "commits": 2,
+        "lines": 0,
+        "path": "assets/logo-square.png"
+      },
+      {
+        "commits": 4,
+        "lines": 0,
+        "path": "assets/logo.png"
+      },
+      {
+        "commits": 7,
+        "lines": 886,
+        "path": "backend_client_mcp.py"
+      },
+      {
+        "commits": 10,
+        "lines": 6388,
+        "path": "backend_client_simple.py"
+      },
+      {
+        "commits": 6,
+        "lines": 627,
+        "path": "bootstrap.py"
+      },
+      {
+        "commits": 8,
+        "lines": 999,
+        "path": "chain_indexer.py"
+      },
+      {
+        "commits": 11,
+        "lines": 3326,
+        "path": "cli.py"
+      },
+      {
+        "commits": 1,
+        "lines": 17,
+        "path": "compass_config.example.json"
+      },
+      {
+        "commits": 12,
+        "lines": 1429,
+        "path": "config.py"
+      },
+      {
+        "commits": 2,
+        "lines": 0,
+        "path": "db/compass_analytics.db-shm"
+      },
+      {
+        "commits": 2,
+        "lines": 0,
+        "path": "db/compass_analytics.db-wal"
+      },
+      {
+        "commits": 4,
+        "lines": 120,
+        "path": "docker-compose.yml"
+      },
+      {
+        "commits": 1,
+        "lines": 59,
+        "path": "docker-entrypoint.sh"
+      },
+      {
+        "commits": 2,
+        "lines": 0,
+        "path": "docs/assets/tool-compass-logo.png"
+      },
+      {
+        "commits": 1,
+        "lines": 58,
+        "path": "docs/index.md"
+      },
+      {
+        "commits": 12,
+        "lines": 3416,
+        "path": "embedder.py"
+      },
+      {
+        "commits": 1,
+        "lines": 6,
+        "path": "fly.toml"
+      },
+      {
+        "commits": 14,
+        "lines": 6193,
+        "path": "gateway.py"
+      },
+      {
+        "commits": 11,
+        "lines": 5590,
+        "path": "indexer.py"
+      },
+      {
+        "commits": 2,
+        "lines": 32,
+        "path": "llms.txt"
+      },
+      {
+        "commits": 4,
+        "lines": 0,
+        "path": "logo.png"
+      },
+      {
+        "commits": 1,
+        "lines": 338,
+        "path": "npm/CHANGELOG.md"
+      },
+      {
+        "commits": 1,
+        "lines": 21,
+        "path": "npm/LICENSE"
+      },
+      {
+        "commits": 8,
+        "lines": 322,
+        "path": "npm/README.md"
+      },
+      {
+        "commits": 10,
+        "lines": 327,
+        "path": "npm/bin/tool-compass.js"
+      },
+      {
+        "commits": 2,
+        "lines": 0,
+        "path": "npm/logo-lockup.png"
+      },
+      {
+        "commits": 6,
+        "lines": 55,
+        "path": "npm/package.json"
+      },
+      {
+        "commits": 6,
+        "lines": 245,
+        "path": "npm/test/smoke.test.js"
+      },
+      {
+        "commits": 15,
+        "lines": 162,
+        "path": "pyproject.toml"
+      },
+      {
+        "commits": 1,
+        "lines": 31,
+        "path": "pytest.ini"
+      },
+      {
+        "commits": 2,
+        "lines": 8,
+        "path": "requirements-dev.txt"
+      },
+      {
+        "commits": 2,
+        "lines": 8,
+        "path": "requirements.txt"
+      },
+      {
+        "commits": 1,
+        "lines": 6,
+        "path": "scripts/check-org-urls.sh"
+      },
+      {
+        "commits": 2,
+        "lines": 118,
+        "path": "scripts/regenerate-scorecard.sh"
+      },
+      {
+        "commits": 1,
+        "lines": 136,
+        "path": "scripts/sync-version.mjs"
+      },
+      {
+        "commits": 1,
+        "lines": 125,
+        "path": "scripts/verify-metrics.sh"
+      },
+      {
+        "commits": 2,
+        "lines": 57,
+        "path": "site/astro.config.mjs"
+      },
+      {
+        "commits": 19,
+        "lines": 8850,
+        "path": "site/package-lock.json"
+      },
+      {
+        "commits": 6,
+        "lines": 31,
+        "path": "site/package.json"
+      },
+      {
+        "commits": 1,
+        "lines": 7,
+        "path": "site/src/content.config.ts"
+      },
+      {
+        "commits": 5,
+        "lines": 241,
+        "path": "site/src/content/docs/handbook/architecture.md"
+      },
+      {
+        "commits": 2,
+        "lines": 191,
+        "path": "site/src/content/docs/handbook/beginners.md"
+      },
+      {
+        "commits": 6,
+        "lines": 211,
+        "path": "site/src/content/docs/handbook/configuration.md"
+      },
+      {
+        "commits": 5,
+        "lines": 354,
+        "path": "site/src/content/docs/handbook/getting-started.md"
+      },
+      {
+        "commits": 7,
+        "lines": 80,
+        "path": "site/src/content/docs/handbook/index.md"
+      },
+      {
+        "commits": 2,
+        "lines": 176,
+        "path": "site/src/content/docs/handbook/operations.md"
+      },
+      {
+        "commits": 4,
+        "lines": 154,
+        "path": "site/src/content/docs/handbook/tools.md"
+      },
+      {
+        "commits": 6,
+        "lines": 149,
+        "path": "site/src/site-config.ts"
+      },
+      {
+        "commits": 2,
+        "lines": 29,
+        "path": "site/src/styles/starlight-custom.css"
+      },
+      {
+        "commits": 9,
+        "lines": 2132,
+        "path": "sync_manager.py"
+      },
+      {
+        "commits": 11,
+        "lines": 473,
+        "path": "tests/conftest.py"
+      },
+      {
+        "commits": 1,
+        "lines": 1,
+        "path": "tests/golden_set/__init__.py"
+      },
+      {
+        "commits": 1,
+        "lines": 203,
+        "path": "tests/golden_set/deterministic_embedder.py"
+      },
+      {
+        "commits": 1,
+        "lines": 174,
+        "path": "tests/golden_set/fixture_corpus.py"
+      },
+      {
+        "commits": 4,
+        "lines": 470,
+        "path": "tests/golden_set/queries.yaml"
+      },
+      {
+        "commits": 6,
+        "lines": 506,
+        "path": "tests/test_analytics.py"
+      },
+      {
+        "commits": 4,
+        "lines": 180,
+        "path": "tests/test_backend_client.py"
+      },
+      {
+        "commits": 3,
+        "lines": 11,
+        "path": "tests/test_backend_client_simple.py"
+      },
+      {
+        "commits": 3,
+        "lines": 2662,
+        "path": "tests/test_backend_client_simple_coverage.py"
+      },
+      {
+        "commits": 1,
+        "lines": 274,
+        "path": "tests/test_backend_client_simple_outcomes.py"
+      },
+      {
+        "commits": 4,
+        "lines": 1514,
+        "path": "tests/test_backend_http_wire.py"
+      },
+      {
+        "commits": 9,
+        "lines": 290,
+        "path": "tests/test_chain_indexer.py"
+      },
+      {
+        "commits": 9,
+        "lines": 3425,
+        "path": "tests/test_cli_coverage.py"
+      },
+      {
+        "commits": 6,
+        "lines": 1160,
+        "path": "tests/test_config.py"
+      },
+      {
+        "commits": 2,
+        "lines": 224,
+        "path": "tests/test_corruption_recovery.py"
+      },
+      {
+        "commits": 10,
+        "lines": 982,
+        "path": "tests/test_embedder.py"
+      },
+      {
+        "commits": 5,
+        "lines": 987,
+        "path": "tests/test_embedder_degradation.py"
+      },
+      {
+        "commits": 3,
+        "lines": 1413,
+        "path": "tests/test_features_v2_2_0.py"
+      },
+      {
+        "commits": 7,
+        "lines": 872,
+        "path": "tests/test_fuzz.py"
+      },
+      {
+        "commits": 4,
+        "lines": 75,
+        "path": "tests/test_gateway.py"
+      },
+      {
+        "commits": 11,
+        "lines": 4159,
+        "path": "tests/test_gateway_coverage.py"
+      },
+      {
+        "commits": 2,
+        "lines": 893,
+        "path": "tests/test_gateway_handlers.py"
+      },
+      {
+        "commits": 5,
+        "lines": 949,
+        "path": "tests/test_golden_set.py"
+      },
+      {
+        "commits": 5,
+        "lines": 616,
+        "path": "tests/test_indexer.py"
+      },
+      {
+        "commits": 7,
+        "lines": 620,
+        "path": "tests/test_regressions_swarm_01.py"
+      },
+      {
+        "commits": 2,
+        "lines": 535,
+        "path": "tests/test_regressions_swarm_02.py"
+      },
+      {
+        "commits": 4,
+        "lines": 306,
+        "path": "tests/test_smoke_e2e.py"
+      },
+      {
+        "commits": 8,
+        "lines": 1072,
+        "path": "tests/test_sync_manager.py"
+      },
+      {
+        "commits": 5,
+        "lines": 103,
+        "path": "tests/test_tool_manifest.py"
+      },
+      {
+        "commits": 10,
+        "lines": 2677,
+        "path": "tests/test_ui.py"
+      },
+      {
+        "commits": 4,
+        "lines": 177,
+        "path": "tests/test_version.py"
+      },
+      {
+        "commits": 3,
+        "lines": 492,
+        "path": "tests/test_wave12_surfaces.py"
+      },
+      {
+        "commits": 4,
+        "lines": 110,
+        "path": "tool_manifest.py"
+      },
+      {
+        "commits": 9,
+        "lines": 2897,
+        "path": "ui.py"
+      }
+    ]
+  },
+  "confidence": {
+    "level": "low",
+    "reason": "fewer than 20 source files reach 10 revisions in the window"
+  },
+  "generatedAt": "2026-09-25T02:34:04.334Z",
+  "generatedFrom": {
+    "commit": "6f5a2339b184abe7a06e9092d79ce97ff40b7f05"
+  },
+  "pairs": [
+    {
+      "a": ".github/workflows/ci.yml",
+      "b": ".github/workflows/publish.yml",
+      "either": 9,
+      "shared": 6,
+      "strength": 0.666667
+    },
+    {
+      "a": "CHANGELOG.md",
+      "b": "pyproject.toml",
+      "either": 10,
+      "shared": 5,
+      "strength": 0.5
+    }
+  ],
+  "parameters": {
+    "appliedChangesetLimit": 29.75,
+    "changeset": 50,
+    "changesetFraction": 0.25,
+    "cohesionDrop": 0.2,
+    "couplingPopulation": "source",
+    "fallenShared": 3,
+    "floor": "fallen",
+    "floorHeld": false,
+    "floorTrigger": "revision-depth",
+    "headDate": "2026-09-09T00:39:53-07:00",
+    "inScopeFiles": 119,
+    "pinnedStart": null,
+    "priorFloor": null,
+    "qualifyingCommits": 62,
+    "qualifyingMinimum": 30,
+    "revisions": 5,
+    "shared": 10,
+    "sharedFloorUsed": 3,
+    "since": "2026-03-13T07:39:53.000Z",
+    "sourceExtensions": [
+      ".js",
+      ".mjs",
+      ".cjs",
+      ".jsx",
+      ".ts",
+      ".tsx",
+      ".mts",
+      ".cts",
+      ".py",
+      ".rs",
+      ".gd"
+    ],
+    "sourceFileReach": 20,
+    "sourceFileRise": 25,
+    "sourceFilesReachingStrongFloor": 0,
+    "strength": 0.5,
+    "windowDays": 180
+  },
+  "strengthDefinition": "strength is the shared qualifying commits divided by either. either is the number of qualifying commits that touch either file."
+}
