@@ -1,0 +1,470 @@
+{
+  "authored": [
+    ".github/",
+    "assets/",
+    "docs/",
+    "site/"
+  ],
+  "breaks": [
+    {
+      "doors": 5,
+      "importedBy": [],
+      "importedByTests": [
+        "tests"
+      ],
+      "kind": "part",
+      "name": "root",
+      "partLabel": "the repository root"
+    }
+  ],
+  "changes": {
+    "first": true
+  },
+  "changesTogether": [],
+  "changesTogetherNote": [
+    "Window: 180 days; a pair counts from 3 shared commits, since 0 source files reach 10 revisions; the floor rises to 10 when 25 do."
+  ],
+  "changesTogetherWithTests": 0,
+  "commit": "6f5a2339b184abe7a06e9092d79ce97ff40b7f05",
+  "defaultBranch": "main",
+  "derived": "8 parts, mostly Python (46 files), JavaScript (4) and TypeScript (2). Work enters through 6 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass (npm) to npm, and a container image. People run tool-compass and tool-compass-ui.",
+  "doors": [
+    {
+      "checks": [
+        "LICENSE",
+        "README.md",
+        "_version.py",
+        "analytics.py",
+        "backend_client_mcp.py",
+        "backend_client_simple.py",
+        "bootstrap.py",
+        "chain_indexer.py",
+        "cli.py",
+        "compass_config.example.json",
+        "config.py",
+        "embedder.py",
+        "indexer.py",
+        "llms.txt",
+        "pyproject.toml",
+        "requirements.txt",
+        "sync_manager.py",
+        "tool_manifest.py",
+        "ui.py"
+      ],
+      "checksCount": 19,
+      "checksMore": 16,
+      "file": ".github/workflows/ci.yml",
+      "held": [
+        {
+          "checks": [],
+          "checksMore": 0,
+          "lead": "on a push to main",
+          "runs": [
+            "site/astro.config.mjs",
+            "site/src/"
+          ],
+          "runsMore": 0,
+          "when": "on a push to main"
+        }
+      ],
+      "id": ".github/workflows/ci.yml",
+      "landings": [],
+      "name": "CI",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "npm",
+          "depth": 0,
+          "files": 1
+        },
+        {
+          "boundary": "root",
+          "depth": 0,
+          "files": 21
+        },
+        {
+          "boundary": "scripts",
+          "depth": 0,
+          "files": 3
+        },
+        {
+          "boundary": "site",
+          "depth": 0,
+          "files": 3
+        },
+        {
+          "boundary": "tests",
+          "depth": 0,
+          "files": 32
+        }
+      ],
+      "runs": [
+        "docker-entrypoint.sh",
+        "gateway.py",
+        "scripts/check-org-urls.sh",
+        "scripts/regenerate-scorecard.sh",
+        "scripts/verify-metrics.sh",
+        "npm/test/",
+        "tests/"
+      ],
+      "runsCount": 7,
+      "runsMore": 35,
+      "sends": [
+        "deploys the site on a push to main"
+      ],
+      "stages": [],
+      "triggers": [
+        "on a pull request touching 15 paths",
+        "on a push to main touching 15 paths",
+        "on a schedule (`0 9 * * 1,3,5`)",
+        "or by hand"
+      ]
+    },
+    {
+      "checks": [
+        "LICENSE",
+        "README.md",
+        "_version.py",
+        "analytics.py",
+        "backend_client_mcp.py",
+        "backend_client_simple.py",
+        "bootstrap.py",
+        "chain_indexer.py",
+        "compass_config.example.json",
+        "config.py",
+        "embedder.py",
+        "indexer.py",
+        "llms.txt",
+        "pyproject.toml",
+        "requirements.txt",
+        "sync_manager.py",
+        "tool_manifest.py",
+        "ui.py"
+      ],
+      "checksCount": 18,
+      "checksMore": 15,
+      "file": ".github/workflows/publish.yml",
+      "id": ".github/workflows/publish.yml",
+      "landings": [],
+      "name": "Publish",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "root",
+          "depth": 0,
+          "files": 21
+        }
+      ],
+      "runs": [
+        "cli.py",
+        "docker-entrypoint.sh",
+        "gateway.py"
+      ],
+      "runsCount": 3,
+      "runsMore": 0,
+      "sends": [
+        "publishes to PyPI and a container image"
+      ],
+      "stages": [],
+      "triggers": [
+        "when a release is published",
+        "when the workflow Release completes",
+        "or by hand"
+      ]
+    },
+    {
+      "builds": [
+        "cli.py"
+      ],
+      "checks": [],
+      "checksCount": 0,
+      "checksMore": 0,
+      "file": ".github/workflows/release-binaries.yml",
+      "id": ".github/workflows/release-binaries.yml",
+      "landings": [],
+      "name": "Release Binaries",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "root",
+          "depth": 0,
+          "files": 12
+        }
+      ],
+      "runs": [],
+      "runsCount": 0,
+      "runsMore": 0,
+      "sends": [
+        "creates a GitHub release",
+        "builds cli.py into binaries for darwin-arm64, linux-x64 and win-x64 and uploads them to the release"
+      ],
+      "stages": [],
+      "triggers": [
+        "when a release is published",
+        "on a `workflow_call` event",
+        "or by hand"
+      ]
+    },
+    {
+      "checks": [],
+      "checksCount": 0,
+      "checksMore": 0,
+      "file": ".github/workflows/release.yml",
+      "id": ".github/workflows/release.yml",
+      "landings": [],
+      "name": "Release",
+      "pushes": false,
+      "reach": [],
+      "runs": [],
+      "runsCount": 0,
+      "runsMore": 0,
+      "sends": [
+        "publishes @mcptoolshop/tool-compass (npm) to npm",
+        "creates a GitHub release"
+      ],
+      "stages": [],
+      "triggers": [
+        "when a tag matching `v*` is pushed",
+        "or by hand"
+      ]
+    },
+    {
+      "checks": [],
+      "checksCount": 0,
+      "checksMore": 0,
+      "file": "pyproject.toml",
+      "id": "pyproject.toml#tool-compass",
+      "kind": "command",
+      "landings": [],
+      "name": "tool-compass",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "root",
+          "depth": 0,
+          "files": 12
+        }
+      ],
+      "runs": [
+        "cli.py"
+      ],
+      "runsCount": 1,
+      "runsMore": 0,
+      "sends": [],
+      "stages": [],
+      "triggers": []
+    },
+    {
+      "checks": [],
+      "checksCount": 0,
+      "checksMore": 0,
+      "file": "pyproject.toml",
+      "id": "pyproject.toml#tool-compass-ui",
+      "kind": "command",
+      "landings": [],
+      "name": "tool-compass-ui",
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "root",
+          "depth": 0,
+          "files": 11
+        }
+      ],
+      "runs": [
+        "ui.py"
+      ],
+      "runsCount": 1,
+      "runsMore": 0,
+      "sends": [],
+      "stages": [],
+      "triggers": []
+    }
+  ],
+  "duplicates": [],
+  "duplicatesLead": null,
+  "duplicatesNote": [],
+  "edges": [],
+  "generated": [
+    {
+      "block": true,
+      "place": "npm/bin/tool-compass.js",
+      "writers": [
+        "scripts/sync-version.mjs"
+      ]
+    },
+    {
+      "block": true,
+      "place": "npm/package.json",
+      "writers": [
+        "scripts/sync-version.mjs"
+      ]
+    }
+  ],
+  "generatedAt": "2026-09-25T02:34:04.334Z",
+  "limits": [
+    "3 import sites could not be resolved.",
+    "11 writes and 6 reads use paths built at run time and are not named here.",
+    "1 read goes to a path its caller passes, not to this repository.",
+    "There is a docker-compose.yml and a fly.toml that no workflow runs; what deploys from them does so from outside this repository, and is not on this page.",
+    "Statistics confidence is low: fewer than 20 source files reach 10 revisions in the window."
+  ],
+  "mainDoor": ".github/workflows/ci.yml",
+  "partLabels": {
+    ".github": ".github",
+    "assets": "assets",
+    "docs": "docs",
+    "npm": "npm",
+    "root": "the repository root",
+    "scripts": "scripts",
+    "site": "the site",
+    "tests": "tests"
+  },
+  "parts": 8,
+  "readers": [],
+  "repo": "mcp-tool-shop-org/tool-compass",
+  "sequences": [
+    {
+      "alternatives": [
+        {
+          "steps": [
+            {
+              "name": "redact_url_credentials",
+              "part": "root",
+              "partLabel": "the repository root",
+              "phrase": "redact url credentials"
+            }
+          ],
+          "when": "isinstance(explicit, str) and explicit.strip()"
+        },
+        {
+          "steps": [
+            {
+              "name": "redact_url_credentials",
+              "part": "root",
+              "partLabel": "the repository root",
+              "phrase": "redact url credentials"
+            }
+          ],
+          "when": "_is_ollama_embedding_provider(cfg)"
+        },
+        {
+          "steps": [
+            {
+              "name": "disconnect_all",
+              "part": "root",
+              "partLabel": "the repository root",
+              "phrase": "disconnect all",
+              "receiver": "SimpleBackendManager"
+            }
+          ],
+          "when": "not tools"
+        },
+        {
+          "steps": [
+            {
+              "name": "disconnect_all",
+              "part": "root",
+              "partLabel": "the repository root",
+              "phrase": "disconnect all",
+              "receiver": "SimpleBackendManager"
+            }
+          ],
+          "when": "not await index.embedder.health_check()"
+        }
+      ],
+      "entry": "main",
+      "file": "gateway.py",
+      "inner": [],
+      "part": "root",
+      "partLabel": "the repository root",
+      "phrase": "main",
+      "steps": [
+        {
+          "count": 6,
+          "name": null,
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "config"
+        },
+        {
+          "count": 3,
+          "name": null,
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "backend client simple"
+        },
+        {
+          "name": "ToolDefinition",
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "tool definition"
+        },
+        {
+          "name": "resolved_embedding_base_url",
+          "part": null,
+          "partLabel": null,
+          "phrase": "resolved embedding base url"
+        },
+        {
+          "name": "Embedder",
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "embedder"
+        },
+        {
+          "count": 3,
+          "name": null,
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "indexer"
+        },
+        {
+          "name": "disconnect_all",
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "disconnect all",
+          "receiver": "SimpleBackendManager"
+        },
+        {
+          "count": 3,
+          "name": null,
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "indexer"
+        }
+      ]
+    }
+  ],
+  "spawnTested": [
+    "npm"
+  ],
+  "startDoor": ".github/workflows/ci.yml",
+  "startHere": [
+    ".github/workflows/ci.yml",
+    "gateway.py"
+  ],
+  "summary": null,
+  "summaryFrom": null,
+  "testFiles": 34,
+  "testedBy": {
+    "npm": 1,
+    "root": 28,
+    "scripts": 0
+  },
+  "unnamedWrites": 11,
+  "unread": [],
+  "unreadFiles": 0,
+  "unreadNote": [],
+  "untested": [
+    {
+      "part": "scripts",
+      "partLabel": "scripts",
+      "testedBy": 0
+    }
+  ],
+  "untestedNote": [
+    "npm is touched by tests only through a spawn: a test runs its files as a child process."
+  ],
+  "written": 2
+}
