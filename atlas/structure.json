@@ -21,7 +21,7 @@
           "path": ".github/dependabot.yml"
         },
         {
-          "hash": "34acd8a4c6ea18c324996f8f684a0dce423df5b4616535274e2fbf6e9ba1834d",
+          "hash": "37d3062c9a668b096f9c92bfd1239db7a6cbb939f6fc0827797f3f8b9616d29d",
           "path": ".github/workflows/ci.yml"
         },
         {
@@ -138,8 +138,26 @@
           "path": "npm/README.md"
         },
         {
+          "entry": "embeddedVersion",
+          "entryRule": 1,
+          "failurePaths": [
+            {
+              "in": "embeddedVersion",
+              "kind": "catch",
+              "line": 30
+            },
+            {
+              "kind": "catch",
+              "line": 77
+            },
+            {
+              "kind": "throw",
+              "line": 94
+            }
+          ],
           "hash": "74ce95f7da1cab8f5520655a5ccce278d8a698debef9703485124624ae2654ab",
-          "path": "npm/bin/tool-compass.js"
+          "path": "npm/bin/tool-compass.js",
+          "sequences": []
         },
         {
           "hash": "4f817de1acf03c2f9389eb9fe7e838cef350e32722bc2fcfa1c505fa32229429",
@@ -151,7 +169,11 @@
         },
         {
           "hash": "2d26e40da8431421b6df1da611c16a5133d2c4926b72c4ed704da871d4aece63",
-          "path": "npm/test/smoke.test.js"
+          "path": "npm/test/smoke.test.js",
+          "spawns": [
+            "npm/bin/tool-compass.js"
+          ],
+          "testFramework": "node --test"
         }
       ],
       "globs": [
@@ -161,12 +183,15 @@
       "name": "npm",
       "origin": "mixed",
       "role": "code",
+      "testRunners": [
+        "node --test"
+      ],
       "testedBy": 1,
-      "testedThroughSpawn": true,
-      "unresolvedSites": 3
+      "testedByScript": true,
+      "unresolvedSites": 0
     },
     {
-      "dynamicReads": 6,
+      "dynamicReads": 4,
       "dynamicSpawns": 0,
       "dynamicSpawnsInTests": 0,
       "dynamicWrites": 11,
@@ -265,12 +290,101 @@
           "path": "SHIP_GATE.md"
         },
         {
+          "failurePaths": [
+            {
+              "in": "_get_version",
+              "kind": "except",
+              "line": 17
+            },
+            {
+              "in": "_get_version",
+              "kind": "except",
+              "line": 34
+            }
+          ],
           "hash": "11c632057c1f61ef6893b8a0d750bb41f0fe4df65fd4616e37f81c6532b6ee95",
           "path": "_version.py"
         },
         {
           "exports": [
             "get_analytics"
+          ],
+          "failurePaths": [
+            {
+              "in": "_get_db",
+              "kind": "raise",
+              "line": 166
+            },
+            {
+              "in": "_apply_sqlite_pragmas",
+              "kind": "except",
+              "line": 191
+            },
+            {
+              "in": "get_schema_version",
+              "kind": "except",
+              "line": 325
+            },
+            {
+              "in": "record_search",
+              "kind": "except",
+              "line": 418
+            },
+            {
+              "in": "record_tool_call",
+              "kind": "except",
+              "line": 446
+            },
+            {
+              "in": "record_tool_call",
+              "kind": "except",
+              "line": 511
+            },
+            {
+              "in": "_save_chain_pattern",
+              "kind": "except",
+              "line": 573
+            },
+            {
+              "in": "prune_old_records",
+              "kind": "except",
+              "line": 630
+            },
+            {
+              "in": "prune_old_records",
+              "kind": "except",
+              "line": 646
+            },
+            {
+              "in": "refresh_hot_cache",
+              "kind": "except",
+              "line": 669
+            },
+            {
+              "in": "_refresh_hot_cache_impl",
+              "kind": "raise",
+              "line": 719
+            },
+            {
+              "in": "_refresh_hot_cache_impl",
+              "kind": "except",
+              "line": 765
+            },
+            {
+              "in": "detect_chains",
+              "kind": "except",
+              "line": 802
+            },
+            {
+              "in": "load_hot_cache_from_db",
+              "kind": "raise",
+              "line": 1069
+            },
+            {
+              "in": "load_hot_cache_from_db",
+              "kind": "except",
+              "line": 1088
+            }
           ],
           "hash": "74013b3bf0578fa9a0de0c91df0e575e5f2bc01fef461adc37c252190983280c",
           "importsFiles": [
@@ -283,6 +397,98 @@
             "get_backend_manager",
             "init_backends"
           ],
+          "failurePaths": [
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 151
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 155
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 159
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 164
+            },
+            {
+              "in": "connect",
+              "kind": "raise",
+              "line": 168
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 175
+            },
+            {
+              "in": "_on_session_message",
+              "kind": "except",
+              "line": 203
+            },
+            {
+              "in": "_refresh_tools",
+              "kind": "except",
+              "line": 225
+            },
+            {
+              "in": "list_resources",
+              "kind": "raise",
+              "line": 232
+            },
+            {
+              "in": "read_resource",
+              "kind": "raise",
+              "line": 255
+            },
+            {
+              "in": "list_prompts",
+              "kind": "raise",
+              "line": 269
+            },
+            {
+              "in": "get_prompt",
+              "kind": "raise",
+              "line": 294
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 336
+            },
+            {
+              "in": "connect_backend",
+              "kind": "except",
+              "line": 481
+            },
+            {
+              "in": "connect_backend",
+              "kind": "raise",
+              "line": 483
+            },
+            {
+              "in": "connect_backend",
+              "kind": "except",
+              "line": 489
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 669
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 678
+            }
+          ],
           "hash": "3cb1068cdc35ea9413c904a2bf66b7ab548d7eb3895e13316129e81058cd3b03",
           "importsFiles": [
             "config.py"
@@ -293,7 +499,758 @@
           "exports": [
             "make_error_envelope"
           ],
+          "failurePaths": [
+            {
+              "in": "_bound_content_list",
+              "kind": "except",
+              "line": 321
+            },
+            {
+              "in": "_invoke_progress",
+              "kind": "except",
+              "line": 347
+            },
+            {
+              "in": "_read_loop",
+              "kind": "except",
+              "line": 642
+            },
+            {
+              "in": "_read_loop",
+              "kind": "except",
+              "line": 648
+            },
+            {
+              "in": "_read_loop",
+              "kind": "except",
+              "line": 667
+            },
+            {
+              "in": "_read_loop",
+              "kind": "except",
+              "line": 678
+            },
+            {
+              "in": "_read_loop",
+              "kind": "except",
+              "line": 706
+            },
+            {
+              "in": "_read_loop",
+              "kind": "raise",
+              "line": 707
+            },
+            {
+              "in": "_read_loop",
+              "kind": "except",
+              "line": 708
+            },
+            {
+              "in": "connect",
+              "kind": "raise",
+              "line": 832
+            },
+            {
+              "in": "connect",
+              "kind": "raise",
+              "line": 835
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 853
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 857
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 861
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 867
+            },
+            {
+              "in": "connect",
+              "kind": "raise",
+              "line": 871
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 914
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 927
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 936
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 938
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 958
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 965
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 971
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 977
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 980
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 990
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 997
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 1009
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 1022
+            },
+            {
+              "in": "_read_stderr",
+              "kind": "except",
+              "line": 1048
+            },
+            {
+              "in": "_read_stderr",
+              "kind": "except",
+              "line": 1058
+            },
+            {
+              "in": "_read_stderr",
+              "kind": "except",
+              "line": 1067
+            },
+            {
+              "in": "_read_stderr",
+              "kind": "except",
+              "line": 1076
+            },
+            {
+              "in": "_read_stderr",
+              "kind": "except",
+              "line": 1078
+            },
+            {
+              "in": "_handle_notification",
+              "kind": "except",
+              "line": 1104
+            },
+            {
+              "in": "_handle_notification",
+              "kind": "except",
+              "line": 1115
+            },
+            {
+              "in": "_handle_notification",
+              "kind": "except",
+              "line": 1127
+            },
+            {
+              "in": "_refresh_catalog",
+              "kind": "except",
+              "line": 1153
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "except",
+              "line": 1198
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "except",
+              "line": 1203
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "except",
+              "line": 1209
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "raise",
+              "line": 1210
+            },
+            {
+              "in": "_start_keepalive",
+              "kind": "except",
+              "line": 1219
+            },
+            {
+              "in": "_stop_keepalive",
+              "kind": "except",
+              "line": 1230
+            },
+            {
+              "in": "_stop_keepalive",
+              "kind": "except",
+              "line": 1232
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1261
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1265
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1267
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1278
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1296
+            },
+            {
+              "in": "_send_request",
+              "kind": "except",
+              "line": 1321
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1326
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1330
+            },
+            {
+              "in": "_send_request",
+              "kind": "except",
+              "line": 1339
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1341
+            },
+            {
+              "in": "_send_request",
+              "kind": "raise",
+              "line": 1345
+            },
+            {
+              "in": "_send_notification",
+              "kind": "raise",
+              "line": 1369
+            },
+            {
+              "in": "_send_notification",
+              "kind": "raise",
+              "line": 1376
+            },
+            {
+              "in": "_send_notification",
+              "kind": "raise",
+              "line": 1381
+            },
+            {
+              "in": "_send_notification",
+              "kind": "except",
+              "line": 1396
+            },
+            {
+              "in": "_send_notification",
+              "kind": "raise",
+              "line": 1398
+            },
+            {
+              "in": "_send_notification",
+              "kind": "raise",
+              "line": 1402
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 1444
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 1538
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 1545
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 1546
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 1551
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 1552
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 1560
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 1561
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 1568
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 1571
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 1582
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 1583
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 1596
+            },
+            {
+              "in": "list_resources",
+              "kind": "raise",
+              "line": 1601
+            },
+            {
+              "in": "read_resource",
+              "kind": "raise",
+              "line": 1608
+            },
+            {
+              "in": "list_prompts",
+              "kind": "raise",
+              "line": 1628
+            },
+            {
+              "in": "get_prompt",
+              "kind": "raise",
+              "line": 1637
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 1688
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 1695
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 1701
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 1707
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 1713
+            },
+            {
+              "in": "_http_message_handler",
+              "kind": "except",
+              "line": 1831
+            },
+            {
+              "in": "_refresh_http_tools",
+              "kind": "except",
+              "line": 1844
+            },
+            {
+              "in": "_refresh_http_prompts",
+              "kind": "except",
+              "line": 1852
+            },
+            {
+              "in": "_refresh_http_resources",
+              "kind": "except",
+              "line": 1860
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "except",
+              "line": 1943
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "except",
+              "line": 1948
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "except",
+              "line": 1952
+            },
+            {
+              "in": "_keepalive_loop",
+              "kind": "raise",
+              "line": 1953
+            },
+            {
+              "in": "_start_keepalive",
+              "kind": "except",
+              "line": 1962
+            },
+            {
+              "in": "_stop_keepalive",
+              "kind": "except",
+              "line": 1973
+            },
+            {
+              "in": "_stop_keepalive",
+              "kind": "except",
+              "line": 1975
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 2058
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 2064
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 2068
+            },
+            {
+              "in": "connect",
+              "kind": "except",
+              "line": 2074
+            },
+            {
+              "in": "connect",
+              "kind": "raise",
+              "line": 2078
+            },
+            {
+              "in": "disconnect",
+              "kind": "except",
+              "line": 2094
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 2138
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 2151
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 2188
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 2205
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 2210
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 2213
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 2231
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 2232
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 2237
+            },
+            {
+              "in": "call_tool",
+              "kind": "except",
+              "line": 2238
+            },
+            {
+              "in": "call_tool",
+              "kind": "raise",
+              "line": 2246
+            },
+            {
+              "in": "list_resources",
+              "kind": "raise",
+              "line": 2253
+            },
+            {
+              "in": "read_resource",
+              "kind": "raise",
+              "line": 2260
+            },
+            {
+              "in": "read_resource",
+              "kind": "except",
+              "line": 2264
+            },
+            {
+              "in": "list_prompts",
+              "kind": "raise",
+              "line": 2294
+            },
+            {
+              "in": "get_prompt",
+              "kind": "raise",
+              "line": 2303
+            },
+            {
+              "in": "get_prompt",
+              "kind": "except",
+              "line": 2309
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 2351
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 2358
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 2364
+            },
+            {
+              "in": "active_probe",
+              "kind": "except",
+              "line": 2374
+            },
+            {
+              "in": "connect_backend",
+              "kind": "except",
+              "line": 2550
+            },
+            {
+              "in": "connect_backend",
+              "kind": "except",
+              "line": 2613
+            },
+            {
+              "in": "connect_backend",
+              "kind": "raise",
+              "line": 2615
+            },
+            {
+              "in": "connect_backend",
+              "kind": "except",
+              "line": 2621
+            },
+            {
+              "in": "connect_all",
+              "kind": "except",
+              "line": 2652
+            },
+            {
+              "in": "disconnect_all",
+              "kind": "except",
+              "line": 2702
+            },
+            {
+              "in": "disconnect_all",
+              "kind": "except",
+              "line": 2713
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2901
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2912
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2925
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2933
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2941
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2948
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2955
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 2964
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 3008
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 3018
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 3024
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 3035
+            },
+            {
+              "in": "execute_tool",
+              "kind": "except",
+              "line": 3051
+            },
+            {
+              "in": "get_stats",
+              "kind": "except",
+              "line": 3083
+            },
+            {
+              "in": "get_stats",
+              "kind": "except",
+              "line": 3098
+            },
+            {
+              "in": "health_check",
+              "kind": "except",
+              "line": 3182
+            },
+            {
+              "in": "list_resources",
+              "kind": "except",
+              "line": 3264
+            },
+            {
+              "in": "read_resource",
+              "kind": "except",
+              "line": 3295
+            },
+            {
+              "in": "list_prompts",
+              "kind": "except",
+              "line": 3323
+            },
+            {
+              "in": "get_prompt",
+              "kind": "except",
+              "line": 3358
+            }
+          ],
           "hash": "174d98a08e88f51a0291c9ce7d84c15f2021345e310b67f331d8a48134d23be2",
+          "importOrder": [
+            "config.py",
+            "_version.py"
+          ],
           "importsFiles": [
             "_version.py",
             "config.py"
@@ -306,6 +1263,63 @@
             "run",
             "run_python"
           ],
+          "failurePaths": [
+            {
+              "in": "_ollama_has_model",
+              "kind": "except",
+              "line": 64
+            },
+            {
+              "in": "_ollama_has_model",
+              "kind": "except",
+              "line": 70
+            },
+            {
+              "in": "_ollama_has_model",
+              "kind": "except",
+              "line": 95
+            },
+            {
+              "in": "_ollama_has_model",
+              "kind": "except",
+              "line": 98
+            },
+            {
+              "in": "_embedding_endpoint_reachable",
+              "kind": "except",
+              "line": 113
+            },
+            {
+              "in": "_embedding_endpoint_reachable",
+              "kind": "except",
+              "line": 118
+            },
+            {
+              "in": "_embedding_endpoint_reachable",
+              "kind": "except",
+              "line": 128
+            },
+            {
+              "in": "_embedding_endpoint_reachable",
+              "kind": "except",
+              "line": 132
+            },
+            {
+              "in": "_raw_provider_from_config_file",
+              "kind": "except",
+              "line": 153
+            },
+            {
+              "in": "_bootstrap_embedding_settings",
+              "kind": "except",
+              "line": 178
+            },
+            {
+              "in": "_bootstrap_embedding_settings",
+              "kind": "except",
+              "line": 180
+            }
+          ],
           "hash": "5205b81c3627f66d699ed69d2b5e804d4636ea626f39ccbb6f310f4393956e68",
           "importsFiles": [
             "config.py"
@@ -315,6 +1329,112 @@
         {
           "exports": [
             "get_chain_indexer"
+          ],
+          "failurePaths": [
+            {
+              "kind": "except",
+              "line": 30
+            },
+            {
+              "in": "_get_db",
+              "kind": "except",
+              "line": 144
+            },
+            {
+              "in": "build_chain_index",
+              "kind": "raise",
+              "line": 258
+            },
+            {
+              "in": "build_chain_index",
+              "kind": "except",
+              "line": 269
+            },
+            {
+              "in": "build_chain_index",
+              "kind": "except",
+              "line": 272
+            },
+            {
+              "in": "build_chain_index",
+              "kind": "raise",
+              "line": 274
+            },
+            {
+              "in": "build_chain_index",
+              "kind": "except",
+              "line": 281
+            },
+            {
+              "in": "build_chain_index",
+              "kind": "except",
+              "line": 287
+            },
+            {
+              "in": "_read_persisted_index_dim",
+              "kind": "except",
+              "line": 306
+            },
+            {
+              "in": "_read_persisted_index_backend",
+              "kind": "except",
+              "line": 316
+            },
+            {
+              "in": "load_chain_index",
+              "kind": "except",
+              "line": 381
+            },
+            {
+              "in": "add_chain",
+              "kind": "raise",
+              "line": 478
+            },
+            {
+              "in": "add_chain",
+              "kind": "raise",
+              "line": 521
+            },
+            {
+              "in": "add_chain",
+              "kind": "except",
+              "line": 558
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 704
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 743
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 782
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 785
+            },
+            {
+              "in": "compact_index",
+              "kind": "raise",
+              "line": 787
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 792
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 798
+            }
           ],
           "hash": "0aa8263366aad700b2b29efbe4be669d5273a092f304c76756fb5a03a14ce833",
           "importsFiles": [
@@ -329,6 +1449,183 @@
           "entryRule": 0,
           "exports": [
             "main"
+          ],
+          "failurePaths": [
+            {
+              "in": "_should_color",
+              "kind": "except",
+              "line": 84
+            },
+            {
+              "in": "_make_console",
+              "kind": "except",
+              "line": 99
+            },
+            {
+              "in": "_build_parser",
+              "kind": "except",
+              "line": 254
+            },
+            {
+              "in": "_cmd_search",
+              "kind": "except",
+              "line": 727
+            },
+            {
+              "in": "_cmd_describe",
+              "kind": "except",
+              "line": 883
+            },
+            {
+              "in": "_cmd_describe",
+              "kind": "except",
+              "line": 917
+            },
+            {
+              "in": "_cmd_execute",
+              "kind": "except",
+              "line": 1016
+            },
+            {
+              "in": "_cmd_execute",
+              "kind": "except",
+              "line": 1039
+            },
+            {
+              "in": "_run",
+              "kind": "except",
+              "line": 1059
+            },
+            {
+              "in": "_cmd_execute",
+              "kind": "except",
+              "line": 1064
+            },
+            {
+              "in": "_cmd_sync",
+              "kind": "except",
+              "line": 1192
+            },
+            {
+              "in": "_cmd_sync",
+              "kind": "except",
+              "line": 1221
+            },
+            {
+              "in": "_cmd_sync",
+              "kind": "except",
+              "line": 1228
+            },
+            {
+              "in": "_locate_example_config",
+              "kind": "except",
+              "line": 1333
+            },
+            {
+              "in": "_cmd_init",
+              "kind": "except",
+              "line": 1390
+            },
+            {
+              "in": "_cmd_doctor",
+              "kind": "except",
+              "line": 1509
+            },
+            {
+              "in": "_cmd_doctor",
+              "kind": "except",
+              "line": 1517
+            },
+            {
+              "in": "_cmd_doctor",
+              "kind": "except",
+              "line": 1526
+            },
+            {
+              "in": "_cmd_doctor",
+              "kind": "except",
+              "line": 1536
+            },
+            {
+              "in": "_check_index_initialized",
+              "kind": "except",
+              "line": 1653
+            },
+            {
+              "in": "_configured_embedding_provider",
+              "kind": "except",
+              "line": 1758
+            },
+            {
+              "in": "_cmd_ui",
+              "kind": "except",
+              "line": 1782
+            },
+            {
+              "in": "_cmd_status",
+              "kind": "except",
+              "line": 1828
+            },
+            {
+              "in": "_cmd_status",
+              "kind": "except",
+              "line": 1837
+            },
+            {
+              "in": "_cmd_categories",
+              "kind": "except",
+              "line": 1923
+            },
+            {
+              "in": "_cmd_categories",
+              "kind": "except",
+              "line": 1932
+            },
+            {
+              "in": "_cmd_audit",
+              "kind": "except",
+              "line": 1967
+            },
+            {
+              "in": "_cmd_audit",
+              "kind": "except",
+              "line": 1981
+            },
+            {
+              "in": "_cmd_analytics",
+              "kind": "except",
+              "line": 2052
+            },
+            {
+              "in": "_cmd_analytics",
+              "kind": "except",
+              "line": 2067
+            },
+            {
+              "in": "_cmd_chains",
+              "kind": "except",
+              "line": 2127
+            },
+            {
+              "in": "_cmd_chains",
+              "kind": "except",
+              "line": 2136
+            },
+            {
+              "in": "main",
+              "kind": "except",
+              "line": 2235
+            },
+            {
+              "in": "main",
+              "kind": "except",
+              "line": 2293
+            },
+            {
+              "in": "main",
+              "kind": "except",
+              "line": 2299
+            }
           ],
           "hash": "910b7191948e97f2820087156f929a76ad2297a20738723557b6358a2cad2ad9",
           "importsFiles": [
@@ -1478,6 +2775,10 @@
           ]
         },
         {
+          "hash": "59ca3f6a5be96b80fee73bebf2b778211208d17cd3fb82e2134608dff0729c76",
+          "path": "codecov.yml"
+        },
+        {
           "hash": "07e3fb971b34afdc7016291ea8e8e8c6eb8c12e099741e6a621d5666e8e70215",
           "path": "compass_config.example.json"
         },
@@ -1495,6 +2796,123 @@
             "get_user_config_dir",
             "load_config",
             "redact_url_credentials"
+          ],
+          "failurePaths": [
+            {
+              "in": "from_file",
+              "kind": "except",
+              "line": 200
+            },
+            {
+              "in": "from_file",
+              "kind": "except",
+              "line": 219
+            },
+            {
+              "in": "from_file",
+              "kind": "except",
+              "line": 223
+            },
+            {
+              "in": "from_file",
+              "kind": "except",
+              "line": 225
+            },
+            {
+              "in": "from_file",
+              "kind": "raise",
+              "line": 236
+            },
+            {
+              "in": "from_file",
+              "kind": "except",
+              "line": 280
+            },
+            {
+              "in": "from_dict",
+              "kind": "raise",
+              "line": 305
+            },
+            {
+              "in": "from_dict",
+              "kind": "raise",
+              "line": 346
+            },
+            {
+              "in": "from_dict",
+              "kind": "except",
+              "line": 436
+            },
+            {
+              "in": "validate_and_clamp",
+              "kind": "except",
+              "line": 495
+            },
+            {
+              "in": "validate_and_clamp",
+              "kind": "except",
+              "line": 652
+            },
+            {
+              "in": "_validate_and_clamp_backends",
+              "kind": "except",
+              "line": 697
+            },
+            {
+              "in": "_validate_and_clamp_backends",
+              "kind": "except",
+              "line": 728
+            },
+            {
+              "in": "apply_env_overrides",
+              "kind": "except",
+              "line": 950
+            },
+            {
+              "in": "_safe_home",
+              "kind": "except",
+              "line": 1078
+            },
+            {
+              "in": "redact_url_credentials",
+              "kind": "except",
+              "line": 1172
+            },
+            {
+              "in": "_ollama_reachable",
+              "kind": "except",
+              "line": 1219
+            },
+            {
+              "in": "_ollama_reachable",
+              "kind": "except",
+              "line": 1225
+            },
+            {
+              "in": "_http_reachable",
+              "kind": "except",
+              "line": 1241
+            },
+            {
+              "in": "_http_reachable",
+              "kind": "except",
+              "line": 1247
+            },
+            {
+              "in": "doctor",
+              "kind": "except",
+              "line": 1281
+            },
+            {
+              "in": "doctor",
+              "kind": "except",
+              "line": 1319
+            },
+            {
+              "in": "doctor",
+              "kind": "except",
+              "line": 1337
+            }
           ],
           "hash": "aee6666987e338a515fa7c1d436e2d38a38504fc7df2b9590c79b6976e9de644",
           "importsFiles": [
@@ -1619,6 +3037,203 @@
             "known_providers",
             "register_provider"
           ],
+          "failurePaths": [
+            {
+              "in": "endpoint_path",
+              "kind": "raise",
+              "line": 204
+            },
+            {
+              "in": "build_body",
+              "kind": "raise",
+              "line": 212
+            },
+            {
+              "in": "parse_vector",
+              "kind": "raise",
+              "line": 216
+            },
+            {
+              "in": "embed_one",
+              "kind": "raise",
+              "line": 240
+            },
+            {
+              "in": "health_check",
+              "kind": "raise",
+              "line": 248
+            },
+            {
+              "in": "health_check",
+              "kind": "except",
+              "line": 386
+            },
+            {
+              "in": "_sentence_transformers_available",
+              "kind": "except",
+              "line": 414
+            },
+            {
+              "in": "_maybe_st_model",
+              "kind": "except",
+              "line": 506
+            },
+            {
+              "in": "pull_model",
+              "kind": "except",
+              "line": 549
+            },
+            {
+              "in": "create_provider",
+              "kind": "raise",
+              "line": 619
+            },
+            {
+              "in": "_aclose_on_shutdown",
+              "kind": "except",
+              "line": 795
+            },
+            {
+              "in": "_aclose_on_shutdown",
+              "kind": "except",
+              "line": 799
+            },
+            {
+              "in": "_aclose_on_shutdown",
+              "kind": "raise",
+              "line": 801
+            },
+            {
+              "in": "_bind_client_janitor",
+              "kind": "except",
+              "line": 817
+            },
+            {
+              "in": "_get_client",
+              "kind": "except",
+              "line": 837
+            },
+            {
+              "in": "_lock_for_running_loop",
+              "kind": "except",
+              "line": 862
+            },
+            {
+              "in": "close",
+              "kind": "except",
+              "line": 888
+            },
+            {
+              "in": "close",
+              "kind": "except",
+              "line": 895
+            },
+            {
+              "in": "close",
+              "kind": "except",
+              "line": 902
+            },
+            {
+              "in": "health_check",
+              "kind": "except",
+              "line": 922
+            },
+            {
+              "in": "pull_model",
+              "kind": "except",
+              "line": 941
+            },
+            {
+              "in": "_set_breaker_state",
+              "kind": "except",
+              "line": 958
+            },
+            {
+              "in": "_breaker_check",
+              "kind": "raise",
+              "line": 1034
+            },
+            {
+              "in": "_breaker_check",
+              "kind": "raise",
+              "line": 1037
+            },
+            {
+              "in": "_breaker_check",
+              "kind": "raise",
+              "line": 1041
+            },
+            {
+              "in": "_post_embed_with_retry",
+              "kind": "raise",
+              "line": 1202
+            },
+            {
+              "in": "_post_embed_with_retry",
+              "kind": "raise",
+              "line": 1206
+            },
+            {
+              "in": "_post_embed_with_retry",
+              "kind": "except",
+              "line": 1208
+            },
+            {
+              "in": "_post_embed_with_retry",
+              "kind": "raise",
+              "line": 1220
+            },
+            {
+              "in": "_post_embed_with_retry",
+              "kind": "raise",
+              "line": 1223
+            },
+            {
+              "in": "_embed_with_concurrency_cap",
+              "kind": "raise",
+              "line": 1263
+            },
+            {
+              "in": "_finalize_vector",
+              "kind": "except",
+              "line": 1307
+            },
+            {
+              "in": "_finalize_vector",
+              "kind": "raise",
+              "line": 1308
+            },
+            {
+              "in": "_finalize_vector",
+              "kind": "raise",
+              "line": 1314
+            },
+            {
+              "in": "_finalize_vector",
+              "kind": "raise",
+              "line": 1325
+            },
+            {
+              "in": "_embed_batch_chunk",
+              "kind": "raise",
+              "line": 1370
+            },
+            {
+              "in": "_embed_batch_chunk",
+              "kind": "raise",
+              "line": 1403
+            },
+            {
+              "in": "embed_batch",
+              "kind": "raise",
+              "line": 1472
+            },
+            {
+              "in": "_run",
+              "kind": "except",
+              "line": 1535
+            }
+          ],
           "hash": "7b9ef5aa73affea806c7891488010a25d071d627e623dad5cc1d48db99a09be9",
           "path": "embedder.py",
           "sequences": []
@@ -1657,6 +3272,446 @@
             "run_tests",
             "show_config",
             "sync_from_backends"
+          ],
+          "failurePaths": [
+            {
+              "kind": "except",
+              "line": 51
+            },
+            {
+              "kind": "raise",
+              "line": 58
+            },
+            {
+              "in": "_invalidate_ready_cache",
+              "kind": "except",
+              "line": 128
+            },
+            {
+              "in": "_error_envelope",
+              "kind": "except",
+              "line": 262
+            },
+            {
+              "in": "_cold_start_envelope",
+              "kind": "except",
+              "line": 337
+            },
+            {
+              "in": "_embedding_provider_name",
+              "kind": "except",
+              "line": 432
+            },
+            {
+              "in": "_embedding_endpoint_display",
+              "kind": "except",
+              "line": 453
+            },
+            {
+              "in": "_embedding_recovery_suggestions",
+              "kind": "except",
+              "line": 473
+            },
+            {
+              "in": "get_index",
+              "kind": "except",
+              "line": 605
+            },
+            {
+              "in": "get_index",
+              "kind": "raise",
+              "line": 607
+            },
+            {
+              "in": "get_index",
+              "kind": "raise",
+              "line": 613
+            },
+            {
+              "in": "get_sync_manager_instance",
+              "kind": "except",
+              "line": 706
+            },
+            {
+              "in": "get_chain_indexer_instance",
+              "kind": "except",
+              "line": 739
+            },
+            {
+              "in": "get_chain_indexer_instance",
+              "kind": "except",
+              "line": 744
+            },
+            {
+              "in": "maybe_startup_sync",
+              "kind": "except",
+              "line": 795
+            },
+            {
+              "in": "maybe_startup_sync",
+              "kind": "except",
+              "line": 805
+            },
+            {
+              "in": "_maybe_start_background_polling",
+              "kind": "except",
+              "line": 846
+            },
+            {
+              "in": "_maybe_prune_analytics_once",
+              "kind": "except",
+              "line": 873
+            },
+            {
+              "in": "_maybe_prune_analytics_once",
+              "kind": "except",
+              "line": 892
+            },
+            {
+              "in": "_retry_startup_sidecars",
+              "kind": "except",
+              "line": 908
+            },
+            {
+              "in": "_exact_name_boost_lookup",
+              "kind": "except",
+              "line": 1144
+            },
+            {
+              "in": "_load_raw_schema",
+              "kind": "except",
+              "line": 1247
+            },
+            {
+              "in": "_load_raw_schema",
+              "kind": "except",
+              "line": 1255
+            },
+            {
+              "in": "_load_raw_schema",
+              "kind": "except",
+              "line": 1269
+            },
+            {
+              "in": "_report_progress",
+              "kind": "except",
+              "line": 1343
+            },
+            {
+              "in": "_lookup_tool_schema",
+              "kind": "except",
+              "line": 1435
+            },
+            {
+              "in": "_lookup_tool_schema",
+              "kind": "except",
+              "line": 1440
+            },
+            {
+              "in": "_lookup_tool_schema",
+              "kind": "except",
+              "line": 1449
+            },
+            {
+              "in": "_resolve_json_pointer",
+              "kind": "except",
+              "line": 1475
+            },
+            {
+              "in": "_resolve_chain_ref",
+              "kind": "except",
+              "line": 1501
+            },
+            {
+              "in": "compass",
+              "kind": "except",
+              "line": 1607
+            },
+            {
+              "in": "compass",
+              "kind": "except",
+              "line": 1626
+            },
+            {
+              "in": "compass",
+              "kind": "except",
+              "line": 1670
+            },
+            {
+              "in": "compass",
+              "kind": "except",
+              "line": 1729
+            },
+            {
+              "in": "compass",
+              "kind": "except",
+              "line": 1777
+            },
+            {
+              "in": "compass",
+              "kind": "except",
+              "line": 1783
+            },
+            {
+              "in": "describe",
+              "kind": "except",
+              "line": 1878
+            },
+            {
+              "in": "describe",
+              "kind": "except",
+              "line": 1892
+            },
+            {
+              "in": "describe",
+              "kind": "except",
+              "line": 1910
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2036
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2062
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2077
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2110
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2132
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2182
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2192
+            },
+            {
+              "in": "_forward_progress",
+              "kind": "except",
+              "line": 2226
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2237
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2251
+            },
+            {
+              "in": "execute",
+              "kind": "except",
+              "line": 2294
+            },
+            {
+              "in": "compass_categories",
+              "kind": "except",
+              "line": 2327
+            },
+            {
+              "in": "compass_status",
+              "kind": "except",
+              "line": 2377
+            },
+            {
+              "in": "compass_status",
+              "kind": "except",
+              "line": 2396
+            },
+            {
+              "in": "compass_status",
+              "kind": "except",
+              "line": 2404
+            },
+            {
+              "in": "compass_status",
+              "kind": "except",
+              "line": 2448
+            },
+            {
+              "in": "compass_status",
+              "kind": "except",
+              "line": 2463
+            },
+            {
+              "in": "compass_status",
+              "kind": "except",
+              "line": 2477
+            },
+            {
+              "in": "compass_analytics",
+              "kind": "except",
+              "line": 2517
+            },
+            {
+              "in": "compass_analytics",
+              "kind": "except",
+              "line": 2539
+            },
+            {
+              "in": "compass_chains",
+              "kind": "except",
+              "line": 2600
+            },
+            {
+              "in": "compass_chains",
+              "kind": "except",
+              "line": 2664
+            },
+            {
+              "in": "compass_chains",
+              "kind": "except",
+              "line": 2694
+            },
+            {
+              "in": "compass_chains",
+              "kind": "except",
+              "line": 2717
+            },
+            {
+              "in": "compass_chains",
+              "kind": "except",
+              "line": 2798
+            },
+            {
+              "in": "compass_chains",
+              "kind": "except",
+              "line": 2831
+            },
+            {
+              "in": "compass_sync",
+              "kind": "except",
+              "line": 2888
+            },
+            {
+              "in": "compass_audit",
+              "kind": "except",
+              "line": 3060
+            },
+            {
+              "in": "compass_audit",
+              "kind": "except",
+              "line": 3069
+            },
+            {
+              "in": "compass_audit",
+              "kind": "except",
+              "line": 3110
+            },
+            {
+              "in": "compass_audit",
+              "kind": "except",
+              "line": 3133
+            },
+            {
+              "in": "compass_audit",
+              "kind": "except",
+              "line": 3144
+            },
+            {
+              "in": "compass_audit",
+              "kind": "except",
+              "line": 3169
+            },
+            {
+              "in": "run_tests",
+              "kind": "except",
+              "line": 3369
+            },
+            {
+              "in": "run_tests",
+              "kind": "except",
+              "line": 3374
+            },
+            {
+              "in": "ready",
+              "kind": "except",
+              "line": 3572
+            },
+            {
+              "in": "ready",
+              "kind": "except",
+              "line": 3585
+            },
+            {
+              "in": "ready",
+              "kind": "except",
+              "line": 3605
+            },
+            {
+              "in": "_int_fmt",
+              "kind": "except",
+              "line": 3654
+            },
+            {
+              "in": "_float_fmt",
+              "kind": "except",
+              "line": 3660
+            },
+            {
+              "in": "metrics",
+              "kind": "except",
+              "line": 3680
+            },
+            {
+              "in": "metrics",
+              "kind": "except",
+              "line": 3693
+            },
+            {
+              "in": "metrics",
+              "kind": "except",
+              "line": 3738
+            },
+            {
+              "in": "metrics",
+              "kind": "except",
+              "line": 3745
+            },
+            {
+              "in": "metrics",
+              "kind": "except",
+              "line": 3754
+            },
+            {
+              "in": "metrics",
+              "kind": "except",
+              "line": 3823
+            },
+            {
+              "in": "metrics",
+              "kind": "except",
+              "line": 3901
+            },
+            {
+              "in": "_extract_bearer_token",
+              "kind": "except",
+              "line": 3978
+            },
+            {
+              "in": "main",
+              "kind": "except",
+              "line": 4200
+            }
           ],
           "hash": "54bf089eb0b78302b20650727aab7fb35d4cdd54442edc0c73f9a64e60ef6eb8",
           "importsFiles": [
@@ -4024,6 +6079,302 @@
             "create_vector_store",
             "resolve_vector_backend"
           ],
+          "failurePaths": [
+            {
+              "kind": "except",
+              "line": 30
+            },
+            {
+              "in": "_try_import_hnswlib",
+              "kind": "except",
+              "line": 45
+            },
+            {
+              "in": "_sqlite_vec_available",
+              "kind": "except",
+              "line": 53
+            },
+            {
+              "in": "add_items",
+              "kind": "raise",
+              "line": 69
+            },
+            {
+              "in": "knn_query",
+              "kind": "raise",
+              "line": 73
+            },
+            {
+              "in": "mark_deleted",
+              "kind": "raise",
+              "line": 77
+            },
+            {
+              "in": "save_index",
+              "kind": "raise",
+              "line": 81
+            },
+            {
+              "in": "load_index",
+              "kind": "raise",
+              "line": 87
+            },
+            {
+              "in": "count",
+              "kind": "raise",
+              "line": 91
+            },
+            {
+              "in": "get_items",
+              "kind": "raise",
+              "line": 97
+            },
+            {
+              "in": "__init__",
+              "kind": "raise",
+              "line": 108
+            },
+            {
+              "in": "__init__",
+              "kind": "raise",
+              "line": 164
+            },
+            {
+              "in": "add_items",
+              "kind": "raise",
+              "line": 200
+            },
+            {
+              "in": "add_items",
+              "kind": "raise",
+              "line": 204
+            },
+            {
+              "in": "mark_deleted",
+              "kind": "raise",
+              "line": 243
+            },
+            {
+              "in": "get_items",
+              "kind": "raise",
+              "line": 309
+            },
+            {
+              "in": "__init__",
+              "kind": "raise",
+              "line": 324
+            },
+            {
+              "in": "__init__",
+              "kind": "except",
+              "line": 331
+            },
+            {
+              "in": "create_vector_store",
+              "kind": "except",
+              "line": 423
+            },
+            {
+              "in": "create_vector_store",
+              "kind": "except",
+              "line": 433
+            },
+            {
+              "in": "_unlink_quietly",
+              "kind": "except",
+              "line": 575
+            },
+            {
+              "in": "_publish_hnsw",
+              "kind": "except",
+              "line": 594
+            },
+            {
+              "in": "_cache_get",
+              "kind": "except",
+              "line": 654
+            },
+            {
+              "in": "_cache_put",
+              "kind": "except",
+              "line": 730
+            },
+            {
+              "in": "_flush_deferred_cache_ops_list",
+              "kind": "except",
+              "line": 765
+            },
+            {
+              "in": "get_cache_stats",
+              "kind": "except",
+              "line": 778
+            },
+            {
+              "in": "_init_db",
+              "kind": "except",
+              "line": 841
+            },
+            {
+              "in": "build_index",
+              "kind": "except",
+              "line": 917
+            },
+            {
+              "in": "build_index",
+              "kind": "raise",
+              "line": 920
+            },
+            {
+              "in": "build_index",
+              "kind": "raise",
+              "line": 972
+            },
+            {
+              "in": "build_index",
+              "kind": "raise",
+              "line": 999
+            },
+            {
+              "in": "build_index",
+              "kind": "except",
+              "line": 1102
+            },
+            {
+              "in": "build_index",
+              "kind": "raise",
+              "line": 1109
+            },
+            {
+              "in": "load_index",
+              "kind": "except",
+              "line": 1167
+            },
+            {
+              "in": "load_index",
+              "kind": "raise",
+              "line": 1177
+            },
+            {
+              "in": "load_index",
+              "kind": "raise",
+              "line": 1187
+            },
+            {
+              "in": "load_index",
+              "kind": "except",
+              "line": 1215
+            },
+            {
+              "in": "load_index",
+              "kind": "raise",
+              "line": 1217
+            },
+            {
+              "in": "load_index",
+              "kind": "except",
+              "line": 1218
+            },
+            {
+              "in": "_get_tool_by_id",
+              "kind": "except",
+              "line": 1243
+            },
+            {
+              "in": "_get_tool_by_id",
+              "kind": "except",
+              "line": 1248
+            },
+            {
+              "in": "search",
+              "kind": "raise",
+              "line": 1281
+            },
+            {
+              "in": "search",
+              "kind": "raise",
+              "line": 1293
+            },
+            {
+              "in": "search",
+              "kind": "except",
+              "line": 1323
+            },
+            {
+              "in": "search_sync",
+              "kind": "except",
+              "line": 1365
+            },
+            {
+              "in": "get_stats",
+              "kind": "except",
+              "line": 1431
+            },
+            {
+              "in": "get_stats",
+              "kind": "except",
+              "line": 1483
+            },
+            {
+              "in": "add_single_tool",
+              "kind": "raise",
+              "line": 1525
+            },
+            {
+              "in": "add_single_tool",
+              "kind": "except",
+              "line": 1608
+            },
+            {
+              "in": "add_single_tool",
+              "kind": "except",
+              "line": 1632
+            },
+            {
+              "in": "add_single_tool",
+              "kind": "except",
+              "line": 1637
+            },
+            {
+              "in": "add_single_tool",
+              "kind": "raise",
+              "line": 1642
+            },
+            {
+              "in": "add_single_tool",
+              "kind": "except",
+              "line": 1646
+            },
+            {
+              "in": "add_single_tool",
+              "kind": "except",
+              "line": 1658
+            },
+            {
+              "in": "remove_tool",
+              "kind": "except",
+              "line": 1698
+            },
+            {
+              "in": "remove_tool",
+              "kind": "except",
+              "line": 1709
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 1727
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 1778
+            },
+            {
+              "in": "compact_index",
+              "kind": "except",
+              "line": 1839
+            }
+          ],
           "hash": "26ee48774b1ded174c2c77ce33f7a65ff40679552342cc6d74f59eea1d97b697",
           "importsFiles": [
             "embedder.py",
@@ -4056,7 +6407,130 @@
           "exports": [
             "get_sync_manager"
           ],
+          "failurePaths": [
+            {
+              "in": "_get_db",
+              "kind": "except",
+              "line": 81
+            },
+            {
+              "in": "_init_sync_table",
+              "kind": "except",
+              "line": 109
+            },
+            {
+              "in": "_mark_backend_error",
+              "kind": "except",
+              "line": 141
+            },
+            {
+              "in": "_mark_backends_synced",
+              "kind": "except",
+              "line": 169
+            },
+            {
+              "in": "_compute_tool_hash",
+              "kind": "except",
+              "line": 239
+            },
+            {
+              "in": "_compute_tool_hash",
+              "kind": "except",
+              "line": 248
+            },
+            {
+              "in": "sync_if_needed",
+              "kind": "except",
+              "line": 321
+            },
+            {
+              "in": "sync_if_needed",
+              "kind": "except",
+              "line": 338
+            },
+            {
+              "in": "_get_backend_tool_names",
+              "kind": "except",
+              "line": 384
+            },
+            {
+              "in": "_tool_infos_to_definitions",
+              "kind": "except",
+              "line": 518
+            },
+            {
+              "in": "_row_get",
+              "kind": "except",
+              "line": 533
+            },
+            {
+              "in": "_parse_json_field",
+              "kind": "except",
+              "line": 544
+            },
+            {
+              "in": "_load_indexed_definitions_for_backend",
+              "kind": "except",
+              "line": 570
+            },
+            {
+              "in": "_load_indexed_definitions_for_backend",
+              "kind": "except",
+              "line": 578
+            },
+            {
+              "in": "_load_indexed_definitions_for_backend",
+              "kind": "except",
+              "line": 622
+            },
+            {
+              "in": "_collect_all_connected_tools",
+              "kind": "except",
+              "line": 677
+            },
+            {
+              "in": "_rebuild_for_backends",
+              "kind": "except",
+              "line": 716
+            },
+            {
+              "in": "full_sync",
+              "kind": "except",
+              "line": 920
+            },
+            {
+              "in": "full_sync",
+              "kind": "except",
+              "line": 957
+            },
+            {
+              "in": "poll_loop",
+              "kind": "except",
+              "line": 1129
+            },
+            {
+              "in": "poll_loop",
+              "kind": "raise",
+              "line": 1131
+            },
+            {
+              "in": "poll_loop",
+              "kind": "except",
+              "line": 1132
+            },
+            {
+              "in": "stop_background_polling",
+              "kind": "except",
+              "line": 1144
+            }
+          ],
           "hash": "162cce91b4fea27372c2fe38863b80c8c665ba7890c4fcd6ce792b44f181a580",
+          "importOrder": [
+            "config.py",
+            "indexer.py",
+            "backend_client_simple.py",
+            "tool_manifest.py"
+          ],
           "importsFiles": [
             "backend_client_simple.py",
             "config.py",
@@ -4108,6 +6582,218 @@
             "search_tools",
             "truncate_text",
             "view_details_and_prefill"
+          ],
+          "failurePaths": [
+            {
+              "in": "run_async",
+              "kind": "except",
+              "line": 58
+            },
+            {
+              "in": "_build",
+              "kind": "raise",
+              "line": 126
+            },
+            {
+              "in": "_build",
+              "kind": "except",
+              "line": 170
+            },
+            {
+              "in": "_build",
+              "kind": "except",
+              "line": 175
+            },
+            {
+              "in": "_check_ollama_banner",
+              "kind": "except",
+              "line": 249
+            },
+            {
+              "in": "_lexical_fallback_for_ui",
+              "kind": "except",
+              "line": 275
+            },
+            {
+              "in": "_lexical_fallback_for_ui",
+              "kind": "except",
+              "line": 304
+            },
+            {
+              "in": "search_tools",
+              "kind": "except",
+              "line": 438
+            },
+            {
+              "in": "search_tools",
+              "kind": "except",
+              "line": 449
+            },
+            {
+              "in": "search_tools",
+              "kind": "except",
+              "line": 473
+            },
+            {
+              "in": "_nearest_matches",
+              "kind": "except",
+              "line": 675
+            },
+            {
+              "in": "search_chains",
+              "kind": "except",
+              "line": 783
+            },
+            {
+              "in": "get_all_tools",
+              "kind": "except",
+              "line": 877
+            },
+            {
+              "in": "filter_tools",
+              "kind": "except",
+              "line": 886
+            },
+            {
+              "in": "get_tool_details",
+              "kind": "except",
+              "line": 991
+            },
+            {
+              "in": "get_tool_details",
+              "kind": "except",
+              "line": 1015
+            },
+            {
+              "in": "get_tool_details",
+              "kind": "except",
+              "line": 1036
+            },
+            {
+              "in": "get_tool_details",
+              "kind": "except",
+              "line": 1040
+            },
+            {
+              "in": "_execute_playground_visible",
+              "kind": "except",
+              "line": 1110
+            },
+            {
+              "in": "_example_args_from_schema",
+              "kind": "except",
+              "line": 1150
+            },
+            {
+              "in": "_lookup_tool_row",
+              "kind": "except",
+              "line": 1195
+            },
+            {
+              "in": "_prefill_execute_fields",
+              "kind": "except",
+              "line": 1206
+            },
+            {
+              "in": "_prefill_execute_fields",
+              "kind": "except",
+              "line": 1210
+            },
+            {
+              "in": "_run_button_html",
+              "kind": "except",
+              "line": 1229
+            },
+            {
+              "in": "execute_tool_ui",
+              "kind": "except",
+              "line": 1292
+            },
+            {
+              "in": "execute_tool_ui",
+              "kind": "except",
+              "line": 1317
+            },
+            {
+              "in": "execute_tool_ui",
+              "kind": "except",
+              "line": 1324
+            },
+            {
+              "in": "_run",
+              "kind": "except",
+              "line": 1344
+            },
+            {
+              "in": "_run",
+              "kind": "except",
+              "line": 1361
+            },
+            {
+              "in": "execute_tool_ui",
+              "kind": "except",
+              "line": 1366
+            },
+            {
+              "in": "get_analytics_dashboard",
+              "kind": "except",
+              "line": 1449
+            },
+            {
+              "in": "get_chains_view",
+              "kind": "except",
+              "line": 1553
+            },
+            {
+              "in": "get_chains_view",
+              "kind": "except",
+              "line": 1570
+            },
+            {
+              "in": "get_system_status",
+              "kind": "except",
+              "line": 1644
+            },
+            {
+              "in": "get_system_status",
+              "kind": "except",
+              "line": 1657
+            },
+            {
+              "in": "get_system_status",
+              "kind": "except",
+              "line": 1668
+            },
+            {
+              "in": "get_system_status",
+              "kind": "except",
+              "line": 1696
+            },
+            {
+              "in": "get_filter_choices",
+              "kind": "except",
+              "line": 1795
+            },
+            {
+              "in": "create_ui",
+              "kind": "except",
+              "line": 1856
+            },
+            {
+              "in": "main",
+              "kind": "except",
+              "line": 2387
+            },
+            {
+              "in": "main",
+              "kind": "except",
+              "line": 2425
+            },
+            {
+              "in": "main",
+              "kind": "raise",
+              "line": 2442
+            }
           ],
           "hash": "ba2e5ac4527befef7cdbcc861ae5416175939ace045a3e793803ca32e6c592d2",
           "importsFiles": [
@@ -4519,6 +7205,9 @@
           ]
         }
       ],
+      "frameworks": [
+        "mcp"
+      ],
       "globs": [
         "*"
       ],
@@ -4527,15 +7216,19 @@
       "origin": "authored",
       "outsidePlaces": [
         {
-          "reads": 1,
+          "reads": 35,
           "where": [
             "caller"
           ],
-          "writes": 0
+          "writes": 5
         }
       ],
-      "outsideReads": 1,
+      "outsideReads": 35,
+      "outsideWrites": 5,
       "role": "code",
+      "testRunners": [
+        "pytest"
+      ],
       "testedBy": 28,
       "unresolvedSites": 0
     },
@@ -4556,6 +7249,20 @@
           "path": "scripts/regenerate-scorecard.sh"
         },
         {
+          "failurePaths": [
+            {
+              "kind": "catch",
+              "line": 50
+            },
+            {
+              "kind": "catch",
+              "line": 57
+            },
+            {
+              "kind": "catch",
+              "line": 96
+            }
+          ],
           "hash": "fe8ef445f4c2a58e98bb21eec1929c130d98be4024a11661fd0a10a0a76d3d7b",
           "path": "scripts/sync-version.mjs"
         },
@@ -4595,6 +7302,7 @@
           "path": "site/package.json"
         },
         {
+          "constantOnly": true,
           "hash": "ee756dfba4122d2acc94a39b2555d9f200fff56a87a8c0b10f9cd01df26a8b62",
           "path": "site/src/content.config.ts"
         },
@@ -4628,9 +7336,18 @@
         },
         {
           "hash": "391533713539035d3c92282579d43de0f137067867fdb502d7eaea3c74601d2a",
+          "importOrder": [
+            "site/src/styles/global.css",
+            "site/src/site-config.ts"
+          ],
+          "importsFiles": [
+            "site/src/site-config.ts",
+            "site/src/styles/global.css"
+          ],
           "path": "site/src/pages/index.astro"
         },
         {
+          "constantOnly": true,
           "hash": "ef9c3d4022772e0c52938b552773cff4f8f33e74b9d384ab51307112640bbea5",
           "path": "site/src/site-config.ts"
         },
@@ -4691,6 +7408,15 @@
             "test_sync_manager"
           ],
           "hash": "bf9b9e35af3c0fa094c4cd4ce21e9d86cecbd5e2640c84aed51b2d3922169503",
+          "importOrder": [
+            "config.py",
+            "tool_manifest.py",
+            "indexer.py",
+            "analytics.py",
+            "chain_indexer.py",
+            "sync_manager.py",
+            "gateway.py"
+          ],
           "importsFiles": [
             "analytics.py",
             "chain_indexer.py",
@@ -4700,7 +7426,8 @@
             "sync_manager.py",
             "tool_manifest.py"
           ],
-          "path": "tests/conftest.py"
+          "path": "tests/conftest.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "2677eabf7cdfc58e09091a28a18fe36fc6b3075eebfe312535b23fe39f417689",
@@ -4734,7 +7461,8 @@
           "importsFiles": [
             "analytics.py"
           ],
-          "path": "tests/test_analytics.py"
+          "path": "tests/test_analytics.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "c850e53ab6825afbfbc6cfe5e75f1cb85950408bc8b822153605addba760f7ce",
@@ -4742,10 +7470,18 @@
             "backend_client_mcp.py",
             "config.py"
           ],
-          "path": "tests/test_backend_client.py"
+          "path": "tests/test_backend_client.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "77ebc9ac92e974730dcd44f6d5d66287ff09792abc3c9b22d984a49df1b48e3a",
+          "importOrder": [
+            "backend_client_simple.py",
+            "config.py",
+            "ui.py",
+            "embedder.py",
+            "_version.py"
+          ],
           "importsFiles": [
             "_version.py",
             "backend_client_simple.py",
@@ -4753,7 +7489,8 @@
             "embedder.py",
             "ui.py"
           ],
-          "path": "tests/test_backend_client_simple.py"
+          "path": "tests/test_backend_client_simple.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4769,14 +7506,16 @@
             "backend_client_simple.py",
             "config.py"
           ],
-          "path": "tests/test_backend_client_simple_coverage.py"
+          "path": "tests/test_backend_client_simple_coverage.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "34cd95b2c263fe2aaefb0e871939869c466c4288cb893a71ab30af3bf3c0e6cf",
           "importsFiles": [
             "backend_client_simple.py"
           ],
-          "path": "tests/test_backend_client_simple_outcomes.py"
+          "path": "tests/test_backend_client_simple_outcomes.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4794,7 +7533,8 @@
             "backend_client_simple.py",
             "config.py"
           ],
-          "path": "tests/test_backend_http_wire.py"
+          "path": "tests/test_backend_http_wire.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4807,13 +7547,24 @@
             "chain_indexer.py",
             "embedder.py"
           ],
-          "path": "tests/test_chain_indexer.py"
+          "path": "tests/test_chain_indexer.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
             "init_config_path"
           ],
           "hash": "1ff0a475848b8de5d6bb882cf02e03879c4a4e1bf0a9057bb358b42732934721",
+          "importOrder": [
+            "cli.py",
+            "_version.py",
+            "indexer.py",
+            "gateway.py",
+            "config.py",
+            "backend_client_simple.py",
+            "sync_manager.py",
+            "bootstrap.py"
+          ],
           "importsFiles": [
             "_version.py",
             "backend_client_simple.py",
@@ -4824,15 +7575,21 @@
             "indexer.py",
             "sync_manager.py"
           ],
-          "path": "tests/test_cli_coverage.py"
+          "path": "tests/test_cli_coverage.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "0697a716a627b1db63ebab44a2ab1bbee253d8fe74706d55c33a31be055ba7d7",
+          "importOrder": [
+            "config.py",
+            "analytics.py"
+          ],
           "importsFiles": [
             "analytics.py",
             "config.py"
           ],
-          "path": "tests/test_config.py"
+          "path": "tests/test_config.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4846,7 +7603,8 @@
             "embedder.py",
             "indexer.py"
           ],
-          "path": "tests/test_corruption_recovery.py"
+          "path": "tests/test_corruption_recovery.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4856,7 +7614,8 @@
           "importsFiles": [
             "embedder.py"
           ],
-          "path": "tests/test_embedder.py"
+          "path": "tests/test_embedder.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4877,7 +7636,8 @@
           "importsFiles": [
             "embedder.py"
           ],
-          "path": "tests/test_embedder_degradation.py"
+          "path": "tests/test_embedder_degradation.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4911,6 +7671,15 @@
             "test_ready_returns_503_when_ollama_down"
           ],
           "hash": "4ae42a009d3c7172e6404a24bf60835534bd97c9565b273def460292c82e8d7f",
+          "importOrder": [
+            "backend_client_simple.py",
+            "config.py",
+            "gateway.py",
+            "indexer.py",
+            "tool_manifest.py",
+            "sync_manager.py",
+            "cli.py"
+          ],
           "importsFiles": [
             "backend_client_simple.py",
             "cli.py",
@@ -4920,44 +7689,67 @@
             "sync_manager.py",
             "tool_manifest.py"
           ],
-          "path": "tests/test_features_v2_2_0.py"
+          "path": "tests/test_features_v2_2_0.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "0a0c6882b0664e0845e793813f12442ec2580a7b5a1823ae0621ea752c7a7cf3",
+          "importOrder": [
+            "analytics.py",
+            "tool_manifest.py",
+            "config.py",
+            "indexer.py"
+          ],
           "importsFiles": [
             "analytics.py",
             "config.py",
             "indexer.py",
             "tool_manifest.py"
           ],
-          "path": "tests/test_fuzz.py"
+          "path": "tests/test_fuzz.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "f7f32c90bb784f4ce6dfddcb58205deb658161f690a69b57bc8a0fc6b84b4247",
+          "importOrder": [
+            "gateway.py",
+            "indexer.py",
+            "sync_manager.py",
+            "chain_indexer.py"
+          ],
           "importsFiles": [
             "chain_indexer.py",
             "gateway.py",
             "indexer.py",
             "sync_manager.py"
           ],
-          "path": "tests/test_gateway.py"
+          "path": "tests/test_gateway.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "74a77759fca1ea4311990b468add342cf6c8da827dd39b5a7c405b38b3317013",
+          "importOrder": [
+            "gateway.py",
+            "chain_indexer.py",
+            "indexer.py",
+            "config.py"
+          ],
           "importsFiles": [
             "chain_indexer.py",
             "config.py",
             "gateway.py",
             "indexer.py"
           ],
-          "path": "tests/test_gateway_coverage.py"
+          "path": "tests/test_gateway_coverage.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "34074222d40438d750bfd8d63944f153b471e4c28bdfaca1f6e2f21988da82fd",
           "importsFiles": [
             "gateway.py"
           ],
-          "path": "tests/test_gateway_handlers.py"
+          "path": "tests/test_gateway_handlers.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -4965,6 +7757,13 @@
             "golden_index"
           ],
           "hash": "3dc815cbab9f4bdd55ca7cb480f94f360e4a861c9666072bb5a03fb40b5d04d5",
+          "importOrder": [
+            "config.py",
+            "indexer.py",
+            "tests/golden_set/deterministic_embedder.py",
+            "tests/golden_set/fixture_corpus.py",
+            "gateway.py"
+          ],
           "importsFiles": [
             "config.py",
             "gateway.py",
@@ -4972,25 +7771,38 @@
             "tests/golden_set/deterministic_embedder.py",
             "tests/golden_set/fixture_corpus.py"
           ],
-          "path": "tests/test_golden_set.py"
+          "path": "tests/test_golden_set.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "b9fc5bfe626ecc62d2fc2b288757b3aef8ebcd7556905c4aa82382ab8063c600",
+          "importOrder": [
+            "indexer.py",
+            "embedder.py",
+            "tool_manifest.py"
+          ],
           "importsFiles": [
             "embedder.py",
             "indexer.py",
             "tool_manifest.py"
           ],
-          "path": "tests/test_indexer.py"
+          "path": "tests/test_indexer.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "604e9e2008878c379ed36e39555604e5e63a647852f4235113a7eec7795a1c5a",
+          "importOrder": [
+            "gateway.py",
+            "indexer.py",
+            "analytics.py"
+          ],
           "importsFiles": [
             "analytics.py",
             "gateway.py",
             "indexer.py"
           ],
-          "path": "tests/test_regressions_swarm_01.py"
+          "path": "tests/test_regressions_swarm_01.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "b30ac2dbdaa2e3031c5372756363f44433627d59489e837d996061a88c082032",
@@ -4998,7 +7810,12 @@
             "gateway.py",
             "ui.py"
           ],
-          "path": "tests/test_regressions_swarm_02.py"
+          "names": [
+            "chain_indexer.py",
+            "indexer.py"
+          ],
+          "path": "tests/test_regressions_swarm_02.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -5012,7 +7829,8 @@
             "tests/golden_set/deterministic_embedder.py",
             "tool_manifest.py"
           ],
-          "path": "tests/test_smoke_e2e.py"
+          "path": "tests/test_smoke_e2e.py",
+          "testFramework": "pytest"
         },
         {
           "exports": [
@@ -5023,13 +7841,20 @@
             "temp_sync_db"
           ],
           "hash": "f76bc0a4462e76bb5b460146a728466d277a83bc772f2a50f22ebb413e8d2132",
+          "importOrder": [
+            "sync_manager.py",
+            "config.py",
+            "backend_client_simple.py",
+            "indexer.py"
+          ],
           "importsFiles": [
             "backend_client_simple.py",
             "config.py",
             "indexer.py",
             "sync_manager.py"
           ],
-          "path": "tests/test_sync_manager.py"
+          "path": "tests/test_sync_manager.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "da93df40bfd5596b7ca8d339b6576e8bfe6bceb967a79ddbb17e24f0c9131af2",
@@ -5047,7 +7872,8 @@
           "importsFiles": [
             "ui.py"
           ],
-          "path": "tests/test_ui.py"
+          "path": "tests/test_ui.py",
+          "testFramework": "pytest"
         },
         {
           "hash": "3e643f24c1344da7d6a6667d7e57c954750470086839fd15a99f8cb482155fdb",
@@ -5074,6 +7900,15 @@
             "test_stdio_resources_require_connect"
           ],
           "hash": "0cbbe065327440a8786585b4b750afc66a41e16fac25b3d0adcca27ecc8a604f",
+          "importOrder": [
+            "indexer.py",
+            "embedder.py",
+            "tool_manifest.py",
+            "gateway.py",
+            "ui.py",
+            "config.py",
+            "backend_client_simple.py"
+          ],
           "importsFiles": [
             "backend_client_simple.py",
             "config.py",
@@ -5083,7 +7918,8 @@
             "tool_manifest.py",
             "ui.py"
           ],
-          "path": "tests/test_wave12_surfaces.py"
+          "path": "tests/test_wave12_surfaces.py",
+          "testFramework": "pytest"
         }
       ],
       "globs": [
@@ -5093,6 +7929,9 @@
       "name": "tests",
       "origin": "authored",
       "role": "test",
+      "testRunners": [
+        "pytest"
+      ],
       "testedBy": 0,
       "unresolvedSites": 0
     }
@@ -5102,94 +7941,170 @@
       "checksCount": 19,
       "commands": [
         {
+          "dir": "",
           "job": "lint",
-          "step": "Check for stale org/user URLs",
-          "text": "bash scripts/check-org-urls.sh"
+          "programs": [
+            "bash"
+          ],
+          "step": "Check for stale org/user URLs"
         },
         {
+          "dir": "",
           "job": "lint",
-          "step": "Verify SCORECARD is in sync",
-          "text": "if [ -f Makefile ] && grep -q \"^verify-scorecard:\" Makefile; then\n  make verify-scorecard\nelse\n  echo \"Makefile verify-scorecard target missing — skipping\"\nfi\n"
+          "programs": [
+            "echo",
+            "grep",
+            "make"
+          ],
+          "step": "Verify SCORECARD is in sync"
         },
         {
+          "dir": "",
           "job": "lint",
-          "step": "Verify metrics surface (Four Golden Signals)",
-          "text": "if [ -f Makefile ] && grep -q \"^verify-metrics:\" Makefile; then\n  python -m pip install --upgrade pip\n  pip install -r requirements.txt || true\n  make verify-metrics || true\nelse\n  echo \"Makefile verify-metrics target missing — skipping\"\nfi\n"
+          "programs": [
+            "echo",
+            "grep",
+            "make",
+            "pip",
+            "python"
+          ],
+          "step": "Verify metrics surface (Four Golden Signals)"
         },
         {
+          "dir": "",
           "job": "test",
-          "step": "Atlas check",
-          "text": "npx --yes @dogfood-lab/atlas@1.20.0 check"
+          "programs": [
+            "npx"
+          ],
+          "step": "Atlas check"
         },
         {
+          "dir": "",
           "job": "test",
-          "step": "Install dependencies",
-          "text": "python -m pip install --upgrade pip\npip install -r requirements.txt\npip install -r requirements-dev.txt\n"
+          "programs": [
+            "pip",
+            "python"
+          ],
+          "step": "Install dependencies"
         },
         {
+          "dir": "",
           "job": "test",
-          "step": "Run tests",
-          "text": "pytest -v --tb=short -m \"not integration\" \\\n  --junitxml=junit-${{ matrix.python-version }}-${{ matrix.os }}.xml\n"
+          "programs": [
+            "pytest"
+          ],
+          "step": "Run tests"
         },
         {
+          "dir": "",
           "job": "test",
-          "step": "Run tests with coverage",
-          "text": "pytest --cov=. --cov-report=xml --cov-report=term -m \"not integration\"\n"
+          "programs": [
+            "pytest"
+          ],
+          "step": "Run tests with coverage"
         },
         {
+          "dir": "",
           "job": "test",
-          "step": "Run pip-audit (report only)",
-          "text": "pip-audit -r requirements.txt --format json --output pip-audit-report.json || true\n"
+          "programs": [
+            "pip-audit"
+          ],
+          "step": "Run pip-audit (report only)"
         },
         {
+          "dir": "",
           "job": "test",
-          "step": "Audit dependencies for vulnerabilities",
-          "text": "pip-audit -r requirements.txt\n"
+          "programs": [
+            "pip-audit"
+          ],
+          "step": "Audit dependencies for vulnerabilities"
         },
         {
+          "dir": "npm",
           "job": "npm-wrapper",
-          "step": "Install and test npm wrapper",
-          "text": "npm install --no-audit --no-fund\nnpm test\n"
+          "programs": [
+            "npm"
+          ],
+          "step": "Install and test npm wrapper"
         },
         {
+          "dir": "",
           "job": "nightly-fuzz",
-          "step": "Install dependencies",
-          "text": "python -m pip install --upgrade pip\npip install -r requirements.txt\npip install -r requirements-dev.txt\n"
+          "programs": [
+            "pip",
+            "python"
+          ],
+          "step": "Install dependencies"
         },
         {
+          "dir": "",
           "job": "nightly-fuzz",
-          "step": "Run Hypothesis (nightly profile)",
-          "text": "HYPOTHESIS_PROFILE=nightly pytest -m \"not integration\"\n"
+          "programs": [
+            "pytest"
+          ],
+          "step": "Run Hypothesis (nightly profile)"
         },
         {
+          "dir": "",
           "job": "integration",
-          "step": "Install dependencies",
-          "text": "python -m pip install --upgrade pip\npip install -r requirements.txt\npip install -r requirements-dev.txt\n"
+          "programs": [
+            "pip",
+            "python"
+          ],
+          "step": "Install dependencies"
         },
         {
+          "dir": "",
           "job": "integration",
-          "step": "Install pinned Ollama",
-          "text": "set -euo pipefail\nOLLAMA_VERSION=\"v0.4.7\"\nBASE_URL=\"https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}\"\nTARBALL=\"ollama-linux-amd64.tgz\"\ncurl -fsSL \"${BASE_URL}/${TARBALL}\" -o \"${TARBALL}\"\nif curl -fsSL \"${BASE_URL}/${TARBALL}.sha256\" -o \"${TARBALL}.sha256\" 2>/dev/null; then\n  sha256sum -c \"${TARBALL}.sha256\"\nelse\n  echo \"::warning::Ollama ${OLLAMA_VERSION} release has no .sha256 file; proceeding without checksum verification (known upstream gap).\"\nfi\nsudo tar -C /usr/local -xzf \"${TARBALL}\"\nrm -f \"${TARBALL}\" \"${TARBALL}.sha256\"\nollama --version\nollama serve &\n# Wait for the daemon to accept connections instead of a blind sleep.\nfor _ in $(seq 1 30); do\n  if curl -sf http://localhost:11434/api/version > /dev/null; then\n    break\n  fi\n  sleep 1\ndone\nollama pull nomic-embed-text\n"
+          "programs": [
+            "curl",
+            "echo",
+            "ollama",
+            "rm",
+            "seq",
+            "sha256sum",
+            "sleep",
+            "sudo"
+          ],
+          "step": "Install pinned Ollama"
         },
         {
+          "dir": "",
           "job": "integration",
-          "step": "Run integration tests",
-          "text": "pytest -v -m integration\n"
+          "programs": [
+            "pytest"
+          ],
+          "step": "Run integration tests"
         },
         {
+          "dir": "",
           "job": "docker",
-          "step": "Smoke run",
-          "text": "set -euo pipefail\ndocker run -d --name tc-smoke -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}\ncleanup() { docker logs tc-smoke || true; docker rm -f tc-smoke || true; }\ntrap cleanup EXIT\nfor _ in $(seq 1 45); do\n  if [ \"${{ matrix.smoke }}\" = \"health\" ]; then\n    if curl -sf \"http://127.0.0.1:${{ matrix.port }}/health\"; then\n      echo \"gateway /health ok\"\n      exit 0\n    fi\n  else\n    # Bind smoke: any HTTP response (or even a reset after accept)\n    # means the UI process bound 7860. Do not use curl -f — Gradio\n    # may 4xx before the app is fully ready.\n    if curl -sS --connect-timeout 2 -o /dev/null \\\n         \"http://127.0.0.1:${{ matrix.port }}/\"; then\n      echo \"ui port ${{ matrix.port }} bound\"\n      exit 0\n    fi\n  fi\n  sleep 2\ndone\necho \"::error::docker smoke (${{ matrix.target }}) did not become ready on port ${{ matrix.port }}\"\nexit 1\n"
+          "programs": [
+            "cleanup",
+            "curl",
+            "docker",
+            "echo",
+            "seq",
+            "sleep",
+            "trap"
+          ],
+          "step": "Smoke run"
         },
         {
+          "dir": "site",
           "job": "pages-build",
-          "step": "Install site dependencies",
-          "text": "npm ci"
+          "programs": [
+            "npm"
+          ],
+          "step": "Install site dependencies"
         },
         {
+          "dir": "site",
           "job": "pages-build",
-          "step": "Build site",
-          "text": "npm run build"
+          "programs": [
+            "npm"
+          ],
+          "step": "Build site"
         }
       ],
       "elsewhere": [],
@@ -5211,6 +8126,253 @@
             ],
             "event": "push"
           }
+        }
+      ],
+      "jobs": [
+        {
+          "basis": "declared",
+          "name": "lint",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python (pre-commit)",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "test",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            },
+            {
+              "labels": [
+                "windows-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "os": "win32"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python ${{ matrix.python-version }}",
+              "uses": "actions/setup-python",
+              "version": "${{ matrix.python-version }}"
+            },
+            {
+              "ranges": [
+                {
+                  "from": "22",
+                  "range": ">=22.0.0 <23.0.0-0"
+                }
+              ],
+              "step": "Set up Node for Atlas",
+              "uses": "actions/setup-node",
+              "version": "22"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "codecov",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "npm-wrapper",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "22",
+                  "range": ">=22.0.0 <23.0.0-0"
+                }
+              ],
+              "step": "Setup Node",
+              "uses": "actions/setup-node",
+              "version": "22"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "nightly-fuzz",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "integration",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "docker",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "pages-build",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "22",
+                  "range": ">=22.0.0 <23.0.0-0"
+                }
+              ],
+              "step": "1",
+              "uses": "actions/setup-node",
+              "version": "22"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "environment": {
+            "name": "github-pages"
+          },
+          "name": "pages-deploy",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
         }
       ],
       "landings": [],
@@ -5271,7 +8433,7 @@
         {
           "boundary": "site",
           "depth": 0,
-          "files": 3
+          "files": 5
         },
         {
           "boundary": "tests",
@@ -5283,66 +8445,77 @@
       "runs": [
         {
           "job": "docker",
+          "packed": true,
           "path": "LICENSE",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "README.md",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "_version.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "analytics.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "backend_client_mcp.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "backend_client_simple.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "bootstrap.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "chain_indexer.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "cli.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "compass_config.example.json",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "config.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5355,6 +8528,7 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "embedder.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5367,12 +8541,14 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "indexer.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "llms.txt",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5386,12 +8562,14 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "pyproject.toml",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "requirements.txt",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5447,6 +8625,7 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "sync_manager.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5467,10 +8646,8 @@
           "runKind": "executes",
           "via": "pytest pyproject.toml",
           "when": {
-            "except": [
-              "pull_request",
-              "push"
-            ]
+            "byHand": true,
+            "event": "schedule"
           }
         },
         {
@@ -5483,12 +8660,14 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "tool_manifest.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "ui.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5507,6 +8686,49 @@
         "releases": false
       },
       "stages": [],
+      "tests": [
+        {
+          "config": "pyproject.toml",
+          "files": 32,
+          "job": "test",
+          "junit": true,
+          "runner": "pytest",
+          "step": "Run tests"
+        },
+        {
+          "config": "pyproject.toml",
+          "coverage": true,
+          "files": 32,
+          "job": "test",
+          "junit": true,
+          "runner": "pytest",
+          "step": "Run tests with coverage"
+        },
+        {
+          "dir": "npm",
+          "files": 1,
+          "job": "npm-wrapper",
+          "runner": "node --test",
+          "step": "Install and test npm wrapper",
+          "through": [
+            "npm test (npm)"
+          ]
+        },
+        {
+          "config": "pyproject.toml",
+          "files": 32,
+          "job": "nightly-fuzz",
+          "runner": "pytest",
+          "step": "Run Hypothesis (nightly profile)"
+        },
+        {
+          "config": "pyproject.toml",
+          "files": 32,
+          "job": "integration",
+          "runner": "pytest",
+          "step": "Run integration tests"
+        }
+      ],
       "triggers": [
         {
           "branches": [
@@ -5521,6 +8743,7 @@
             "Dockerfile",
             "Makefile",
             "atlas/**",
+            "codecov.yml",
             "docker-compose.yml",
             "fly.toml",
             "npm/**",
@@ -5544,6 +8767,7 @@
             "Dockerfile",
             "Makefile",
             "atlas/**",
+            "codecov.yml",
             "docker-compose.yml",
             "fly.toml",
             "npm/**",
@@ -5566,6 +8790,7 @@
         "actions/checkout",
         "actions/configure-pages",
         "actions/deploy-pages",
+        "actions/download-artifact",
         "actions/github-script",
         "actions/setup-node",
         "actions/setup-python",
@@ -5582,43 +8807,170 @@
       "checksCount": 18,
       "commands": [
         {
+          "dir": "",
           "job": "build",
-          "step": "Install build tools",
-          "text": "python -m pip install --upgrade pip\npip install build twine\n"
+          "programs": [
+            "pip",
+            "python"
+          ],
+          "step": "Install build tools"
         },
         {
+          "dir": "",
           "job": "build",
-          "step": "Build package",
-          "text": "python -m build"
+          "programs": [
+            "python"
+          ],
+          "step": "Build package"
         },
         {
+          "dir": "",
           "job": "build",
-          "step": "Check package with twine",
-          "text": "twine check dist/*"
+          "programs": [
+            "twine"
+          ],
+          "step": "Check package with twine"
         },
         {
+          "dir": "",
           "job": "docker",
-          "step": "Resolve release version",
-          "text": "set -euo pipefail\nREF=\"${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref_name }}\"\nV=\"${REF#v}\"\necho \"version=${V}\" >> \"$GITHUB_OUTPUT\"\necho \"major_minor=$(echo \"$V\" | cut -d. -f1-2)\" >> \"$GITHUB_OUTPUT\"\necho \"resolved=${V} (event=${{ github.event_name }} ref=${REF} stage=${{ matrix.stage }})\"\n"
+          "programs": [
+            "cut",
+            "echo"
+          ],
+          "step": "Resolve release version"
         },
         {
+          "dir": "",
           "job": "release-smoke",
-          "step": "Derive version (strip leading v)",
-          "text": "set -euo pipefail\n# Resolve the tag across all trigger types. Under workflow_run\n# github.event.release.tag_name is null and github.ref is main —\n# workflow_run.head_branch carries the tag ref (e.g. v2.4.0).\nTAG=\"${{ github.event.workflow_run.head_branch || github.event.release.tag_name || github.ref_name }}\"\necho \"tag=${TAG}\" >> \"$GITHUB_OUTPUT\"\necho \"version=${TAG#v}\" >> \"$GITHUB_OUTPUT\"\n"
+          "programs": [
+            "echo"
+          ],
+          "step": "Derive version (strip leading v)"
         },
         {
+          "dir": "",
           "job": "release-smoke",
-          "step": "PyPI smoke — install + --version matches tag",
-          "text": "set -euo pipefail\nVERSION=\"${{ steps.ver.outputs.version }}\"\n# PyPI propagation is fast but not instant; retry briefly. If no\n# iteration succeeds the loop falls through and the subsequent\n# `tool-compass --version` invocation fails with a clear \"command\n# not found\", which is the desired loud failure mode (CT-B-014).\ninstall_ok=0\nfor _ in $(seq 1 12); do\n  if pip install \"tool-compass==${VERSION}\"; then\n    install_ok=1\n    break\n  fi\n  sleep 10\ndone\nif [ \"$install_ok\" -ne 1 ]; then\n  echo \"::error::PyPI smoke failed: tool-compass==${VERSION} did not become installable in the propagation window\"\n  exit 1\nfi\nOUT=\"$(tool-compass --version 2>&1 || true)\"\necho \"tool-compass --version → $OUT\"\necho \"$OUT\" | grep -Fq \"${VERSION}\" || {\n  echo \"::error::PyPI smoke failed: --version output did not contain ${VERSION}\"\n  exit 1\n}\n"
+          "programs": [
+            "1",
+            "echo",
+            "grep",
+            "pip",
+            "seq",
+            "sleep",
+            "tool-compass"
+          ],
+          "step": "PyPI smoke — install + --version matches tag"
         },
         {
+          "dir": "",
           "job": "release-smoke",
-          "step": "Docker smoke — pull gateway + UI, --version matches tag",
-          "text": "set -euo pipefail\nTAG=\"${{ steps.ver.outputs.tag }}\"\nVERSION=\"${{ steps.ver.outputs.version }}\"\nGATEWAY=\"${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}\"\nUI=\"${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:ui-${VERSION}\"\ndocker pull \"$GATEWAY\"\ndocker pull \"$UI\"\nOUT=\"$(docker run --rm --entrypoint tool-compass \"$GATEWAY\" --version 2>&1 || true)\"\necho \"docker gateway --version → $OUT\"\necho \"$OUT\" | grep -Fq \"${VERSION}\" || {\n  echo \"::error::Docker gateway smoke failed: --version output did not contain ${VERSION}\"\n  exit 1\n}\nOUT_UI=\"$(docker run --rm --entrypoint tool-compass \"$UI\" --version 2>&1 || true)\"\necho \"docker ui --version → $OUT_UI\"\necho \"$OUT_UI\" | grep -Fq \"${VERSION}\" || {\n  echo \"::error::Docker UI smoke failed: --version output did not contain ${VERSION}\"\n  exit 1\n}\n"
+          "programs": [
+            "1",
+            "docker",
+            "echo",
+            "grep"
+          ],
+          "step": "Docker smoke — pull gateway + UI, --version matches tag"
         }
       ],
       "elsewhere": [],
       "file": ".github/workflows/publish.yml",
+      "jobs": [
+        {
+          "basis": "declared",
+          "name": "build",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "environment": {
+            "name": "pypi"
+          },
+          "name": "publish-pypi",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "docker",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "release-smoke",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        }
+      ],
       "landings": [],
       "mentions": [],
       "name": "Publish",
@@ -5641,54 +8993,63 @@
       "runs": [
         {
           "job": "docker",
+          "packed": true,
           "path": "LICENSE",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "README.md",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "_version.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "analytics.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "backend_client_mcp.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "backend_client_simple.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "bootstrap.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "chain_indexer.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "cli.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5700,12 +9061,14 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "compass_config.example.json",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "config.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5718,6 +9081,7 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "embedder.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5730,42 +9094,49 @@
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "indexer.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "llms.txt",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "pyproject.toml",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "requirements.txt",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "sync_manager.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "tool_manifest.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
         },
         {
           "job": "docker",
+          "packed": true,
           "path": "ui.py",
           "runKind": "checks",
           "via": "docker build Dockerfile"
@@ -5827,40 +9198,120 @@
       "checksCount": 0,
       "commands": [
         {
+          "dir": "",
           "job": "build",
-          "step": "Install package[ui] + PyInstaller",
-          "text": "python -m pip install --upgrade pip\n# [ui] pulls Gradio. A core-only `pip install .` freezes a binary\n# that cannot serve `tool-compass ui` (the npx zero-prerequisite path).\npip install \".[ui]\" \"pyinstaller>=6.9.0\"\npython -c \"import ui, gradio\"\n"
+          "programs": [
+            "pip",
+            "python"
+          ],
+          "step": "Install package[ui] + PyInstaller"
         },
         {
+          "dir": "",
           "job": "build",
-          "step": "Resolve version",
-          "text": "TAG=\"${{ inputs.tag || github.event.release.tag_name }}\"\nVERSION=\"${TAG#v}\"\necho \"version=${VERSION}\" >> \"$GITHUB_OUTPUT\"\necho \"tag=${TAG}\" >> \"$GITHUB_OUTPUT\"\n"
+          "programs": [
+            "echo"
+          ],
+          "step": "Resolve version"
         },
         {
+          "dir": "",
           "job": "build",
-          "step": "Build single-file binary",
-          "text": "VERSION=\"${{ steps.version.outputs.version }}\"\n# --collect-submodules covers dynamic imports MCP / Gradio / Rich pull in.\n# --hidden-import ui: cli._cmd_ui imports ui inside try/except ImportError,\n# which PyInstaller treats as optional and would drop from the freeze.\n# --console keeps stdout/stderr behavior identical to `python cli.py`.\npyinstaller --onefile \\\n  --name \"${{ env.TOOL_NAME }}\" \\\n  --console \\\n  --collect-submodules mcp.client \\\n  --collect-submodules mcp.server \\\n  --collect-submodules mcp.types \\\n  --collect-submodules mcp.shared \\\n  --exclude-module mcp.cli \\\n  --exclude-module typer \\\n  --collect-submodules hnswlib \\\n  --collect-submodules numpy \\\n  --collect-submodules httpx \\\n  --hidden-import ui \\\n  --collect-submodules gradio \\\n  \"${{ env.ENTRYPOINT }}\"\nOUTNAME=\"${{ env.TOOL_NAME }}-${VERSION}-${{ matrix.target }}${{ matrix.ext }}\"\nmv \"dist/${{ env.TOOL_NAME }}${{ matrix.ext }}\" \"dist/${OUTNAME}\"\necho \"Built: dist/${OUTNAME}\"\nls -la \"dist/${OUTNAME}\"\n"
+          "programs": [
+            "echo",
+            "ls",
+            "mv",
+            "pyinstaller"
+          ],
+          "step": "Build single-file binary"
         },
         {
+          "dir": "",
           "job": "build",
-          "step": "Smoke test binary",
-          "text": "VERSION=\"${{ steps.version.outputs.version }}\"\nBIN=\"dist/${{ env.TOOL_NAME }}-${VERSION}-${{ matrix.target }}${{ matrix.ext }}\"\n# --version is wired on the root parser as of v2.2.1 (a942a67).\n\"$BIN\" --version\n\"$BIN\" --help\n# Zero-prerequisite `npx … ui` path. argparse prints this without\n# importing ui.py; the freeze still needs [ui] + --hidden-import ui\n# + --collect-submodules gradio or the launched binary cannot serve.\n\"$BIN\" ui --help\n"
+          "programs": [],
+          "step": "Smoke test binary"
         },
         {
+          "dir": "",
           "job": "attach",
-          "step": "Generate checksums",
-          "text": "TAG=\"${{ inputs.tag || github.event.release.tag_name }}\"\nVERSION=\"${TAG#v}\"\ncd artifacts\nsha256sum * > \"checksums-${VERSION}.txt\"\necho \"--- checksums-${VERSION}.txt ---\"\ncat \"checksums-${VERSION}.txt\"\n"
+          "programs": [
+            "cat",
+            "cd",
+            "echo",
+            "sha256sum"
+          ],
+          "step": "Generate checksums"
         }
       ],
       "elsewhere": [],
       "file": ".github/workflows/release-binaries.yml",
-      "landings": [],
-      "mentions": [
+      "jobs": [
         {
-          "job": "build",
-          "path": "ui.py"
+          "basis": "declared",
+          "name": "build",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            },
+            {
+              "labels": [
+                "macos-latest"
+              ],
+              "platform": {
+                "cpu": "arm64",
+                "os": "darwin"
+              }
+            },
+            {
+              "labels": [
+                "windows-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "os": "win32"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "attach",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
         }
       ],
+      "landings": [],
+      "mentions": [],
       "name": "Release Binaries",
       "permissions": [
         "attestations:write",
@@ -5883,9 +9334,14 @@
           "job": "build",
           "path": "cli.py",
           "runKind": "executes"
+        },
+        {
+          "job": "build",
+          "path": "ui.py",
+          "runKind": "executes"
         }
       ],
-      "runsCount": 1,
+      "runsCount": 2,
       "secrets": [],
       "sends": {
         "assets": [
@@ -5903,6 +9359,13 @@
         "releases": true
       },
       "stages": [],
+      "tests": [
+        {
+          "job": "build",
+          "runner": null,
+          "step": "Smoke test binary"
+        }
+      ],
       "triggers": [
         {
           "event": "release",
@@ -5931,63 +9394,306 @@
       "checksCount": 0,
       "commands": [
         {
+          "dir": "",
           "job": "verify",
-          "step": "Verify tag matches npm/package.json version",
-          "text": "PKG_VERSION=$(node -p \"require('./npm/package.json').version\")\nTAG_VERSION=\"${GITHUB_REF_NAME#v}\"\necho \"Tag: ${GITHUB_REF_NAME} → ${TAG_VERSION}\"\necho \"npm/package.json: ${PKG_VERSION}\"\nif [ \"${PKG_VERSION}\" != \"${TAG_VERSION}\" ]; then\n  echo \"::error::Tag ${TAG_VERSION} does not match npm/package.json version ${PKG_VERSION}\"\n  exit 1\nfi\n"
+          "programs": [
+            "echo",
+            "node"
+          ],
+          "step": "Verify tag matches npm/package.json version"
         },
         {
+          "dir": "",
           "job": "verify",
-          "step": "Verify tag matches pyproject.toml version",
-          "text": "PY_VERSION=$(python3 -c \"import tomllib; print(tomllib.loads(open('pyproject.toml').read())['project']['version'])\")\nTAG_VERSION=\"${GITHUB_REF_NAME#v}\"\necho \"pyproject.toml: ${PY_VERSION}\"\nif [ \"${PY_VERSION}\" != \"${TAG_VERSION}\" ]; then\n  echo \"::error::Tag ${TAG_VERSION} does not match pyproject.toml version ${PY_VERSION}\"\n  exit 1\nfi\n"
+          "programs": [
+            "echo",
+            "python3"
+          ],
+          "step": "Verify tag matches pyproject.toml version"
         },
         {
+          "dir": "",
           "job": "verify",
-          "step": "Verify npm/bin/tool-compass.js references the tag",
-          "text": "if ! grep -Fq \"${GITHUB_REF_NAME}\" npm/bin/tool-compass.js; then\n  echo \"::error::npm/bin/tool-compass.js does not reference ${GITHUB_REF_NAME} — run scripts/sync-version.mjs before tagging\"\n  exit 1\nfi\necho \"npm/bin/tool-compass.js references ${GITHUB_REF_NAME} ✓\"\n"
+          "programs": [
+            "echo",
+            "grep"
+          ],
+          "step": "Verify npm/bin/tool-compass.js references the tag"
         },
         {
+          "dir": "npm",
           "job": "verify",
-          "step": "Install npm wrapper dependencies",
-          "text": "npm install --no-audit --no-fund"
+          "programs": [
+            "npm"
+          ],
+          "step": "Install npm wrapper dependencies"
         },
         {
+          "dir": "npm",
           "job": "verify",
-          "step": "npm pack dry-run (verify shape)",
-          "text": "npm pack --dry-run"
+          "programs": [
+            "npm"
+          ],
+          "step": "npm pack dry-run (verify shape)"
         },
         {
+          "dir": "",
           "job": "create-release",
-          "step": "Create GitHub Release (idempotent)",
-          "text": "# Extract the [<version>] section from CHANGELOG.md as the release\n# notes. Falls back to the tag name if the section is missing/empty.\nVERSION=\"${GITHUB_REF_NAME#v}\"\nNOTES_FILE=\"$(mktemp)\"\nawk -v ver=\"${VERSION}\" '\n  $0 ~ \"^## \\\\[\" ver \"\\\\]\" {capture=1; next}\n  capture && /^## \\[/ {exit}\n  capture {print}\n' CHANGELOG.md > \"${NOTES_FILE}\"\n\nif [ ! -s \"${NOTES_FILE}\" ]; then\n  echo \"Tool Compass ${GITHUB_REF_NAME}\" > \"${NOTES_FILE}\"\n  echo \"\" >> \"${NOTES_FILE}\"\n  echo \"See CHANGELOG.md for details.\" >> \"${NOTES_FILE}\"\nfi\n\n# Create the release only if it doesn't already exist. Binaries attach\n# next; npm publish waits until those assets exist. Skipping when it\n# exists makes the step idempotent on workflow_dispatch re-runs /\n# second tag pushes (no HTTP 422 \"tag_name already exists\").\nif gh release view \"${GITHUB_REF_NAME}\" >/dev/null 2>&1; then\n  echo \"Release ${GITHUB_REF_NAME} already exists; skipping create.\"\nelse\n  gh release create \"${GITHUB_REF_NAME}\" \\\n    --title \"Tool Compass ${GITHUB_REF_NAME}\" \\\n    --notes-file \"${NOTES_FILE}\" \\\n    --verify-tag\nfi\n"
+          "programs": [
+            "1",
+            "awk",
+            "echo",
+            "gh",
+            "mktemp"
+          ],
+          "step": "Create GitHub Release (idempotent)"
         },
         {
-          "job": "publish-npm",
-          "step": "Install npm 11.5.2 in sandbox for OIDC trusted-publishing auth",
-          "text": "# Node 22 ships npm 10.9, which signs Sigstore provenance fine but\n# cannot negotiate the OIDC auth path for trusted publishing — the\n# PUT returns a misleading 404 \"not in this registry\". npm 11.5+ is\n# required. Pin an exact 11.5.x — never @latest — so a compromised\n# or unexpected latest tarball cannot inherit this job's OIDC identity.\n# Bump via PR / manual review (sandbox is not a Dependabot ecosystem).\n#\n# An in-place `npm install -g npm@latest` races on Node 22's bundled\n# npm 10.9 arborist rebuild and breaks irrecoverably (MODULE_NOT_FOUND:\n# promise-retry). Sandbox install + PATH shadow avoids the race.\nSANDBOX=\"$HOME/.npm-cli-sandbox\"\nmkdir -p \"$SANDBOX\"\npushd \"$SANDBOX\" >/dev/null\necho '{\"name\":\"npm-cli-sandbox\",\"version\":\"0.0.0\",\"private\":true}' > package.json\nnpm install --no-save --no-audit --no-fund --silent npm@11.5.2\npopd >/dev/null\necho \"$SANDBOX/node_modules/.bin\" >> \"$GITHUB_PATH\"\nINSTALLED=\"$(\"$SANDBOX/node_modules/.bin/npm\" --version)\"\necho \"sandboxed npm ${INSTALLED}\"\nif [ \"$INSTALLED\" != \"11.5.2\" ]; then\n  echo \"::error::sandboxed npm is ${INSTALLED}, expected 11.5.2 (do not float @latest)\"\n  exit 1\nfi\n"
+          "dir": "",
+          "job": "binaries/build",
+          "programs": [
+            "pip",
+            "python"
+          ],
+          "step": "Install package[ui] + PyInstaller"
         },
         {
-          "job": "publish-npm",
-          "step": "Verify GitHub Release binaries and checksums exist",
-          "text": "set -euo pipefail\nTAG=\"${GITHUB_REF_NAME}\"\nVERSION=\"${TAG#v}\"\necho \"Checking Release ${TAG} assets before npm publish...\"\nASSETS=\"$(gh release view \"${TAG}\" --json assets --jq '.assets[].name')\"\necho \"${ASSETS}\"\nmissing=0\nfor f in \\\n  \"tool-compass-${VERSION}-linux-x64\" \\\n  \"tool-compass-${VERSION}-darwin-arm64\" \\\n  \"tool-compass-${VERSION}-win-x64.exe\" \\\n  \"checksums-${VERSION}.txt\"\ndo\n  if ! printf '%s\\n' \"${ASSETS}\" | grep -Fxq \"${f}\"; then\n    echo \"::error::GitHub Release ${TAG} is missing asset ${f} — refusing npm publish\"\n    missing=1\n  fi\ndone\nif [ \"${missing}\" -ne 0 ]; then\n  echo \"::error::npx @mcptoolshop/tool-compass would be unable to fetch/verify a binary. Fix Release assets, then re-run.\"\n  exit 1\nfi\necho \"All required Release assets present; npm publish may proceed.\"\n"
+          "dir": "",
+          "job": "binaries/build",
+          "programs": [
+            "echo"
+          ],
+          "step": "Resolve version"
         },
         {
-          "job": "publish-npm",
-          "step": "Install npm wrapper dependencies",
-          "text": "npm install --no-audit --no-fund"
+          "dir": "",
+          "job": "binaries/build",
+          "programs": [
+            "echo",
+            "ls",
+            "mv",
+            "pyinstaller"
+          ],
+          "step": "Build single-file binary"
         },
         {
+          "dir": "",
+          "job": "binaries/build",
+          "programs": [],
+          "step": "Smoke test binary"
+        },
+        {
+          "dir": "",
+          "job": "binaries/attach",
+          "programs": [
+            "cat",
+            "cd",
+            "echo",
+            "sha256sum"
+          ],
+          "step": "Generate checksums"
+        },
+        {
+          "dir": "",
           "job": "publish-npm",
-          "step": "Publish to npm with provenance (OIDC trusted publisher)",
-          "text": "npm publish --provenance --access public"
+          "programs": [
+            "echo",
+            "mkdir",
+            "npm",
+            "popd",
+            "pushd"
+          ],
+          "step": "Install npm 11.5.2 in sandbox for OIDC trusted-publishing auth"
+        },
+        {
+          "dir": "",
+          "job": "publish-npm",
+          "programs": [
+            "echo",
+            "gh",
+            "grep",
+            "printf"
+          ],
+          "step": "Verify GitHub Release binaries and checksums exist"
+        },
+        {
+          "dir": "npm",
+          "job": "publish-npm",
+          "programs": [
+            "npm"
+          ],
+          "step": "Install npm wrapper dependencies"
+        },
+        {
+          "dir": "npm",
+          "job": "publish-npm",
+          "programs": [
+            "npm"
+          ],
+          "step": "Publish to npm with provenance (OIDC trusted publisher)"
         }
       ],
       "elsewhere": [],
       "file": ".github/workflows/release.yml",
+      "jobs": [
+        {
+          "basis": "declared",
+          "name": "verify",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "22",
+                  "range": ">=22.0.0 <23.0.0-0"
+                }
+              ],
+              "step": "Setup Node",
+              "uses": "actions/setup-node",
+              "version": "22"
+            },
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Setup Python for pyproject version check",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "create-release",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "binaries/build",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            },
+            {
+              "labels": [
+                "macos-latest"
+              ],
+              "platform": {
+                "cpu": "arm64",
+                "os": "darwin"
+              }
+            },
+            {
+              "labels": [
+                "windows-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "os": "win32"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "3.12",
+                  "range": ">=3.12.0 <3.13.0-0"
+                }
+              ],
+              "step": "Set up Python",
+              "uses": "actions/setup-python",
+              "version": "3.12"
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "binaries/attach",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ]
+        },
+        {
+          "basis": "declared",
+          "name": "publish-npm",
+          "runsOn": [
+            {
+              "labels": [
+                "ubuntu-latest"
+              ],
+              "platform": {
+                "cpu": "x64",
+                "libc": "glibc",
+                "os": "linux"
+              }
+            }
+          ],
+          "setup": [
+            {
+              "ranges": [
+                {
+                  "from": "22",
+                  "range": ">=22.0.0 <23.0.0-0"
+                }
+              ],
+              "step": "Setup Node",
+              "uses": "actions/setup-node",
+              "version": "22"
+            }
+          ]
+        }
+      ],
       "landings": [],
       "mentions": [
         {
           "job": "create-release",
           "path": "CHANGELOG.md"
+        },
+        {
+          "job": "binaries/build",
+          "path": "cli.py"
         },
         {
           "job": "verify",
@@ -6008,21 +9714,35 @@
       ],
       "name": "Release",
       "permissions": [
-        "actions:read",
         "attestations:write",
         "contents:read",
         "contents:write",
         "id-token:write"
       ],
       "pushes": false,
-      "reach": [],
+      "reach": [
+        {
+          "boundary": "root",
+          "depth": 0,
+          "files": 11
+        }
+      ],
       "readers": [],
-      "runs": [],
-      "runsCount": 0,
+      "runs": [
+        {
+          "job": "binaries/build",
+          "path": "ui.py",
+          "runKind": "executes"
+        }
+      ],
+      "runsCount": 1,
       "secrets": [
         "GITHUB_TOKEN"
       ],
       "sends": {
+        "assets": [
+          "file:artifacts/*"
+        ],
         "deploysPages": false,
         "dispatchesTo": [],
         "opensIssues": false,
@@ -6042,6 +9762,16 @@
         "releases": true
       },
       "stages": [],
+      "tests": [
+        {
+          "job": "binaries/build",
+          "runner": null,
+          "step": "Smoke test binary",
+          "through": [
+            ".github/workflows/release-binaries.yml"
+          ]
+        }
+      ],
       "triggers": [
         {
           "event": "push",
@@ -6054,11 +9784,57 @@
         }
       ],
       "uses": [
+        "actions/attest-build-provenance",
         "actions/checkout",
+        "actions/download-artifact",
         "actions/setup-node",
-        "actions/setup-python"
+        "actions/setup-python",
+        "actions/upload-artifact",
+        "softprops/action-gh-release"
       ],
       "usesWorkflowToken": true
+    },
+    {
+      "checksCount": 0,
+      "commands": [],
+      "elsewhere": [],
+      "file": "npm/package.json",
+      "kind": "command",
+      "landings": [],
+      "mentions": [],
+      "name": "tool-compass",
+      "permissions": [],
+      "pushes": false,
+      "reach": [
+        {
+          "boundary": "npm",
+          "depth": 0,
+          "files": 1
+        }
+      ],
+      "readers": [],
+      "runs": [
+        {
+          "path": "npm/bin/tool-compass.js",
+          "runKind": "executes"
+        }
+      ],
+      "runsCount": 1,
+      "secrets": [],
+      "sends": {
+        "deploysPages": false,
+        "dispatchesTo": [],
+        "opensIssues": false,
+        "opensIssuesOnFailure": false,
+        "opensPullRequests": false,
+        "publishes": false,
+        "publishesTo": [],
+        "releases": false
+      },
+      "stages": [],
+      "triggers": [],
+      "uses": [],
+      "usesWorkflowToken": false
     },
     {
       "checksCount": 0,
@@ -6153,15 +9929,17 @@
       "to": "root"
     }
   ],
+  "engine": "1.24.0",
   "generatedFrom": {
-    "commit": "6f5a2339b184abe7a06e9092d79ce97ff40b7f05",
-    "tracked": 119
+    "commit": "9bf87fdbda5d5dbdec736ec5bed35879ec966e21",
+    "tracked": 120
   },
   "landings": [
     {
       "readers": [
         {
-          "by": ".github/workflows/release.yml"
+          "by": ".github/workflows/release.yml",
+          "confidence": "config"
         },
         {
           "by": "tests/test_version.py",
@@ -6192,7 +9970,8 @@
     {
       "readers": [
         {
-          "by": ".github/workflows/ci.yml"
+          "by": ".github/workflows/ci.yml",
+          "confidence": "config"
         },
         {
           "by": "scripts/check-org-urls.sh",
@@ -6383,6 +10162,10 @@
     {
       "readers": [
         {
+          "by": ".github/workflows/release.yml",
+          "confidence": "config"
+        },
+        {
           "by": "pyproject.toml",
           "call": "configuration",
           "confidence": "config"
@@ -6566,7 +10349,8 @@
     {
       "readers": [
         {
-          "by": ".github/workflows/release.yml"
+          "by": ".github/workflows/release.yml",
+          "confidence": "config"
         },
         {
           "by": "npm/test/smoke.test.js",
@@ -6598,7 +10382,8 @@
     {
       "readers": [
         {
-          "by": ".github/workflows/release.yml"
+          "by": ".github/workflows/release.yml",
+          "confidence": "config"
         },
         {
           "by": "scripts/sync-version.mjs",
@@ -6618,7 +10403,8 @@
     {
       "readers": [
         {
-          "by": ".github/workflows/release.yml"
+          "by": ".github/workflows/release.yml",
+          "confidence": "config"
         },
         {
           "by": "_version.py",
@@ -6644,7 +10430,8 @@
     {
       "readers": [
         {
-          "by": ".github/workflows/ci.yml"
+          "by": ".github/workflows/ci.yml",
+          "confidence": "config"
         }
       ],
       "target": "requirements-dev.txt",
@@ -6653,7 +10440,8 @@
     {
       "readers": [
         {
-          "by": ".github/workflows/ci.yml"
+          "by": ".github/workflows/ci.yml",
+          "confidence": "config"
         }
       ],
       "target": "requirements.txt",
@@ -6662,7 +10450,8 @@
     {
       "readers": [
         {
-          "by": ".github/workflows/release.yml"
+          "by": ".github/workflows/release.yml",
+          "confidence": "config"
         }
       ],
       "target": "scripts/sync-version.mjs",
@@ -6742,9 +10531,6 @@
     },
     {
       "readers": [
-        {
-          "by": ".github/workflows/release-binaries.yml"
-        },
         {
           "by": "pyproject.toml",
           "call": "configuration",
