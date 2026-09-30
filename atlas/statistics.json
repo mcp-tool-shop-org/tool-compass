@@ -131,7 +131,7 @@
       "confidence": "low",
       "highWater": null,
       "name": "tests",
-      "qualifyingSourceCommits": 15,
+      "qualifyingSourceCommits": 14,
       "rebaseline": null
     }
   ],
@@ -159,18 +159,18 @@
         "path": ".github/dependabot.yml"
       },
       {
-        "commits": 16,
-        "lines": 753,
+        "commits": 17,
+        "lines": 940,
         "path": ".github/workflows/ci.yml"
       },
       {
-        "commits": 8,
-        "lines": 80,
+        "commits": 5,
+        "lines": 58,
         "path": ".github/workflows/pages.yml"
       },
       {
-        "commits": 16,
-        "lines": 460,
+        "commits": 13,
+        "lines": 416,
         "path": ".github/workflows/publish.yml"
       },
       {
@@ -199,8 +199,8 @@
         "path": "AUDIT_REPORT.md"
       },
       {
-        "commits": 13,
-        "lines": 519,
+        "commits": 11,
+        "lines": 503,
         "path": "CHANGELOG.md"
       },
       {
@@ -219,8 +219,8 @@
         "path": "Makefile"
       },
       {
-        "commits": 10,
-        "lines": 772,
+        "commits": 9,
+        "lines": 600,
         "path": "README.es.md"
       },
       {
@@ -239,8 +239,8 @@
         "path": "README.it.md"
       },
       {
-        "commits": 10,
-        "lines": 905,
+        "commits": 9,
+        "lines": 727,
         "path": "README.ja.md"
       },
       {
@@ -254,8 +254,8 @@
         "path": "README.pt-BR.md"
       },
       {
-        "commits": 10,
-        "lines": 908,
+        "commits": 9,
+        "lines": 763,
         "path": "README.zh.md"
       },
       {
@@ -294,6 +294,31 @@
         "path": "assets/logo.png"
       },
       {
+        "commits": 1,
+        "lines": 104,
+        "path": "atlas/README.md"
+      },
+      {
+        "commits": 1,
+        "lines": 34,
+        "path": "atlas/boundaries.yaml"
+      },
+      {
+        "commits": 1,
+        "lines": 470,
+        "path": "atlas/page.json"
+      },
+      {
+        "commits": 1,
+        "lines": 772,
+        "path": "atlas/statistics.json"
+      },
+      {
+        "commits": 1,
+        "lines": 6778,
+        "path": "atlas/structure.json"
+      },
+      {
         "commits": 7,
         "lines": 886,
         "path": "backend_client_mcp.py"
@@ -317,6 +342,11 @@
         "commits": 11,
         "lines": 3326,
         "path": "cli.py"
+      },
+      {
+        "commits": 2,
+        "lines": 36,
+        "path": "codecov.yml"
       },
       {
         "commits": 1,
@@ -424,8 +454,8 @@
         "path": "npm/test/smoke.test.js"
       },
       {
-        "commits": 15,
-        "lines": 162,
+        "commits": 13,
+        "lines": 158,
         "path": "pyproject.toml"
       },
       {
@@ -464,28 +494,23 @@
         "path": "scripts/verify-metrics.sh"
       },
       {
-        "commits": 2,
-        "lines": 57,
+        "commits": 1,
+        "lines": 34,
         "path": "site/astro.config.mjs"
       },
       {
-        "commits": 19,
-        "lines": 8850,
+        "commits": 13,
+        "lines": 7011,
         "path": "site/package-lock.json"
       },
       {
-        "commits": 6,
-        "lines": 31,
+        "commits": 4,
+        "lines": 28,
         "path": "site/package.json"
       },
       {
-        "commits": 1,
-        "lines": 7,
-        "path": "site/src/content.config.ts"
-      },
-      {
-        "commits": 5,
-        "lines": 241,
+        "commits": 4,
+        "lines": 178,
         "path": "site/src/content/docs/handbook/architecture.md"
       },
       {
@@ -494,18 +519,18 @@
         "path": "site/src/content/docs/handbook/beginners.md"
       },
       {
-        "commits": 6,
-        "lines": 211,
+        "commits": 5,
+        "lines": 138,
         "path": "site/src/content/docs/handbook/configuration.md"
       },
       {
-        "commits": 5,
-        "lines": 354,
+        "commits": 4,
+        "lines": 277,
         "path": "site/src/content/docs/handbook/getting-started.md"
       },
       {
-        "commits": 7,
-        "lines": 80,
+        "commits": 6,
+        "lines": 63,
         "path": "site/src/content/docs/handbook/index.md"
       },
       {
@@ -514,18 +539,18 @@
         "path": "site/src/content/docs/handbook/operations.md"
       },
       {
-        "commits": 4,
-        "lines": 154,
+        "commits": 3,
+        "lines": 80,
         "path": "site/src/content/docs/handbook/tools.md"
       },
       {
-        "commits": 6,
-        "lines": 149,
+        "commits": 5,
+        "lines": 147,
         "path": "site/src/site-config.ts"
       },
       {
-        "commits": 2,
-        "lines": 29,
+        "commits": 1,
+        "lines": 12,
         "path": "site/src/styles/starlight-custom.css"
       },
       {
@@ -684,8 +709,8 @@
         "path": "tests/test_ui.py"
       },
       {
-        "commits": 4,
-        "lines": 177,
+        "commits": 2,
+        "lines": 35,
         "path": "tests/test_version.py"
       },
       {
@@ -707,30 +732,23 @@
   },
   "confidence": {
     "level": "low",
-    "reason": "fewer than 20 source files reach 10 revisions in the window"
+    "reason": "fewer than 25 source files reach 10 revisions in the window"
   },
-  "generatedAt": "2026-09-25T02:34:04.334Z",
+  "generatedAt": "2026-09-30T20:14:07.868Z",
   "generatedFrom": {
-    "commit": "6f5a2339b184abe7a06e9092d79ce97ff40b7f05"
+    "commit": "9bf87fdbda5d5dbdec736ec5bed35879ec966e21"
   },
   "pairs": [
     {
       "a": ".github/workflows/ci.yml",
       "b": ".github/workflows/publish.yml",
-      "either": 9,
-      "shared": 6,
-      "strength": 0.666667
-    },
-    {
-      "a": "CHANGELOG.md",
-      "b": "pyproject.toml",
       "either": 10,
       "shared": 5,
       "strength": 0.5
     }
   ],
   "parameters": {
-    "appliedChangesetLimit": 29.75,
+    "appliedChangesetLimit": 31.25,
     "changeset": 50,
     "changesetFraction": 0.25,
     "cohesionDrop": 0.2,
@@ -739,16 +757,16 @@
     "floor": "fallen",
     "floorHeld": false,
     "floorTrigger": "revision-depth",
-    "headDate": "2026-09-09T00:39:53-07:00",
-    "inScopeFiles": 119,
+    "headDate": "2026-09-26T19:45:26-07:00",
+    "inScopeFiles": 125,
     "pinnedStart": null,
-    "priorFloor": null,
-    "qualifyingCommits": 62,
+    "priorFloor": "fallen",
+    "qualifyingCommits": 58,
     "qualifyingMinimum": 30,
     "revisions": 5,
     "shared": 10,
     "sharedFloorUsed": 3,
-    "since": "2026-03-13T07:39:53.000Z",
+    "since": "2026-03-31T02:45:26.000Z",
     "sourceExtensions": [
       ".js",
       ".mjs",
