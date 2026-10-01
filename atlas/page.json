@@ -27,57 +27,29 @@
   ],
   "changes": {
     "fileCounts": {
-      "added": 1,
+      "added": 0,
       "changed": 1,
       "moved": 0,
-      "parts": 2,
+      "parts": 1,
       "removed": 0
     },
     "items": [
       {
         "kind": "door",
-        "sentence": "CI's pull request trigger now also names `codecov.yml`.",
+        "sentence": "CI's pull request trigger no longer names `*.py`, `.dockerignore`, `.github/workflows/**`, `.pre-commit-config.yaml`, `Dockerfile`, `Makefile`, `atlas/**`, `codecov.yml`, `docker-compose.yml`, `fly.toml`, `npm/**`, `pyproject.toml`, `requirements*.txt`, `scripts/**`, `site/**` and `tests/**`.",
         "subjects": [
           ".github/workflows/ci.yml"
-        ]
-      },
-      {
-        "kind": "door",
-        "sentence": "CI's push trigger now also names `codecov.yml`.",
-        "subjects": [
-          ".github/workflows/ci.yml"
-        ]
-      },
-      {
-        "kind": "door",
-        "sentence": "Release Binaries now also runs ui.py.",
-        "subjects": [
-          ".github/workflows/release-binaries.yml",
-          "ui.py"
-        ]
-      },
-      {
-        "kind": "door",
-        "sentence": "And 2 more changes to doors.",
-        "subjects": []
-      },
-      {
-        "kind": "landing",
-        "sentence": "cli.py is now also read by .github/workflows/release.yml.",
-        "subjects": [
-          "cli.py",
-          ".github/workflows/release.yml"
         ]
       },
       {
         "kind": "counts",
-        "sentence": "1 file added and 1 changed content, across 2 parts.",
+        "sentence": "1 file changed content, across 1 part.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "6f5a2339b184abe7a06e9092d79ce97ff40b7f05",
-      "generatedAt": "2026-09-25T02:34:04.334Z"
+      "commit": "9bf87fdbda5d5dbdec736ec5bed35879ec966e21",
+      "generatedAt": "2026-09-30T20:14:07.868Z"
     },
     "unchanged": false
   },
@@ -86,7 +58,7 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 0 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "9bf87fdbda5d5dbdec736ec5bed35879ec966e21",
+  "commit": "98f849821fa76c12ed6b9d623bbd1573d13d0a0f",
   "defaultBranch": "main",
   "derived": "8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.",
   "doors": [
@@ -179,7 +151,7 @@
       ],
       "stages": [],
       "triggers": [
-        "on a pull request to main touching 16 paths",
+        "on a pull request to main",
         "on a push to main touching 16 paths",
         "on a schedule (`0 9 * * 1,3,5`)",
         "or by hand"
@@ -405,7 +377,7 @@
       ]
     }
   ],
-  "generatedAt": "2026-09-30T20:14:07.868Z",
+  "generatedAt": "2026-10-01T02:14:30.646Z",
   "limits": [
     "11 writes and 4 reads use paths built at run time and are not named here.",
     "5 writes and 35 reads go to a path their caller passes, not to this repository.",
