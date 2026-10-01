@@ -21,7 +21,7 @@
           "path": ".github/dependabot.yml"
         },
         {
-          "hash": "37d3062c9a668b096f9c92bfd1239db7a6cbb939f6fc0827797f3f8b9616d29d",
+          "hash": "7a3fdfd41c6cf22dbbc89330f8d2732aaf3c03a532e8c2d61bf479f1428dbdfa",
           "path": ".github/workflows/ci.yml"
         },
         {
@@ -8734,25 +8734,7 @@
           "branches": [
             "main"
           ],
-          "event": "pull_request",
-          "paths": [
-            "*.py",
-            ".dockerignore",
-            ".github/workflows/**",
-            ".pre-commit-config.yaml",
-            "Dockerfile",
-            "Makefile",
-            "atlas/**",
-            "codecov.yml",
-            "docker-compose.yml",
-            "fly.toml",
-            "npm/**",
-            "pyproject.toml",
-            "requirements*.txt",
-            "scripts/**",
-            "site/**",
-            "tests/**"
-          ]
+          "event": "pull_request"
         },
         {
           "branches": [
@@ -9931,7 +9913,7 @@
   ],
   "engine": "1.24.0",
   "generatedFrom": {
-    "commit": "9bf87fdbda5d5dbdec736ec5bed35879ec966e21",
+    "commit": "98f849821fa76c12ed6b9d623bbd1573d13d0a0f",
     "tracked": 120
   },
   "landings": [

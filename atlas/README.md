@@ -1,23 +1,19 @@
 # tool-compass: how it works
 
-Mapped at 2026-09-30 from commit 9bf87fd by Atlas 1.24.0.
+Mapped at 2026-10-01 from commit 98f8498 by Atlas 1.24.0.
 
 ## What this is
 
 8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.
 
-## What changed since 2026-09-25 (6f5a233)
+## What changed since 2026-09-30 (9bf87fd)
 
-- CI's pull request trigger now also names `codecov.yml`.
-- CI's push trigger now also names `codecov.yml`.
-- Release Binaries now also runs ui.py.
-- And 2 more changes to doors.
-- cli.py is now also read by .github/workflows/release.yml.
-- 1 file added and 1 changed content, across 2 parts.
+- CI's pull request trigger no longer names `*.py`, `.dockerignore`, `.github/workflows/**`, `.pre-commit-config.yaml`, `Dockerfile`, `Makefile`, `atlas/**`, `codecov.yml`, `docker-compose.yml`, `fly.toml`, `npm/**`, `pyproject.toml`, `requirements*.txt`, `scripts/**`, `site/**` and `tests/**`.
+- 1 file changed content, across 1 part.
 
 ## What comes in
 
-1. **CI.** On a pull request to main touching 16 paths; on a push to main touching 16 paths; on a schedule (`0 9 * * 1,3,5`); or by hand. Runs docker-entrypoint.sh, gateway.py, scripts/check-org-urls.sh and 35 more; checks requirements.txt; packs LICENSE, README.md, _version.py and 15 more into an image. On a push to main, it also runs site/astro.config.mjs and site/src/.
+1. **CI.** On a pull request to main; on a push to main touching 16 paths; on a schedule (`0 9 * * 1,3,5`); or by hand. Runs docker-entrypoint.sh, gateway.py, scripts/check-org-urls.sh and 35 more; checks requirements.txt; packs LICENSE, README.md, _version.py and 15 more into an image. On a push to main, it also runs site/astro.config.mjs and site/src/.
 2. **Publish.** When a release is published; when the workflow Release completes; or by hand. Runs cli.py, docker-entrypoint.sh and gateway.py; packs LICENSE, README.md, _version.py and 15 more into an image.
 3. **Release.** When a tag matching `v*` is pushed; or by hand. Runs ui.py.
 4. **Release Binaries.** When a release is published; on a `workflow_call` event; or by hand. Runs ui.py; builds cli.py.
