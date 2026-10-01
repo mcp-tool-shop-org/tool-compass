@@ -7,7 +7,7 @@
 # Base image is digest-pinned (CT-B-003) so re-published 3.12-slim tags cannot
 # silently change what we ship; Dependabot's docker ecosystem (CT-B-005) bumps
 # the digest monthly via .github/dependabot.yml.
-FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS builder
+FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS builder
 
 WORKDIR /build
 
@@ -37,7 +37,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # Stage 2: Production
 # =============================================================================
 # Digest-pinned base (CT-B-003). Dependabot keeps both FROMs in lockstep.
-FROM python:3.12-slim@sha256:78387bc3881b8273120a12ebe6c1ab22b018ccc2c9adf565ae1ac9b536e184ea AS production
+FROM python:3.14-slim@sha256:51dafde81dbdb6ebde285137a295cf18a47ca95234fe388a343719cb97305b3d AS production
 
 LABEL maintainer="Tool Compass <github.com/mcp-tool-shop-org/tool-compass>"
 LABEL description="Semantic search gateway for MCP tools"
