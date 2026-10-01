@@ -376,7 +376,9 @@ jobs:
   # On failure, opens a tracking issue via actions/github-script.
   nightly-fuzz:
     name: Nightly Hypothesis fuzz
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # A required check, so it also runs on pull requests, with the `ci` profile
+    # (200 examples); the schedule and manual runs keep the slow `nightly` one.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     # CT-B-011: Hypothesis nightly profile is deliberately slow — 45 min cap
     # is wider than the test job because fuzz examples are unbounded.
@@ -404,10 +406,10 @@ jobs:
       - name: Run Hypothesis (nightly profile)
         id: fuzz
         run: |
-          HYPOTHESIS_PROFILE=nightly pytest -m "not integration"
+          HYPOTHESIS_PROFILE=${{ github.event_name == 'pull_request' && 'ci' || 'nightly' }} pytest -m "not integration"
 
       - name: Open tracking issue on failure
-        if: failure() && steps.fuzz.conclusion == 'failure'
+        if: failure() && steps.fuzz.conclusion == 'failure' && github.event_name != 'pull_request'
         # SHA-pinned per SLSA L3 supply-chain hygiene (CT-B-001). nightly-fuzz
         # carries issues:write, so a compromised v7 mutable tag would inherit
         # issue-creation capability. Bump via dependabot's github-actions sweep.
@@ -576,7 +578,9 @@ jobs:
   # ===========================================================================
   pages-build:
     name: Build site
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    # A required check, so the site also builds on pull requests; only a push to
+    # main configures Pages and uploads the artifact that pages-deploy publishes.
+    if: github.event_name == 'pull_request' || (github.ref == 'refs/heads/main' && github.event_name == 'push')
     runs-on: ubuntu-latest
     # CT-B-011: Starlight npm ci + Astro build; 10 min is generous.
     timeout-minutes: 10
@@ -593,6 +597,7 @@ jobs:
       # silently dependent on Settings → Pages UI state. configure-pages
       # is idempotent and exposes the base path to downstream steps.
       - name: Configure Pages
+        if: github.event_name == 'push'
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Install site dependencies
@@ -604,6 +609,7 @@ jobs:
         run: npm run build
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        if: github.event_name == 'push'
         with:
           path: site/dist
 
