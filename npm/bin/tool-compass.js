@@ -7,8 +7,8 @@ process.env.MCPTOOLSHOP_LAUNCH_CONFIG = JSON.stringify({
   toolName: "tool-compass",
   owner: "mcp-tool-shop-org",
   repo: "tool-compass",
-  version: "2.5.2",
-  tag: "v2.5.2",
+  version: "2.5.3",
+  tag: "v2.5.3",
 });
 
 // Bare identity flags (no subcommand) must print locally. Requiring
