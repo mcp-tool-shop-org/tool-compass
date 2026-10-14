@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.3] - 2026-10-14
+
 - Build fake credentials at runtime in config and HTTP backend tests so secret scanners do not flag test fixtures.
 
 ## [2.5.2] - 2026-09-09
