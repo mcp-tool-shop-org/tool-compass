@@ -25,7 +25,7 @@
           "path": ".github/workflows/ci.yml"
         },
         {
-          "hash": "2ee91a55a0f7bfda79f29fd336d2671c6b27fa05936f4bedc5f715cca8a60b28",
+          "hash": "11b3644468890257965539668f35cfda35618139de343b79283bc3b3b21bea6a",
           "path": ".github/workflows/publish.yml"
         },
         {
@@ -155,7 +155,7 @@
               "line": 94
             }
           ],
-          "hash": "74ce95f7da1cab8f5520655a5ccce278d8a698debef9703485124624ae2654ab",
+          "hash": "eb386a6ffc15cfdf3c7f7473ff2ec84622ba470fa80054bb9df4f9082d39dd28",
           "path": "npm/bin/tool-compass.js",
           "sequences": []
         },
@@ -164,7 +164,7 @@
           "path": "npm/logo-lockup.png"
         },
         {
-          "hash": "118815b24e6988a0b78bad7c951ff2c103167a089fcc59158c0b9259eb2b9f21",
+          "hash": "53c9ebebb0ef7c7b92b72a7510b5c65df0faceab6cec57353780f97af0d58ddd",
           "path": "npm/package.json"
         },
         {
@@ -222,7 +222,7 @@
           "path": ".pre-commit-config.yaml"
         },
         {
-          "hash": "aec042484dd806815fd342e2468b7664f79cc3830f06bbd69a01f46169ceed13",
+          "hash": "804cd9d15d521f3c2e9dad9775f6f2f2aaae98a869556387f121575373e5411f",
           "path": "CHANGELOG.md"
         },
         {
@@ -6392,7 +6392,7 @@
           "path": "logo.png"
         },
         {
-          "hash": "98d322e521294065f4407ae5c1ee8d749f096c06a694eceab54183417b78bcf6",
+          "hash": "67c54d4864867e84c5342ebdf2b8f50324f26bf4fb7bcf507a5f3807c7ca5e5b",
           "path": "pyproject.toml"
         },
         {
@@ -7294,7 +7294,7 @@
           "path": "site/astro.config.mjs"
         },
         {
-          "hash": "909ed4c45f18bed65799627e9af9d4b2cbc437e6ce6ee60f4c9f96e3a5d3eb43",
+          "hash": "bd15e57c9afd80af4ea9fdcdfffe4951583c50219e3877d6c634e49700536f2c",
           "path": "site/package-lock.json"
         },
         {
@@ -7501,7 +7501,7 @@
             "make_http_backend",
             "patch_sdk"
           ],
-          "hash": "f78c95045274f86c068b4198cffbd5526f4de48ecb63dcf092a47ce7e813460b",
+          "hash": "bf564e3cd82daf378632a2fc882b3da3519b842533dede191077bdcaa22347de",
           "importsFiles": [
             "backend_client_simple.py",
             "config.py"
@@ -7528,7 +7528,7 @@
             "test_string_jsonrpc_id_still_completes",
             "test_tools_list_nextcursor_page_two_is_consumable"
           ],
-          "hash": "d176f7f8fe24422037dec2e97645984616252217f4bfb4ca5b9caa09e1725338",
+          "hash": "c38c0203c063eabe5400af77127365cb5678c4011a944f8799bcf761a3c549e7",
           "importsFiles": [
             "backend_client_simple.py",
             "config.py"
@@ -7579,7 +7579,7 @@
           "testFramework": "pytest"
         },
         {
-          "hash": "0697a716a627b1db63ebab44a2ab1bbee253d8fe74706d55c33a31be055ba7d7",
+          "hash": "aab300cd633de5597f6e81c088e17f817cdd571dc9ec944a3fecd787dc0f547b",
           "importOrder": [
             "config.py",
             "analytics.py"
@@ -9913,7 +9913,7 @@
   ],
   "engine": "1.24.0",
   "generatedFrom": {
-    "commit": "e6e5806a6d5d25c3deafe96867a4eda219ac07e5",
+    "commit": "a7e6492dab062818abb0ed14852c52d79be8b112",
     "tracked": 120
   },
   "landings": [

@@ -65,7 +65,7 @@
       "confidence": "low",
       "highWater": null,
       "name": "npm",
-      "qualifyingSourceCommits": 4,
+      "qualifyingSourceCommits": 5,
       "rebaseline": null
     },
     {
@@ -83,7 +83,7 @@
       "confidence": "low",
       "highWater": null,
       "name": "root",
-      "qualifyingSourceCommits": 19,
+      "qualifyingSourceCommits": 17,
       "rebaseline": null
     },
     {
@@ -131,7 +131,7 @@
       "confidence": "low",
       "highWater": null,
       "name": "tests",
-      "qualifyingSourceCommits": 14,
+      "qualifyingSourceCommits": 13,
       "rebaseline": null
     }
   ],
@@ -154,23 +154,23 @@
         "path": ".gitattributes"
       },
       {
-        "commits": 6,
-        "lines": 151,
+        "commits": 4,
+        "lines": 115,
         "path": ".github/dependabot.yml"
       },
       {
-        "commits": 20,
-        "lines": 982,
+        "commits": 19,
+        "lines": 1000,
         "path": ".github/workflows/ci.yml"
       },
       {
-        "commits": 4,
-        "lines": 56,
+        "commits": 1,
+        "lines": 50,
         "path": ".github/workflows/pages.yml"
       },
       {
-        "commits": 12,
-        "lines": 406,
+        "commits": 9,
+        "lines": 380,
         "path": ".github/workflows/publish.yml"
       },
       {
@@ -199,8 +199,8 @@
         "path": "AUDIT_REPORT.md"
       },
       {
-        "commits": 11,
-        "lines": 503,
+        "commits": 13,
+        "lines": 507,
         "path": "CHANGELOG.md"
       },
       {
@@ -244,8 +244,8 @@
         "path": "README.ja.md"
       },
       {
-        "commits": 13,
-        "lines": 270,
+        "commits": 11,
+        "lines": 182,
         "path": "README.md"
       },
       {
@@ -294,8 +294,8 @@
         "path": "assets/logo.png"
       },
       {
-        "commits": 5,
-        "lines": 280,
+        "commits": 7,
+        "lines": 302,
         "path": "atlas/README.md"
       },
       {
@@ -304,18 +304,18 @@
         "path": "atlas/boundaries.yaml"
       },
       {
-        "commits": 5,
-        "lines": 1078,
+        "commits": 7,
+        "lines": 1124,
         "path": "atlas/page.json"
       },
       {
-        "commits": 5,
-        "lines": 1140,
+        "commits": 7,
+        "lines": 1200,
         "path": "atlas/statistics.json"
       },
       {
-        "commits": 5,
-        "lines": 15050,
+        "commits": 7,
+        "lines": 15102,
         "path": "atlas/structure.json"
       },
       {
@@ -329,8 +329,8 @@
         "path": "backend_client_simple.py"
       },
       {
-        "commits": 6,
-        "lines": 627,
+        "commits": 4,
+        "lines": 617,
         "path": "bootstrap.py"
       },
       {
@@ -354,8 +354,8 @@
         "path": "compass_config.example.json"
       },
       {
-        "commits": 12,
-        "lines": 1429,
+        "commits": 9,
+        "lines": 1273,
         "path": "config.py"
       },
       {
@@ -434,8 +434,8 @@
         "path": "npm/README.md"
       },
       {
-        "commits": 10,
-        "lines": 327,
+        "commits": 11,
+        "lines": 331,
         "path": "npm/bin/tool-compass.js"
       },
       {
@@ -444,8 +444,8 @@
         "path": "npm/logo-lockup.png"
       },
       {
-        "commits": 6,
-        "lines": 55,
+        "commits": 7,
+        "lines": 57,
         "path": "npm/package.json"
       },
       {
@@ -454,19 +454,14 @@
         "path": "npm/test/smoke.test.js"
       },
       {
-        "commits": 13,
-        "lines": 158,
+        "commits": 12,
+        "lines": 154,
         "path": "pyproject.toml"
       },
       {
         "commits": 1,
         "lines": 31,
         "path": "pytest.ini"
-      },
-      {
-        "commits": 2,
-        "lines": 8,
-        "path": "requirements-dev.txt"
       },
       {
         "commits": 2,
@@ -499,13 +494,13 @@
         "path": "site/astro.config.mjs"
       },
       {
-        "commits": 13,
-        "lines": 7011,
+        "commits": 5,
+        "lines": 6722,
         "path": "site/package-lock.json"
       },
       {
-        "commits": 4,
-        "lines": 28,
+        "commits": 3,
+        "lines": 26,
         "path": "site/package.json"
       },
       {
@@ -559,8 +554,8 @@
         "path": "sync_manager.py"
       },
       {
-        "commits": 11,
-        "lines": 473,
+        "commits": 9,
+        "lines": 461,
         "path": "tests/conftest.py"
       },
       {
@@ -584,13 +579,13 @@
         "path": "tests/golden_set/queries.yaml"
       },
       {
-        "commits": 6,
-        "lines": 506,
+        "commits": 4,
+        "lines": 500,
         "path": "tests/test_analytics.py"
       },
       {
-        "commits": 4,
-        "lines": 180,
+        "commits": 2,
+        "lines": 174,
         "path": "tests/test_backend_client.py"
       },
       {
@@ -599,8 +594,8 @@
         "path": "tests/test_backend_client_simple.py"
       },
       {
-        "commits": 3,
-        "lines": 2662,
+        "commits": 4,
+        "lines": 2665,
         "path": "tests/test_backend_client_simple_coverage.py"
       },
       {
@@ -609,13 +604,13 @@
         "path": "tests/test_backend_client_simple_outcomes.py"
       },
       {
-        "commits": 4,
-        "lines": 1514,
+        "commits": 5,
+        "lines": 1517,
         "path": "tests/test_backend_http_wire.py"
       },
       {
-        "commits": 9,
-        "lines": 290,
+        "commits": 7,
+        "lines": 284,
         "path": "tests/test_chain_indexer.py"
       },
       {
@@ -624,8 +619,8 @@
         "path": "tests/test_cli_coverage.py"
       },
       {
-        "commits": 6,
-        "lines": 1160,
+        "commits": 4,
+        "lines": 1087,
         "path": "tests/test_config.py"
       },
       {
@@ -634,8 +629,8 @@
         "path": "tests/test_corruption_recovery.py"
       },
       {
-        "commits": 10,
-        "lines": 982,
+        "commits": 8,
+        "lines": 976,
         "path": "tests/test_embedder.py"
       },
       {
@@ -649,13 +644,13 @@
         "path": "tests/test_features_v2_2_0.py"
       },
       {
-        "commits": 7,
-        "lines": 872,
+        "commits": 5,
+        "lines": 864,
         "path": "tests/test_fuzz.py"
       },
       {
-        "commits": 4,
-        "lines": 75,
+        "commits": 2,
+        "lines": 69,
         "path": "tests/test_gateway.py"
       },
       {
@@ -674,8 +669,8 @@
         "path": "tests/test_golden_set.py"
       },
       {
-        "commits": 5,
-        "lines": 616,
+        "commits": 3,
+        "lines": 610,
         "path": "tests/test_indexer.py"
       },
       {
@@ -694,13 +689,13 @@
         "path": "tests/test_smoke_e2e.py"
       },
       {
-        "commits": 8,
-        "lines": 1072,
+        "commits": 6,
+        "lines": 1066,
         "path": "tests/test_sync_manager.py"
       },
       {
-        "commits": 5,
-        "lines": 103,
+        "commits": 3,
+        "lines": 97,
         "path": "tests/test_tool_manifest.py"
       },
       {
@@ -734,11 +729,19 @@
     "level": "low",
     "reason": "fewer than 25 source files reach 10 revisions in the window"
   },
-  "generatedAt": "2026-10-01T02:36:16.838Z",
+  "generatedAt": "2026-10-14T23:56:42.397Z",
   "generatedFrom": {
-    "commit": "e6e5806a6d5d25c3deafe96867a4eda219ac07e5"
+    "commit": "a7e6492dab062818abb0ed14852c52d79be8b112"
   },
-  "pairs": [],
+  "pairs": [
+    {
+      "a": "CHANGELOG.md",
+      "b": "pyproject.toml",
+      "either": 10,
+      "shared": 5,
+      "strength": 0.5
+    }
+  ],
   "parameters": {
     "appliedChangesetLimit": 31.25,
     "changeset": 50,
@@ -749,16 +752,16 @@
     "floor": "fallen",
     "floorHeld": false,
     "floorTrigger": "revision-depth",
-    "headDate": "2026-09-30T19:26:59-07:00",
+    "headDate": "2026-10-14T15:53:20-07:00",
     "inScopeFiles": 125,
     "pinnedStart": null,
     "priorFloor": "fallen",
-    "qualifyingCommits": 59,
+    "qualifyingCommits": 56,
     "qualifyingMinimum": 30,
     "revisions": 5,
     "shared": 10,
     "sharedFloorUsed": 3,
-    "since": "2026-04-04T02:26:59.000Z",
+    "since": "2026-04-17T22:53:20.000Z",
     "sourceExtensions": [
       ".js",
       ".mjs",
