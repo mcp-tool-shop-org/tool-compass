@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.5] - 2026-10-15
+
+### Fixed
+
+- **The Docker image no longer crashes with "Illegal instruction" on a CPU older than the one that built it.** `hnswlib` has no wheel for the image's Python, so the build compiles it, and its `setup.py` adds `-march=native` unless `HNSWLIB_NO_NATIVE` is set. The compiled extension therefore carried the build host's CPU extensions, and on a CPU without them `import hnswlib` (first reached from `indexer.py`) killed the process with SIGILL before the gateway printed anything. The builder stage now sets `HNSWLIB_NO_NATIVE=1`. It surfaced as an intermittent failure of the required `Docker mcp-gateway` smoke check, where a cached image layer built on one hosted runner ran on a different one.
+
+### Changed
+
+- The CI Docker smoke waits up to 3 minutes instead of 90 seconds, fails at once if the container exits, and on a timeout sends SIGABRT so Python writes its stack to the log. No effect on the published package.
+
 ## [2.5.4] - 2026-10-14
 
 ### Security

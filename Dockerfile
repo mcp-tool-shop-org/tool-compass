@@ -28,6 +28,15 @@ COPY cli.py gateway.py ui.py indexer.py embedder.py chain_indexer.py \
 # the `tool-compass` console script ends up on PATH (ships with the image).
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
+# hnswlib publishes no wheel for this interpreter, so pip compiles it here, and
+# its setup.py adds -march=native unless HNSWLIB_NO_NATIVE is set. That bakes the
+# build machine's CPU extensions (AVX-512 on some hosted runners) into the image;
+# on a CPU without them the first `import hnswlib` dies with SIGILL ("Illegal
+# instruction") before the gateway prints anything. Observed as an intermittent
+# CI smoke failure when a cached layer built on one runner ran on another, and
+# it is the same hazard for anyone pulling the published image onto an older CPU.
+# Builder stage only: the production stage copies the venv, not the variable.
+ENV HNSWLIB_NO_NATIVE=1
 RUN pip install --no-cache-dir --upgrade pip && \
     pip install --no-cache-dir -r requirements.txt && \
     pip install --no-cache-dir uvicorn && \

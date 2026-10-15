@@ -21,7 +21,7 @@
           "path": ".github/dependabot.yml"
         },
         {
-          "hash": "68e72c7b71318a6a67f26fb9bf0e97d3f66ee1e01490c1c5a94b3fc1cc7e69a1",
+          "hash": "e9ba297b2f6abd942e7cde2382a33f5048fa5c38afac294b8f1e2df53c855509",
           "path": ".github/workflows/ci.yml"
         },
         {
@@ -155,7 +155,7 @@
               "line": 94
             }
           ],
-          "hash": "eb386a6ffc15cfdf3c7f7473ff2ec84622ba470fa80054bb9df4f9082d39dd28",
+          "hash": "97108afe763a24a83fda0fdf320072a33b1612021e5e6bc8c9618e1d487b3202",
           "path": "npm/bin/tool-compass.js",
           "sequences": []
         },
@@ -164,7 +164,7 @@
           "path": "npm/logo-lockup.png"
         },
         {
-          "hash": "53c9ebebb0ef7c7b92b72a7510b5c65df0faceab6cec57353780f97af0d58ddd",
+          "hash": "011b89ec3ee8cb0e4bfc0b749216ad630371221e3e2df75678c76da672ec2228",
           "path": "npm/package.json"
         },
         {
@@ -222,7 +222,7 @@
           "path": ".pre-commit-config.yaml"
         },
         {
-          "hash": "804cd9d15d521f3c2e9dad9775f6f2f2aaae98a869556387f121575373e5411f",
+          "hash": "4dd7007d677eff1dff1cf3c85c70207236d747e93a277121c8afb71c8e58e338",
           "path": "CHANGELOG.md"
         },
         {
@@ -234,7 +234,7 @@
           "path": "CONTRIBUTING.md"
         },
         {
-          "hash": "5dae346470bfd9318fa0b69b7f37ffe71566e39bb55395d55d7ad6eecf8c2db4",
+          "hash": "53f958cf3a8c524122efb2df470e61905d24d841d6ae3ae63ccfbdd4c790be1b",
           "path": "Dockerfile"
         },
         {
@@ -6392,7 +6392,7 @@
           "path": "logo.png"
         },
         {
-          "hash": "67c54d4864867e84c5342ebdf2b8f50324f26bf4fb7bcf507a5f3807c7ca5e5b",
+          "hash": "8314bc1e906228382632c99ed7740517d381a22b61b9edda28800ae089ccbfb4",
           "path": "pyproject.toml"
         },
         {
@@ -9913,7 +9913,7 @@
   ],
   "engine": "1.24.0",
   "generatedFrom": {
-    "commit": "e095e888f400f36e1b848a816e0628df5203dfd3",
+    "commit": "5b2768d1f579d24077e2530b05fb3ae7a0df876c",
     "tracked": 120
   },
   "landings": [

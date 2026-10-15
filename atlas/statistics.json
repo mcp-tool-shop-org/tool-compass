@@ -1,11 +1,6 @@
 {
   "authorship": {
-    "parts": [
-      {
-        "addedBy": "dependabot[bot]",
-        "name": "docs"
-      }
-    ],
+    "parts": [],
     "places": []
   },
   "boundaries": [
@@ -88,7 +83,7 @@
       "confidence": "low",
       "highWater": null,
       "name": "root",
-      "qualifyingSourceCommits": 11,
+      "qualifyingSourceCommits": 9,
       "rebaseline": null
     },
     {
@@ -136,7 +131,7 @@
       "confidence": "low",
       "highWater": null,
       "name": "tests",
-      "qualifyingSourceCommits": 11,
+      "qualifyingSourceCommits": 10,
       "rebaseline": null
     }
   ],
@@ -144,13 +139,13 @@
     "definition": "commits is how many commits in the window touch the file, including merges and commits dropped from coupling. lines is added plus deleted in those commits.",
     "files": [
       {
-        "commits": 4,
-        "lines": 252,
+        "commits": 5,
+        "lines": 336,
         "path": ".dockerignore"
       },
       {
-        "commits": 8,
-        "lines": 251,
+        "commits": 9,
+        "lines": 316,
         "path": ".env.example"
       },
       {
@@ -159,53 +154,48 @@
         "path": ".gitattributes"
       },
       {
-        "commits": 3,
-        "lines": 138,
+        "commits": 4,
+        "lines": 184,
         "path": ".github/ISSUE_TEMPLATE/bug_report.yml"
       },
       {
-        "commits": 3,
-        "lines": 87,
+        "commits": 4,
+        "lines": 116,
         "path": ".github/ISSUE_TEMPLATE/feature_request.yml"
       },
       {
         "commits": 7,
-        "lines": 226,
+        "lines": 272,
         "path": ".github/dependabot.yml"
       },
       {
-        "commits": 22,
-        "lines": 2055,
+        "commits": 23,
+        "lines": 2520,
         "path": ".github/workflows/ci.yml"
       },
       {
-        "commits": 2,
-        "lines": 100,
-        "path": ".github/workflows/pages.yml"
-      },
-      {
         "commits": 13,
-        "lines": 1061,
+        "lines": 1346,
         "path": ".github/workflows/publish.yml"
       },
       {
-        "commits": 12,
-        "lines": 1080,
+        "commits": 13,
+        "lines": 1266,
         "path": ".github/workflows/release-binaries.yml"
       },
       {
-        "commits": 7,
-        "lines": 1032,
+        "commits": 8,
+        "lines": 1205,
         "path": ".github/workflows/release.yml"
       },
       {
-        "commits": 9,
-        "lines": 396,
+        "commits": 8,
+        "lines": 528,
         "path": ".gitignore"
       },
       {
-        "commits": 3,
-        "lines": 165,
+        "commits": 4,
+        "lines": 220,
         "path": ".pre-commit-config.yaml"
       },
       {
@@ -215,97 +205,97 @@
       },
       {
         "commits": 17,
-        "lines": 1836,
+        "lines": 2400,
         "path": "CHANGELOG.md"
       },
       {
-        "commits": 3,
-        "lines": 78,
+        "commits": 4,
+        "lines": 104,
         "path": "CODE_OF_CONDUCT.md"
       },
       {
-        "commits": 4,
-        "lines": 1042,
+        "commits": 5,
+        "lines": 1372,
         "path": "CONTRIBUTING.md"
       },
       {
         "commits": 12,
-        "lines": 439,
+        "lines": 553,
         "path": "Dockerfile"
       },
       {
-        "commits": 3,
-        "lines": 63,
+        "commits": 4,
+        "lines": 84,
         "path": "LICENSE"
       },
       {
         "commits": 9,
-        "lines": 197,
+        "lines": 236,
         "path": "Makefile"
       },
       {
         "commits": 12,
-        "lines": 1563,
+        "lines": 1844,
         "path": "README.es.md"
       },
       {
         "commits": 12,
-        "lines": 1826,
+        "lines": 2012,
         "path": "README.fr.md"
       },
       {
         "commits": 12,
-        "lines": 1701,
+        "lines": 1914,
         "path": "README.hi.md"
       },
       {
         "commits": 12,
-        "lines": 1663,
+        "lines": 1888,
         "path": "README.it.md"
       },
       {
         "commits": 12,
-        "lines": 1688,
+        "lines": 1954,
         "path": "README.ja.md"
       },
       {
-        "commits": 14,
-        "lines": 1205,
+        "commits": 13,
+        "lines": 1545,
         "path": "README.md"
       },
       {
         "commits": 12,
-        "lines": 1671,
+        "lines": 1832,
         "path": "README.pt-BR.md"
       },
       {
         "commits": 12,
-        "lines": 1720,
+        "lines": 1974,
         "path": "README.zh.md"
       },
       {
         "commits": 8,
-        "lines": 236,
+        "lines": 204,
         "path": "SCORECARD.md"
       },
       {
-        "commits": 4,
-        "lines": 365,
+        "commits": 5,
+        "lines": 482,
         "path": "SECURITY.md"
       },
       {
-        "commits": 6,
-        "lines": 248,
+        "commits": 7,
+        "lines": 328,
         "path": "SHIP_GATE.md"
       },
       {
-        "commits": 3,
-        "lines": 120,
+        "commits": 4,
+        "lines": 160,
         "path": "_version.py"
       },
       {
         "commits": 9,
-        "lines": 4035,
+        "lines": 4754,
         "path": "analytics.py"
       },
       {
@@ -319,13 +309,13 @@
         "path": "assets/logo-square.png"
       },
       {
-        "commits": 7,
+        "commits": 8,
         "lines": 0,
         "path": "assets/logo.png"
       },
       {
-        "commits": 8,
-        "lines": 308,
+        "commits": 10,
+        "lines": 326,
         "path": "atlas/README.md"
       },
       {
@@ -334,43 +324,43 @@
         "path": "atlas/boundaries.yaml"
       },
       {
-        "commits": 8,
-        "lines": 1138,
+        "commits": 10,
+        "lines": 1174,
         "path": "atlas/page.json"
       },
       {
-        "commits": 8,
-        "lines": 1351,
+        "commits": 10,
+        "lines": 2371,
         "path": "atlas/statistics.json"
       },
       {
-        "commits": 8,
-        "lines": 15122,
+        "commits": 10,
+        "lines": 15130,
         "path": "atlas/structure.json"
       },
       {
-        "commits": 8,
-        "lines": 2262,
+        "commits": 9,
+        "lines": 2851,
         "path": "backend_client_mcp.py"
       },
       {
         "commits": 11,
-        "lines": 11278,
+        "lines": 13645,
         "path": "backend_client_simple.py"
       },
       {
-        "commits": 7,
-        "lines": 953,
+        "commits": 8,
+        "lines": 1081,
         "path": "bootstrap.py"
       },
       {
         "commits": 9,
-        "lines": 2649,
+        "lines": 3296,
         "path": "chain_indexer.py"
       },
       {
-        "commits": 13,
-        "lines": 7616,
+        "commits": 14,
+        "lines": 9761,
         "path": "cli.py"
       },
       {
@@ -379,13 +369,13 @@
         "path": "codecov.yml"
       },
       {
-        "commits": 4,
-        "lines": 221,
+        "commits": 5,
+        "lines": 294,
         "path": "compass_config.example.json"
       },
       {
         "commits": 10,
-        "lines": 4280,
+        "lines": 5611,
         "path": "config.py"
       },
       {
@@ -400,7 +390,7 @@
       },
       {
         "commits": 7,
-        "lines": 419,
+        "lines": 505,
         "path": "docker-compose.yml"
       },
       {
@@ -409,17 +399,17 @@
         "path": "docker-entrypoint.sh"
       },
       {
-        "commits": 3,
+        "commits": 4,
         "lines": 0,
         "path": "docs/assets/social-preview.png"
       },
       {
-        "commits": 3,
-        "lines": 123,
+        "commits": 4,
+        "lines": 164,
         "path": "docs/assets/social-preview.svg"
       },
       {
-        "commits": 3,
+        "commits": 4,
         "lines": 0,
         "path": "docs/assets/tool-compass-logo-dark-bg.jpg"
       },
@@ -429,58 +419,58 @@
         "path": "docs/assets/tool-compass-logo.png"
       },
       {
-        "commits": 4,
-        "lines": 166,
+        "commits": 5,
+        "lines": 194,
         "path": "docs/index.md"
       },
       {
-        "commits": 11,
-        "lines": 5354,
+        "commits": 10,
+        "lines": 6432,
         "path": "embedder.py"
       },
       {
-        "commits": 4,
-        "lines": 111,
+        "commits": 5,
+        "lines": 148,
         "path": "fly.toml"
       },
       {
-        "commits": 14,
-        "lines": 14020,
+        "commits": 11,
+        "lines": 16801,
         "path": "gateway.py"
       },
       {
         "commits": 10,
-        "lines": 7156,
+        "lines": 8174,
         "path": "indexer.py"
       },
       {
-        "commits": 5,
-        "lines": 374,
+        "commits": 6,
+        "lines": 494,
         "path": "llms.txt"
       },
       {
-        "commits": 7,
+        "commits": 8,
         "lines": 0,
         "path": "logo.png"
       },
       {
-        "commits": 3,
-        "lines": 1014,
+        "commits": 4,
+        "lines": 1352,
         "path": "npm/CHANGELOG.md"
       },
       {
-        "commits": 3,
-        "lines": 63,
+        "commits": 4,
+        "lines": 84,
         "path": "npm/LICENSE"
       },
       {
-        "commits": 10,
-        "lines": 664,
+        "commits": 11,
+        "lines": 835,
         "path": "npm/README.md"
       },
       {
-        "commits": 14,
-        "lines": 363,
+        "commits": 15,
+        "lines": 377,
         "path": "npm/bin/tool-compass.js"
       },
       {
@@ -489,193 +479,188 @@
         "path": "npm/logo-lockup.png"
       },
       {
-        "commits": 10,
-        "lines": 149,
+        "commits": 11,
+        "lines": 194,
         "path": "npm/package.json"
       },
       {
-        "commits": 8,
-        "lines": 353,
+        "commits": 9,
+        "lines": 407,
         "path": "npm/test/smoke.test.js"
       },
       {
         "commits": 16,
-        "lines": 707,
+        "lines": 902,
         "path": "pyproject.toml"
       },
       {
-        "commits": 2,
-        "lines": 62,
-        "path": "pytest.ini"
-      },
-      {
-        "commits": 3,
-        "lines": 72,
+        "commits": 4,
+        "lines": 96,
         "path": "requirements-dev.txt"
       },
       {
         "commits": 5,
-        "lines": 65,
+        "lines": 84,
         "path": "requirements.txt"
       },
       {
-        "commits": 4,
-        "lines": 146,
+        "commits": 5,
+        "lines": 194,
         "path": "scripts/check-org-urls.sh"
       },
       {
-        "commits": 4,
-        "lines": 350,
+        "commits": 5,
+        "lines": 466,
         "path": "scripts/regenerate-scorecard.sh"
       },
       {
-        "commits": 3,
-        "lines": 408,
+        "commits": 4,
+        "lines": 544,
         "path": "scripts/sync-version.mjs"
       },
       {
-        "commits": 3,
-        "lines": 375,
+        "commits": 4,
+        "lines": 500,
         "path": "scripts/verify-metrics.sh"
       },
       {
-        "commits": 4,
-        "lines": 184,
+        "commits": 5,
+        "lines": 244,
         "path": "site/astro.config.mjs"
       },
       {
-        "commits": 7,
-        "lines": 24420,
+        "commits": 9,
+        "lines": 30736,
         "path": "site/package-lock.json"
       },
       {
-        "commits": 5,
-        "lines": 76,
+        "commits": 6,
+        "lines": 94,
         "path": "site/package.json"
       },
       {
-        "commits": 3,
-        "lines": 21,
+        "commits": 4,
+        "lines": 28,
         "path": "site/src/content.config.ts"
       },
       {
-        "commits": 7,
-        "lines": 555,
+        "commits": 6,
+        "lines": 704,
         "path": "site/src/content/docs/handbook/architecture.md"
       },
       {
-        "commits": 4,
-        "lines": 549,
+        "commits": 5,
+        "lines": 728,
         "path": "site/src/content/docs/handbook/beginners.md"
       },
       {
-        "commits": 8,
-        "lines": 589,
+        "commits": 7,
+        "lines": 764,
         "path": "site/src/content/docs/handbook/configuration.md"
       },
       {
-        "commits": 7,
-        "lines": 966,
+        "commits": 6,
+        "lines": 1238,
         "path": "site/src/content/docs/handbook/getting-started.md"
       },
       {
-        "commits": 9,
-        "lines": 180,
+        "commits": 8,
+        "lines": 226,
         "path": "site/src/content/docs/handbook/index.md"
       },
       {
-        "commits": 4,
-        "lines": 524,
+        "commits": 5,
+        "lines": 698,
         "path": "site/src/content/docs/handbook/operations.md"
       },
       {
-        "commits": 6,
-        "lines": 382,
+        "commits": 5,
+        "lines": 464,
         "path": "site/src/content/docs/handbook/tools.md"
       },
       {
-        "commits": 3,
-        "lines": 99,
+        "commits": 4,
+        "lines": 132,
         "path": "site/src/pages/index.astro"
       },
       {
         "commits": 8,
-        "lines": 552,
+        "lines": 684,
         "path": "site/src/site-config.ts"
       },
       {
-        "commits": 3,
-        "lines": 9,
+        "commits": 4,
+        "lines": 12,
         "path": "site/src/styles/global.css"
       },
       {
-        "commits": 4,
-        "lines": 79,
+        "commits": 5,
+        "lines": 104,
         "path": "site/src/styles/starlight-custom.css"
       },
       {
-        "commits": 3,
-        "lines": 15,
+        "commits": 4,
+        "lines": 20,
         "path": "site/tsconfig.json"
       },
       {
         "commits": 8,
-        "lines": 3943,
+        "lines": 5102,
         "path": "sync_manager.py"
       },
       {
-        "commits": 3,
-        "lines": 3,
+        "commits": 4,
+        "lines": 4,
         "path": "tests/__init__.py"
       },
       {
-        "commits": 10,
-        "lines": 1776,
+        "commits": 8,
+        "lines": 2313,
         "path": "tests/conftest.py"
       },
       {
-        "commits": 3,
-        "lines": 3,
+        "commits": 4,
+        "lines": 4,
         "path": "tests/golden_set/__init__.py"
       },
       {
-        "commits": 3,
-        "lines": 609,
+        "commits": 4,
+        "lines": 812,
         "path": "tests/golden_set/deterministic_embedder.py"
       },
       {
-        "commits": 3,
-        "lines": 522,
+        "commits": 4,
+        "lines": 696,
         "path": "tests/golden_set/fixture_corpus.py"
       },
       {
-        "commits": 6,
-        "lines": 858,
+        "commits": 7,
+        "lines": 1052,
         "path": "tests/golden_set/queries.yaml"
       },
       {
         "commits": 7,
-        "lines": 2205,
+        "lines": 2924,
         "path": "tests/test_analytics.py"
       },
       {
         "commits": 5,
-        "lines": 3175,
+        "lines": 4196,
         "path": "tests/test_backend_client.py"
       },
       {
         "commits": 6,
-        "lines": 843,
+        "lines": 1114,
         "path": "tests/test_backend_client_simple.py"
       },
       {
-        "commits": 6,
-        "lines": 7929,
+        "commits": 7,
+        "lines": 10561,
         "path": "tests/test_backend_client_simple_coverage.py"
       },
       {
-        "commits": 3,
-        "lines": 822,
+        "commits": 4,
+        "lines": 1096,
         "path": "tests/test_backend_client_simple_outcomes.py"
       },
       {
@@ -684,103 +669,103 @@
         "path": "tests/test_backend_http_wire.py"
       },
       {
-        "commits": 10,
-        "lines": 3225,
+        "commits": 8,
+        "lines": 4272,
         "path": "tests/test_chain_indexer.py"
       },
       {
-        "commits": 9,
-        "lines": 9495,
+        "commits": 10,
+        "lines": 12559,
         "path": "tests/test_cli_coverage.py"
       },
       {
         "commits": 7,
-        "lines": 3906,
+        "lines": 5205,
         "path": "tests/test_config.py"
       },
       {
-        "commits": 4,
-        "lines": 644,
+        "commits": 5,
+        "lines": 854,
         "path": "tests/test_corruption_recovery.py"
       },
       {
-        "commits": 11,
-        "lines": 4000,
+        "commits": 9,
+        "lines": 5040,
         "path": "tests/test_embedder.py"
       },
       {
-        "commits": 7,
-        "lines": 1441,
+        "commits": 8,
+        "lines": 1668,
         "path": "tests/test_embedder_degradation.py"
       },
       {
-        "commits": 5,
-        "lines": 3807,
+        "commits": 6,
+        "lines": 5004,
         "path": "tests/test_features_v2_2_0.py"
       },
       {
         "commits": 6,
-        "lines": 2736,
+        "lines": 3420,
         "path": "tests/test_fuzz.py"
       },
       {
         "commits": 5,
-        "lines": 5152,
+        "lines": 6860,
         "path": "tests/test_gateway.py"
       },
       {
-        "commits": 11,
-        "lines": 12005,
+        "commits": 10,
+        "lines": 15963,
         "path": "tests/test_gateway_coverage.py"
       },
       {
-        "commits": 4,
-        "lines": 2667,
+        "commits": 5,
+        "lines": 3554,
         "path": "tests/test_gateway_handlers.py"
       },
       {
-        "commits": 7,
-        "lines": 1725,
+        "commits": 8,
+        "lines": 2113,
         "path": "tests/test_golden_set.py"
       },
       {
         "commits": 6,
-        "lines": 2501,
+        "lines": 3332,
         "path": "tests/test_indexer.py"
       },
       {
-        "commits": 9,
-        "lines": 1686,
+        "commits": 8,
+        "lines": 2254,
         "path": "tests/test_regressions_swarm_01.py"
       },
       {
-        "commits": 4,
-        "lines": 1597,
+        "commits": 5,
+        "lines": 2128,
         "path": "tests/test_regressions_swarm_02.py"
       },
       {
-        "commits": 4,
-        "lines": 464,
+        "commits": 5,
+        "lines": 606,
         "path": "tests/test_smoke_e2e.py"
       },
       {
         "commits": 8,
-        "lines": 5561,
+        "lines": 7402,
         "path": "tests/test_sync_manager.py"
       },
       {
         "commits": 6,
-        "lines": 2234,
+        "lines": 2976,
         "path": "tests/test_tool_manifest.py"
       },
       {
-        "commits": 12,
-        "lines": 5917,
+        "commits": 13,
+        "lines": 7537,
         "path": "tests/test_ui.py"
       },
       {
         "commits": 5,
-        "lines": 282,
+        "lines": 368,
         "path": "tests/test_version.py"
       },
       {
@@ -790,12 +775,12 @@
       },
       {
         "commits": 7,
-        "lines": 2761,
+        "lines": 3676,
         "path": "tool_manifest.py"
       },
       {
         "commits": 12,
-        "lines": 8063,
+        "lines": 9931,
         "path": "ui.py"
       }
     ]
@@ -804,9 +789,9 @@
     "level": "low",
     "reason": "fewer than 25 source files reach 10 revisions in the window"
   },
-  "generatedAt": "2026-10-15T02:53:17.741Z",
+  "generatedAt": "2026-10-15T03:56:21.577Z",
   "generatedFrom": {
-    "commit": "e095e888f400f36e1b848a816e0628df5203dfd3"
+    "commit": "5b2768d1f579d24077e2530b05fb3ae7a0df876c"
   },
   "pairs": [
     {
@@ -819,43 +804,43 @@
     {
       "a": "atlas/README.md",
       "b": "atlas/page.json",
-      "either": 5,
-      "shared": 5,
+      "either": 7,
+      "shared": 7,
       "strength": 1
     },
     {
       "a": "atlas/README.md",
       "b": "atlas/statistics.json",
-      "either": 5,
-      "shared": 5,
+      "either": 7,
+      "shared": 7,
       "strength": 1
     },
     {
       "a": "atlas/README.md",
       "b": "atlas/structure.json",
-      "either": 5,
-      "shared": 5,
+      "either": 7,
+      "shared": 7,
       "strength": 1
     },
     {
       "a": "atlas/page.json",
       "b": "atlas/statistics.json",
-      "either": 5,
-      "shared": 5,
+      "either": 7,
+      "shared": 7,
       "strength": 1
     },
     {
       "a": "atlas/page.json",
       "b": "atlas/structure.json",
-      "either": 5,
-      "shared": 5,
+      "either": 7,
+      "shared": 7,
       "strength": 1
     },
     {
       "a": "atlas/statistics.json",
       "b": "atlas/structure.json",
-      "either": 5,
-      "shared": 5,
+      "either": 7,
+      "shared": 7,
       "strength": 1
     }
   ],
@@ -869,16 +854,16 @@
     "floor": "fallen",
     "floorHeld": false,
     "floorTrigger": "revision-depth",
-    "headDate": "2026-10-14T17:03:23-07:00",
+    "headDate": "2026-10-14T23:39:57-04:00",
     "inScopeFiles": 125,
     "pinnedStart": null,
     "priorFloor": "fallen",
-    "qualifyingCommits": 46,
+    "qualifyingCommits": 44,
     "qualifyingMinimum": 30,
     "revisions": 5,
     "shared": 10,
     "sharedFloorUsed": 3,
-    "since": "2026-04-18T00:03:23.000Z",
+    "since": "2026-04-18T03:39:57.000Z",
     "sourceExtensions": [
       ".js",
       ".mjs",

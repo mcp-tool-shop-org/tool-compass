@@ -547,10 +547,24 @@ jobs:
       - name: Smoke run
         run: |
           set -euo pipefail
-          docker run -d --name tc-smoke -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          # PYTHONUNBUFFERED + PYTHONFAULTHANDLER: a start that stalls before the
+          # app logs anything (seen on hosted runners: the container printed only
+          # the entrypoint's volume warning for the whole window) must say where
+          # it is stuck. On timeout the step sends SIGABRT, which makes Python
+          # write every thread's stack to the container log before it dies.
+          docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
+            -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
           cleanup() { docker logs tc-smoke || true; docker rm -f tc-smoke || true; }
           trap cleanup EXIT
-          for _ in $(seq 1 45); do
+          # 90 x 2s = 3 minutes. 45 x 2s was enough on every run that started
+          # normally (the image answers in a few seconds), but a hosted runner
+          # that is slow to start the process failed the required check with no
+          # code change; a crashed container still fails at once (below).
+          for _ in $(seq 1 90); do
+            if [ "$(docker inspect -f '{{.State.Running}}' tc-smoke)" != "true" ]; then
+              echo "::error::docker smoke (${{ matrix.target }}) container exited before it was ready"
+              exit 1
+            fi
             if [ "${{ matrix.smoke }}" = "health" ]; then
               if curl -sf "http://127.0.0.1:${{ matrix.port }}/health"; then
                 echo "gateway /health ok"
@@ -569,6 +583,9 @@ jobs:
             sleep 2
           done
           echo "::error::docker smoke (${{ matrix.target }}) did not become ready on port ${{ matrix.port }}"
+          docker top tc-smoke || true
+          docker kill -s ABRT tc-smoke || true
+          sleep 2
           exit 1
 
   # ===========================================================================
