@@ -1,14 +1,14 @@
 # tool-compass: how it works
 
-Mapped at 2026-10-15 from commit aadd8f9 by Atlas 1.24.0.
+Mapped at 2026-10-15 from commit 5b2768d by Atlas 1.24.0.
 
 ## What this is
 
 8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.
 
-## What changed since 2026-10-15 (e095e88)
+## What changed since 2026-10-15 (aadd8f9)
 
-Nothing structural changed since 2026-10-15; 1 file changed content.
+Nothing structural changed since 2026-10-15; 5 files changed content.
 
 ## What comes in
 

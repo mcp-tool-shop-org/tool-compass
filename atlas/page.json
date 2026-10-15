@@ -28,21 +28,21 @@
   "changes": {
     "fileCounts": {
       "added": 0,
-      "changed": 1,
+      "changed": 5,
       "moved": 0,
-      "parts": 1,
+      "parts": 2,
       "removed": 0
     },
     "items": [
       {
         "kind": "counts",
-        "sentence": "Nothing structural changed since 2026-10-15; 1 file changed content.",
+        "sentence": "Nothing structural changed since 2026-10-15; 5 files changed content.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "e095e888f400f36e1b848a816e0628df5203dfd3",
-      "generatedAt": "2026-10-15T02:53:17.741Z"
+      "commit": "aadd8f9a27c2bd4504c30791141fb1fabbeb86b4",
+      "generatedAt": "2026-10-15T03:39:52.801Z"
     },
     "unchanged": true
   },
@@ -51,8 +51,8 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 0 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "aadd8f9a27c2bd4504c30791141fb1fabbeb86b4",
-  "defaultBranch": "main",
+  "commit": "5b2768d1f579d24077e2530b05fb3ae7a0df876c",
+  "defaultBranch": "fix/docker-smoke-readiness",
   "derived": "8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.",
   "doors": [
     {
@@ -370,7 +370,7 @@
       ]
     }
   ],
-  "generatedAt": "2026-10-15T03:39:52.801Z",
+  "generatedAt": "2026-10-15T03:56:21.577Z",
   "limits": [
     "11 writes and 4 reads use paths built at run time and are not named here.",
     "5 writes and 35 reads go to a path their caller passes, not to this repository.",
