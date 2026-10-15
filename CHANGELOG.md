@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.4] - 2026-10-14
+
+### Security
+
+- **Workflow jobs run with a read-only token by default.** `publish.yml` had jobs with no `permissions` block, so they inherited the repository default token. A top-level `permissions: contents: read` now applies to every job that does not set its own (the jobs that publish or write keep theirs). Closes the `actions/missing-workflow-permissions` code-scanning alerts.
+
 ## [2.5.3] - 2026-10-14
 
 - Build fake credentials at runtime in config and HTTP backend tests so secret scanners do not flag test fixtures.
