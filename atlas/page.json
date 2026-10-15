@@ -2,7 +2,6 @@
   "authored": [
     ".github/",
     "assets/",
-    "docs/",
     "site/"
   ],
   "breaks": [
@@ -28,21 +27,21 @@
   "changes": {
     "fileCounts": {
       "added": 0,
-      "changed": 9,
+      "changed": 1,
       "moved": 0,
-      "parts": 5,
+      "parts": 1,
       "removed": 0
     },
     "items": [
       {
         "kind": "counts",
-        "sentence": "Nothing structural changed since 2026-10-01; 9 files changed content.",
+        "sentence": "Nothing structural changed since 2026-10-14; 1 file changed content.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "e6e5806a6d5d25c3deafe96867a4eda219ac07e5",
-      "generatedAt": "2026-10-01T02:36:16.838Z"
+      "commit": "a7e6492dab062818abb0ed14852c52d79be8b112",
+      "generatedAt": "2026-10-14T23:56:42.397Z"
     },
     "unchanged": true
   },
@@ -51,7 +50,7 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 0 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "a7e6492dab062818abb0ed14852c52d79be8b112",
+  "commit": "e095e888f400f36e1b848a816e0628df5203dfd3",
   "defaultBranch": "main",
   "derived": "8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.",
   "doors": [
@@ -356,6 +355,11 @@
   "engine": "1.24.0",
   "generated": [
     {
+      "addedBy": "dependabot[bot]",
+      "place": "docs/",
+      "writers": []
+    },
+    {
       "block": true,
       "place": "npm/bin/tool-compass.js",
       "writers": [
@@ -370,7 +374,7 @@
       ]
     }
   ],
-  "generatedAt": "2026-10-14T23:56:42.397Z",
+  "generatedAt": "2026-10-15T02:53:17.741Z",
   "limits": [
     "11 writes and 4 reads use paths built at run time and are not named here.",
     "5 writes and 35 reads go to a path their caller passes, not to this repository.",
