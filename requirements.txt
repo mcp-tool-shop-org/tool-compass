@@ -7,7 +7,7 @@ numpy>=1.26.0,<2.2.0  # <2.2.0: numpy 2.2+ wheels SIGILL on Python 3.13 GitHub r
 httpx>=0.27.0,<1.0.0
 
 # MCP Protocol
-mcp>=1.0.0,<2.0.0
+mcp>=1.0.0,<3.0.0
 
 # CLI polish — Rich powers the cli.py colored output / spinners / help (core dep
 # in pyproject). ci-infra-02: was missing here, so the Docker image (installs
