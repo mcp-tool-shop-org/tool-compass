@@ -201,7 +201,7 @@ omit = [
 # added ~1900 statements (gateway/indexer/backend_client_simple) and
 # coverage is 77.9% with 1423 passing tests. Hold 77 until the next
 # test pass restores 80 — do not ship a silent floor drop as the target.
-fail_under = 77
+fail_under = 78
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",

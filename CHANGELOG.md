@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Added a dated `pip-audit` exception in CI until 2026-12-10 (#157) for 39 unreachable `pillow` 12.3.0 advisories held below `13.0.0` by `gradio` 6.31.0's `pillow<13.0` requirement, and raised the coverage floor (`[tool.coverage.report].fail_under`) from 77 to 78.
+
 ## [2.5.5] - 2026-10-15
 
 ### Fixed
