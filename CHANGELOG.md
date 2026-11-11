@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The Gradio UI honours `GRADIO_AUTH` / `--auth` on every start, and refuses to start off loopback (including the Docker UI container) without a login.** Loopback starts (`127.0.0.1`, `localhost`, `::1`) continue to work without a login when `GRADIO_AUTH` is unset, and apply the login whenever `GRADIO_AUTH=user:pass` or `tool-compass ui --auth user:pass` is set (malformed values exit with code 2). Non-loopback starts and the Docker UI image require `GRADIO_AUTH=user:pass`, or `TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` when running behind a proxy that enforces its own login (which prints a startup warning and hides the UI execute controls).
 - Added a dated `pip-audit` exception in CI until 2026-12-10 (#157) for 39 unreachable `pillow` 12.3.0 advisories held below `13.0.0` by `gradio` 6.31.0's `pillow<13.0` requirement, and raised the coverage floor (`[tool.coverage.report].fail_under`) from 77 to 78.
 
 ## [2.5.5] - 2026-10-15

@@ -23,6 +23,68 @@
 
 set -eu
 
+UI_NO_LOGIN_HINT="ERROR: Refusing to start UI on non-loopback host without a login; set GRADIO_AUTH=user:pass (or pass --auth user:pass), or set TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1 behind a proxy that enforces its own login."
+
+check_ui_login_guard() {
+    is_ui=0
+    case "${1:-}" in
+        python|python3)
+            case "${2:-}" in
+                ui.py|*/ui.py) is_ui=1 ;;
+            esac
+            ;;
+        tool-compass-ui|*/tool-compass-ui)
+            is_ui=1
+            ;;
+        tool-compass|*/tool-compass)
+            if [ "${2:-}" = "ui" ]; then
+                is_ui=1
+            fi
+            ;;
+    esac
+    [ "$is_ui" -eq 1 ] || return 0
+
+    ui_host="127.0.0.1"
+    has_cli_auth=0
+    expect_host=0
+    for arg in "$@"; do
+        if [ "$expect_host" -eq 1 ]; then
+            ui_host="$arg"
+            expect_host=0
+            continue
+        fi
+        case "$arg" in
+            -h|--help|--version)
+                return 0
+                ;;
+            --host)
+                expect_host=1
+                ;;
+            --host=*)
+                ui_host="${arg#--host=}"
+                ;;
+            --auth|--auth=*)
+                has_cli_auth=1
+                ;;
+        esac
+    done
+
+    ui_host_lc=$(printf '%s' "$ui_host" | tr '[:upper:]' '[:lower:]')
+    case "$ui_host_lc" in
+        127.0.0.1|localhost|::1)
+            return 0
+            ;;
+    esac
+
+    opt_out=$(printf '%s' "${TOOL_COMPASS_UI_ALLOW_NO_LOGIN:-}" | tr -d '[:space:]')
+    if [ -z "${GRADIO_AUTH:-}" ] && [ "$has_cli_auth" -eq 0 ] && [ "$opt_out" != "1" ]; then
+        printf '%s\n' "$UI_NO_LOGIN_HINT" >&2
+        exit 2
+    fi
+}
+
+check_ui_login_guard "$@"
+
 DATA_DIR="${TOOL_COMPASS_DB_DIR:-/app/tool_compass/db}"
 
 is_mounted() {
@@ -45,12 +107,13 @@ if [ -d "$DATA_DIR" ] && ! is_mounted; then
 
   Keep it between runs:
 
-      docker run --rm -p 7860:7860 -v tool-compass-data:${DATA_DIR} \\
-        ghcr.io/mcp-tool-shop-org/tool-compass:latest
+      docker run --rm -p 7860:7860 -e GRADIO_AUTH=user:pass \\
+        -v tool-compass-data:${DATA_DIR} \\
+        ghcr.io/mcp-tool-shop-org/tool-compass:ui
 
   Or use the compose file, which already mounts a named volume:
 
-      docker compose up
+      GRADIO_AUTH=user:pass docker compose up
 
 WARNING
     printf '\033[0m' >&2

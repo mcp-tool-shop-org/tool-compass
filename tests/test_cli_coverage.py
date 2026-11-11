@@ -1150,6 +1150,98 @@ class TestCmdUI:
         assert rc == 0
         assert "--share" not in captured_argv
 
+    def test_ui_auth_without_share_reaches_launch_call(self, monkeypatch):
+        """`tool-compass ui --auth u:p` without --share must pass ('u', 'p') to launch."""
+        import warnings
+        from unittest.mock import MagicMock
+        import ui as real_ui
+
+        monkeypatch.setitem(sys.modules, "ui", real_ui)
+        monkeypatch.delenv("GRADIO_AUTH", raising=False)
+        monkeypatch.delenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", raising=False)
+        monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
+        for attr in ("_ui_share_mode", "_ui_no_login_opt_out", "_ui_execute_visible"):
+            if hasattr(real_ui, attr):
+                monkeypatch.setattr(real_ui, attr, getattr(real_ui, attr))
+
+        idx = MagicMock()
+        idx.get_stats.return_value = {
+            "total_tools": 0,
+            "core_tools": 0,
+            "by_server": {},
+            "by_category": {},
+        }
+        monkeypatch.setattr(real_ui, "get_index", lambda: idx)
+        monkeypatch.setattr(real_ui, "get_filter_choices", lambda: (["All"], ["All"]))
+        monkeypatch.setattr(real_ui, "_check_ollama_banner", lambda: "")
+        monkeypatch.setattr(real_ui, "filter_tools", lambda *_a, **_kw: "<p>stub</p>")
+        monkeypatch.setattr(
+            real_ui, "get_analytics_dashboard", lambda *_a, **_kw: "<p>stub</p>"
+        )
+        monkeypatch.setattr(real_ui, "get_chains_view", lambda *_a, **_kw: "<p>stub</p>")
+        monkeypatch.setattr(
+            real_ui, "get_system_status", lambda *_a, **_kw: "<p>stub</p>"
+        )
+
+        launched: list[tuple[object, tuple, dict]] = []
+
+        def _fake_launch(self_blocks, *args, **kwargs):
+            launched.append((self_blocks, args, kwargs))
+
+        monkeypatch.setattr(real_ui.gr.Blocks, "launch", _fake_launch)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            rc = cli.main(["ui", "--auth", "u:p"])
+
+        assert rc == 0
+        assert len(launched) == 1
+        _demo, _args, kwargs = launched[0]
+        assert kwargs["auth"] == ("u", "p")
+        assert kwargs["share"] is False
+
+    def test_ui_empty_auth_without_share_exits_2(self, monkeypatch):
+        """`tool-compass ui --auth ''` without --share must exit 2, never start open."""
+        from unittest.mock import MagicMock
+        import ui as real_ui
+
+        monkeypatch.setitem(sys.modules, "ui", real_ui)
+        monkeypatch.delenv("GRADIO_AUTH", raising=False)
+        monkeypatch.delenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", raising=False)
+        monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
+
+        idx = MagicMock()
+        idx.get_stats.return_value = {
+            "total_tools": 0,
+            "core_tools": 0,
+            "by_server": {},
+            "by_category": {},
+        }
+        monkeypatch.setattr(real_ui, "get_index", lambda: idx)
+        monkeypatch.setattr(real_ui, "get_filter_choices", lambda: (["All"], ["All"]))
+        monkeypatch.setattr(real_ui, "_check_ollama_banner", lambda: "")
+        monkeypatch.setattr(real_ui, "filter_tools", lambda *_a, **_kw: "<p>stub</p>")
+        monkeypatch.setattr(
+            real_ui, "get_analytics_dashboard", lambda *_a, **_kw: "<p>stub</p>"
+        )
+        monkeypatch.setattr(real_ui, "get_chains_view", lambda *_a, **_kw: "<p>stub</p>")
+        monkeypatch.setattr(
+            real_ui, "get_system_status", lambda *_a, **_kw: "<p>stub</p>"
+        )
+
+        launched: list[tuple[object, tuple, dict]] = []
+
+        def _fake_launch(self_blocks, *args, **kwargs):
+            launched.append((self_blocks, args, kwargs))
+
+        monkeypatch.setattr(real_ui.gr.Blocks, "launch", _fake_launch)
+
+        with pytest.raises(SystemExit) as exc_info:
+            cli.main(["ui", "--auth", ""])
+
+        assert exc_info.value.code == 2
+        assert launched == []
+
 
 # =============================================================================
 # cmd_search — text mode + empty results + ConnectionError + load-failure

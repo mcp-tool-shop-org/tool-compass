@@ -61,7 +61,7 @@ Tool Compass is designed as a **local development tool**. It has these security 
 
 | Component | Security Model |
 |-----------|----------------|
-| Gradio UI | No authentication by default |
+| Gradio UI | Loopback (`127.0.0.1` / `localhost` / `::1`) has no login by default unless `GRADIO_AUTH` / `--auth` is set; non-loopback binds (including Docker) and `--share` require `GRADIO_AUTH=user:pass` (or `TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` behind an authenticating proxy, which warns and hides execute controls) |
 | MCP Gateway | Trusts backend servers |
 | Analytics DB | Local SQLite, no encryption |
 | Embeddings | Sent to local Ollama |
@@ -70,14 +70,12 @@ Tool Compass is designed as a **local development tool**. It has these security 
 
 If deploying Tool Compass in a shared environment:
 
-1. **Enable Gradio authentication**:
-   ```python
-   demo.launch(auth=("user", "password"))
-   ```
+1. **Configure UI login**:
+   Set `GRADIO_AUTH=user:pass` (or pass `tool-compass ui --auth user:pass`). Non-loopback binds and the Docker UI image refuse to start without `GRADIO_AUTH` unless `TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` is explicitly set behind a reverse proxy that enforces its own login (which prints a startup warning and hides the UI execute controls).
 
 2. **Use environment variables** for sensitive config (not `compass_config.json`)
 
-3. **Network isolation**: Run behind a reverse proxy with auth
+3. **Network isolation**: Run behind a reverse proxy with auth (`TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` if delegating UI login to the proxy)
 
 4. **Rate limiting**: Add nginx/Cloudflare rate limiting for the UI
 

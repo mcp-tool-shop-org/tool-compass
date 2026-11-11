@@ -513,10 +513,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Launch the Gradio web UI (requires tool-compass[ui])",
         epilog=(
             "Examples:\n"
-            "  tool-compass ui                       # default port 7860\n"
-            "  tool-compass ui --port 7861           # custom port\n"
-            "  tool-compass ui --share               # public Gradio tunnel\n"
-            "  tool-compass ui --auth user:pass      # basic auth (sets GRADIO_AUTH)\n"
+            "  tool-compass ui                                # loopback (127.0.0.1:7860)\n"
+            "  tool-compass ui --port 7861                    # custom port\n"
+            "  tool-compass ui --auth user:pass               # require login (sets GRADIO_AUTH)\n"
+            "  tool-compass ui --host 0.0.0.0 --auth user:pass # non-loopback (login required)\n"
+            "  tool-compass ui --share --auth user:pass       # public Gradio tunnel\n"
             "\n"
             "Equivalent to `tool-compass-ui`. Install the extras with:\n"
             "  pip install tool-compass[ui]"
@@ -524,14 +525,23 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_ui.add_argument("--port", type=int, default=7860, help="Port to run on (default 7860)")
-    p_ui.add_argument("--host", default="127.0.0.1", help="Host to bind to (default 127.0.0.1)")
+    p_ui.add_argument(
+        "--host", default="127.0.0.1",
+        help=(
+            "Host to bind to (default 127.0.0.1; non-loopback requires "
+            "GRADIO_AUTH/--auth or TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1)"
+        ),
+    )
     p_ui.add_argument(
         "--share", action="store_true",
         help="Create public Gradio tunnel (requires GRADIO_AUTH or --auth)",
     )
     p_ui.add_argument(
         "--auth", default=None,
-        help="Basic auth for --share, format `user:pass`. Sets GRADIO_AUTH env.",
+        help=(
+            "UI login in `user:pass` format (sets GRADIO_AUTH; applied on every "
+            "start, required off loopback and for --share)."
+        ),
     )
 
     # status — backend health, breaker state, embedder status, index size,
@@ -1765,8 +1775,8 @@ def _cmd_ui(args: argparse.Namespace) -> int:
 
     Thin wrapper that delegates straight to ``ui:main`` (the existing console
     script). Forwards ``--port`` / ``--host`` / ``--share`` and propagates
-    ``--auth user:pass`` through the GRADIO_AUTH env var that ui.py already
-    reads for the public-tunnel auth check.
+    ``--auth user:pass`` through the GRADIO_AUTH env var that ui.main validates
+    on every start.
 
     FE-W11-002: the README + docs advertise `tool-compass ui`; before this
     subcommand it 404'd. Tests pass when `tool-compass ui --help` works and
@@ -1787,8 +1797,14 @@ def _cmd_ui(args: argparse.Namespace) -> int:
             exit_code=1,
         )
 
-    # Bridge --auth to GRADIO_AUTH so ui.main's existing share-auth gate sees it.
-    if args.auth:
+    # Bridge --auth to GRADIO_AUTH so ui.main applies and validates it.
+    if args.auth is not None:
+        if not args.auth.strip():
+            print(
+                "   ERROR: GRADIO_AUTH must be 'user:pass' (non-empty on both sides).",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         os.environ["GRADIO_AUTH"] = args.auth
 
     # Rebuild argv for ui.main so it can re-parse with its own argparse. We

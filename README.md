@@ -98,20 +98,30 @@ tool-compass ui
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
 cd tool-compass
 
-# Start with Docker Compose (requires Ollama running locally)
-docker-compose up
+# Start with Docker Compose (requires Ollama running locally and a UI login)
+GRADIO_AUTH=user:pass docker compose up
 
 # Or include Ollama in the stack
-docker-compose --profile with-ollama up
+GRADIO_AUTH=user:pass docker compose --profile with-ollama up
 
 # Access the UI at http://localhost:7860
 ```
 
-Or run the published image directly, without cloning:
+Or run the published UI image directly, without cloning:
 
 ```bash
-docker run --rm -p 7860:7860   -v tool-compass-data:/app/tool_compass/db   ghcr.io/mcp-tool-shop-org/tool-compass:latest
+docker run --rm -p 7860:7860 \
+  -e GRADIO_AUTH=user:pass \
+  -v tool-compass-data:/app/tool_compass/db \
+  ghcr.io/mcp-tool-shop-org/tool-compass:ui
 ```
+
+> **UI login required in containers.** Because the container binds `0.0.0.0`,
+> startup refuses to run without a login. Start it in one of two ways: set
+> `GRADIO_AUTH=user:pass` (via `.env`, shell environment, or `-e`), or set
+> `TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` when deploying behind a reverse proxy that
+> enforces its own login (prints a startup warning and hides the UI execute
+> controls).
 
 > **Mount the volume.** The semantic index lives in `/app/tool_compass/db`, and
 > building it means embedding every tool in every configured server. Without a
@@ -245,6 +255,8 @@ The `hint` field in compass results guides this flow, suggesting when to use `de
 | `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
 | `PORT` | Set to enable HTTP transport (e.g., for Fly.io) | unset (stdio) |
 | `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | Bearer token required on the HTTP transport (opt-in; overrides the `gateway_auth_token` config field) | unset (no auth) |
+| `GRADIO_AUTH` | UI login (`user:pass`); applied on every UI start when set, and required off loopback / in Docker / on `--share` | unset (loopback only) |
+| `TOOL_COMPASS_UI_ALLOW_NO_LOGIN` | Set to `1` to allow starting the UI off loopback without `GRADIO_AUTH` behind an authenticating proxy (warns and hides execute controls) | unset |
 
 **Default data directories:**
 - **Windows:** `%LOCALAPPDATA%\tool-compass\`

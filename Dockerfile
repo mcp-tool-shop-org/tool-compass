@@ -113,9 +113,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Default command: Run Gradio UI.
 # UI-DOCKER-BIND-001: bind 0.0.0.0 explicitly so the UI is reachable through the
-# published port mapping (inside the container the container boundary is the
-# isolation layer; external exposure is controlled by `docker run -p` /
-# compose `ports:`). Without this the UI bound to 127.0.0.1 and was unreachable.
+# published port mapping; without this the UI bound to 127.0.0.1 inside the
+# container and was unreachable. Because 0.0.0.0 is non-loopback, startup
+# refuses to run unless GRADIO_AUTH=user:pass is set (or
+# TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1 is set behind a proxy that does its own login).
 CMD ["python", "ui.py", "--host", "0.0.0.0", "--port", "7860"]
 
 # =============================================================================

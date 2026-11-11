@@ -596,8 +596,20 @@ jobs:
           # the entrypoint's volume warning for the whole window) must say where
           # it is stuck. On timeout the step sends SIGABRT, which makes Python
           # write every thread's stack to the container log before it dies.
-          docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
-            -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          if [ "${{ matrix.smoke }}" = "bind" ]; then
+            # UI image binds 0.0.0.0 and must refuse a bare start without login.
+            rc=0
+            docker run --rm ${{ matrix.tag }} >/dev/null 2>&1 || rc=$?
+            if [ "$rc" -ne 2 ]; then
+              echo "::error::UI container without GRADIO_AUTH exited $rc (expected 2)"
+              exit 1
+            fi
+            docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
+              -e GRADIO_AUTH=u:p -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          else
+            docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
+              -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          fi
           cleanup() { docker logs tc-smoke || true; docker rm -f tc-smoke || true; }
           trap cleanup EXIT
           # 90 x 2s = 3 minutes. 45 x 2s was enough on every run that started
