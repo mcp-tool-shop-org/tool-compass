@@ -124,12 +124,15 @@ CMD ["python", "ui.py", "--host", "0.0.0.0", "--port", "7860"]
 # =============================================================================
 FROM production AS mcp-gateway
 
-# Override for HTTP mode (Fly.io / Smithery)
+# Override for HTTP mode (Fly.io / Smithery / reverse-proxy deployments).
 # ci-infra-01: gateway.py's _run_http defaults HOST to 127.0.0.1 (loopback), so
-# without this the published image binds loopback and any orchestrator's proxy /
-# health check (the HEALTHCHECK below hits localhost, but Fly/Smithery reach the
-# container over the network) can't reach the gateway. 0.0.0.0 is the documented
-# reverse-proxy path — this image is meant to sit behind an authenticated edge.
+# without this the published image binds loopback and orchestrators reaching the
+# container over the network cannot connect. Because HOST=0.0.0.0 is non-loopback,
+# the container refuses to start (exit 2) unless the operator passes
+# TOOL_COMPASS_GATEWAY_AUTH_TOKEN (or sets gateway_auth_token in config), or sets
+# TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 behind an authenticating proxy. Neither
+# variable is set here so the image fails closed by default; /health stays exempt
+# so the HEALTHCHECK below works with a token set.
 ENV PORT=8080 \
     HOST=0.0.0.0
 

@@ -69,6 +69,11 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - HOST=0.0.0.0
       - PORT=8080
+      # Required off loopback: set TOOL_COMPASS_GATEWAY_AUTH_TOKEN in your host
+      # environment / .env, or set TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 when
+      # running behind an authenticating reverse proxy (one of them is required).
+      - TOOL_COMPASS_GATEWAY_AUTH_TOKEN
+      - TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8080/health'); r.raise_for_status()"]

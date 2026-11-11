@@ -9,6 +9,10 @@ Environment Variables:
     TOOL_COMPASS_DATA_DIR: Override user data directory (default: platform-specific)
     TOOL_COMPASS_GATEWAY_AUTH_TOKEN: Bearer token for the HTTP transport (OPS-1).
         Overrides the config gateway_auth_token field; secret (never printed).
+        Required off loopback unless TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 is set.
+    TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN: Opt-out (1/true/yes/on) allowing the
+        HTTP gateway to bind off loopback without a token behind an
+        authenticating reverse proxy.
     OLLAMA_URL: Ollama server URL (default: http://localhost:11434)
 
 Default config directories by platform:
@@ -140,10 +144,11 @@ class CompassConfig:
     # 0 = keep forever. Clamped to >= 0 in validate_and_clamp.
     analytics_retention_days: int = 30
 
-    # Gateway auth (OPS-1): opt-in bearer token for the HTTP transport.
-    # None = no auth. Treated as a SECRET: ${VAR}-resolved at load like other
-    # secret-bearing fields, falls back to the TOOL_COMPASS_GATEWAY_AUTH_TOKEN
-    # env var when unset (apply_env_overrides), and is redacted in
+    # Gateway auth (OPS-1): bearer token for the HTTP transport. Required off
+    # loopback unless TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 is set; optional on
+    # loopback. None (or empty / whitespace-only) = unset. Treated as a SECRET:
+    # ${VAR}-resolved at load like other secret-bearing fields, falls back to
+    # TOOL_COMPASS_GATEWAY_AUTH_TOKEN (apply_env_overrides), and is redacted in
     # doctor()/show_config output (name ends in _token -> _SECRET_FIELD_HINTS).
     gateway_auth_token: Optional[str] = None
 
@@ -640,6 +645,21 @@ class CompassConfig:
             )
             self.analytics_retention_days = clamped
 
+        # OPS-1: empty or whitespace-only gateway_auth_token counts as unset
+        # (None). Non-string hand-edited JSON values also reset to None without
+        # logging the value itself.
+        if self.gateway_auth_token is not None:
+            if not isinstance(self.gateway_auth_token, str):
+                logger.warning(
+                    "Config value gateway_auth_token (%s) is not a string; "
+                    "resetting to None",
+                    type(self.gateway_auth_token).__name__,
+                )
+                self.gateway_auth_token = None
+            else:
+                stripped_gw_token = self.gateway_auth_token.strip()
+                self.gateway_auth_token = stripped_gw_token if stripped_gw_token else None
+
         # INT-02 / FEAT-06: normalize per-backend timeout + tool-filter fields.
         self._validate_and_clamp_backends()
 
@@ -964,11 +984,11 @@ def apply_env_overrides(config: CompassConfig) -> CompassConfig:
 
     # OPS-1: the gateway auth token is a secret — prefer the env var over a
     # value baked into the config file so operators can keep the token off
-    # disk. An empty string is ignored (treated as "not set") so an
-    # exported-but-empty var doesn't blank out a file value.
+    # disk. An empty or whitespace-only string is ignored (treated as "not
+    # set") so an exported-but-empty var doesn't blank out a file value.
     raw_gw_token = os.environ.get("TOOL_COMPASS_GATEWAY_AUTH_TOKEN")
     if raw_gw_token is not None and raw_gw_token.strip() != "":
-        config.gateway_auth_token = raw_gw_token
+        config.gateway_auth_token = raw_gw_token.strip()
         changed = True
 
     # Re-clamp so the hot_cache_size env value lands in the same safe range

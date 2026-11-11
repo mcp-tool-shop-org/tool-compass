@@ -134,6 +134,19 @@ docker run --rm -p 7860:7860 \
 > `linux/amd64` and `linux/arm64`, so the same tag runs on x86_64 servers
 > and Apple Silicon / ARM workstations.
 
+To run the **MCP HTTP gateway** container (`mcp-gateway` stage, port `8080`), supply a bearer token — because the container binds `HOST=0.0.0.0`, it refuses to start without `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` (or `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1` when behind an authenticating reverse proxy):
+
+```bash
+# Docker Compose (gateway profile)
+TOOL_COMPASS_GATEWAY_AUTH_TOKEN=<your-token> docker compose --profile gateway up
+
+# Or published gateway image directly
+docker run --rm -p 8080:8080 \
+  -e TOOL_COMPASS_GATEWAY_AUTH_TOKEN=<your-token> \
+  -v tool-compass-data:/app/tool_compass/db \
+  ghcr.io/mcp-tool-shop-org/tool-compass:gateway
+```
+
 ## Features
 
 - **Hybrid Search** - Semantic (HNSW) + lexical fusion with exact-name boost — describe what you want, or paste a tool name and it ranks #1
@@ -254,7 +267,9 @@ The `hint` field in compass results guides this flow, suggesting when to use `de
 | `OLLAMA_URL` | Ollama server URL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUI server | `http://localhost:8188` |
 | `PORT` | Set to enable HTTP transport (e.g., for Fly.io) | unset (stdio) |
-| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | Bearer token required on the HTTP transport (opt-in; overrides the `gateway_auth_token` config field) | unset (no auth) |
+| `HOST` | Bind address for the HTTP transport; non-loopback values require `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` (or `gateway_auth_token`) unless `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1` is set | `127.0.0.1` |
+| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | Bearer token for the HTTP transport (overrides `gateway_auth_token` in `compass_config.json`). Required when `HOST` is not loopback (`127.0.0.1`, `localhost`, `::1`); optional on loopback | unset (refuses off loopback) |
+| `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN` | Set to `1` to allow binding the HTTP gateway off loopback without a bearer token when an authenticating reverse proxy sits in front (logs a warning on every start) | unset (disabled) |
 | `GRADIO_AUTH` | UI login (`user:pass`); applied on every UI start when set, and required off loopback / in Docker / on `--share` | unset (loopback only) |
 | `TOOL_COMPASS_UI_ALLOW_NO_LOGIN` | Set to `1` to allow starting the UI off loopback without `GRADIO_AUTH` behind an authenticating proxy (warns and hides execute controls) | unset |
 

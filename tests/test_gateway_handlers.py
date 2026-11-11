@@ -11,8 +11,13 @@ were the single biggest gap in coverage.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import shlex
+import sys
+import types
+from pathlib import Path
 from unittest.mock import Mock, AsyncMock, patch
 
 import pytest
@@ -844,10 +849,12 @@ class TestRunHttpHostEnvVarWarning:
 
     @pytest.mark.asyncio
     async def test_run_http_warns_when_non_loopback_host(self, caplog):
-        """A HOST set to a public IP should log a warning."""
+        """A HOST set to a public IP with explicit proxy opt-out logs a warning."""
 
         old_host = os.environ.get("HOST")
+        old_opt_out = os.environ.get("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN")
         os.environ["HOST"] = "0.0.0.0"
+        os.environ["TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN"] = "1"
 
         try:
             with caplog.at_level("WARNING"):
@@ -864,6 +871,10 @@ class TestRunHttpHostEnvVarWarning:
                 os.environ.pop("HOST", None)
             else:
                 os.environ["HOST"] = old_host
+            if old_opt_out is None:
+                os.environ.pop("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN", None)
+            else:
+                os.environ["TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN"] = old_opt_out
 
     @pytest.mark.asyncio
     async def test_run_http_no_warning_for_loopback_host(self, caplog):
@@ -885,3 +896,518 @@ class TestRunHttpHostEnvVarWarning:
                 os.environ.pop("HOST", None)
             else:
                 os.environ["HOST"] = old_host
+
+
+# =============================================================================
+# Fail-closed HTTP gateway token checks off loopback
+# =============================================================================
+
+
+def _parse_dockerfile_stages(dockerfile_text: str) -> dict[str, dict]:
+    """Parse FROM / ENV / ENTRYPOINT / CMD per stage from a Dockerfile.
+
+    Strips full-line comments before joining backslash continuations so inline
+    comment lines inside multi-line ENV blocks are handled the same way Docker
+    BuildKit parses them. Child stages (`FROM <parent> AS <child>`) inherit
+    `env`, `entrypoint`, and `cmd` from the parent stage.
+    """
+    logical_lines: list[str] = []
+    buf = ""
+    for raw_line in dockerfile_text.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            buf += stripped[:-1].rstrip() + " "
+        else:
+            buf += stripped
+            logical_lines.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        logical_lines.append(buf.strip())
+
+    stages: dict[str, dict] = {}
+    current: dict | None = None
+
+    for line in logical_lines:
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        instr = parts[0].upper()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        if instr == "FROM":
+            tokens = rest.split()
+            # Skip optional --platform=... flag if present.
+            if tokens and tokens[0].startswith("--"):
+                tokens = tokens[1:]
+            base_ref = tokens[0] if tokens else ""
+            stage_name = base_ref
+            for idx, tok in enumerate(tokens):
+                if tok.upper() == "AS" and idx + 1 < len(tokens):
+                    stage_name = tokens[idx + 1]
+                    break
+            parent = stages.get(base_ref)
+            current = {
+                "base": base_ref,
+                "env": dict(parent["env"]) if parent else {},
+                "entrypoint": list(parent["entrypoint"])
+                if parent and parent["entrypoint"] is not None
+                else None,
+                "cmd": list(parent["cmd"])
+                if parent and parent["cmd"] is not None
+                else None,
+            }
+            stages[stage_name] = current
+        elif current is not None and instr == "ENV":
+            env_tokens = shlex.split(rest)
+            if env_tokens and "=" in env_tokens[0]:
+                for tok in env_tokens:
+                    if "=" in tok:
+                        key, val = tok.split("=", 1)
+                        current["env"][key] = val
+            elif env_tokens:
+                key = env_tokens[0]
+                val = rest[len(key):].strip()
+                current["env"][key] = val
+        elif current is not None and instr in ("ENTRYPOINT", "CMD"):
+            target_key = instr.lower()
+            if rest.startswith("["):
+                current[target_key] = json.loads(rest)
+            else:
+                current[target_key] = shlex.split(rest)
+
+    return stages
+
+
+def _make_fake_uvicorn():
+    """Build a socket-free stub `uvicorn` module for `_run_http` auth tests."""
+    fake_uvicorn = types.ModuleType("uvicorn")
+    captured: dict = {}
+
+    def _config_ctor(app, **kwargs):
+        captured["app"] = app
+        captured["kwargs"] = kwargs
+        return types.SimpleNamespace(app=app, **kwargs)
+
+    server_instance = Mock()
+    server_instance.serve = AsyncMock(return_value=None)
+    fake_uvicorn.Config = Mock(side_effect=_config_ctor)
+    fake_uvicorn.Server = Mock(return_value=server_instance)
+    return fake_uvicorn, server_instance, captured
+
+
+def _reset_gateway_env_and_config(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    config_payload: dict | None = None,
+) -> None:
+    """Isolate gateway HTTP env vars and cached config from host/prior-test state."""
+    import gateway
+
+    for var in (
+        "HOST",
+        "PORT",
+        "TOOL_COMPASS_GATEWAY_AUTH_TOKEN",
+        "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    if config_payload is None:
+        cfg_file = tmp_path / "missing_compass_config.json"
+    else:
+        cfg_file = tmp_path / "compass_config.json"
+        cfg_file.write_text(json.dumps(config_payload), encoding="utf-8")
+
+    monkeypatch.setenv("TOOL_COMPASS_CONFIG", str(cfg_file))
+    monkeypatch.setattr(gateway, "_config", None)
+    monkeypatch.setattr(gateway.mcp, "_custom_starlette_routes", [])
+    monkeypatch.setattr(
+        gateway,
+        "_ready_cache_invalidators",
+        list(gateway._ready_cache_invalidators),
+    )
+
+
+async def _drive_asgi_http(
+    app,
+    *,
+    path: str,
+    method: str = "POST",
+    headers: list[tuple[bytes, bytes]] | None = None,
+) -> int:
+    """Drive a raw ASGI HTTP callable without opening a socket and return status."""
+    status_holder: dict[str, int] = {}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(event):
+        if event.get("type") == "http.response.start":
+            status_holder["status"] = event["status"]
+
+    scope = {
+        "type": "http",
+        "method": method,
+        "path": path,
+        "headers": headers or [],
+    }
+    await app(scope, receive, send)
+    return status_holder["status"]
+
+
+class TestRunHttpFailClosedOffLoopback:
+    """HTTP gateway requires a non-empty token off loopback unless opted out."""
+
+    def test_non_loopback_no_token_no_opt_out_exits_2(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import gateway
+
+        _reset_gateway_env_and_config(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOST", "0.0.0.0")
+        fake_uvicorn, server_instance, _ = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        with (
+            patch.object(gateway, "build_http_app", new=Mock()) as mock_build_app,
+            patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                gateway._run_http(port=8080)
+
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert len(err.strip().splitlines()) == 1
+        assert "TOOL_COMPASS_GATEWAY_AUTH_TOKEN" in err
+        assert "gateway_auth_token" in err
+        assert "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1" in err
+        mock_build_app.assert_not_called()
+        mock_mcp_run.assert_not_called()
+        fake_uvicorn.Server.assert_not_called()
+        server_instance.serve.assert_not_called()
+
+    def test_non_loopback_host_variants_without_token_exit_2(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import gateway
+
+        for bad_host in ("::", "*", "", "   ", " 0.0.0.0 ", "192.0.2.10"):
+            _reset_gateway_env_and_config(monkeypatch, tmp_path)
+            monkeypatch.setenv("HOST", bad_host)
+            fake_uvicorn, server_instance, _ = _make_fake_uvicorn()
+            monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+            with (
+                patch.object(gateway, "build_http_app", new=Mock()) as mock_build_app,
+                patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run,
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    gateway._run_http(port=8080)
+
+            assert exc_info.value.code == 2, f"HOST={bad_host!r} must exit 2"
+            err = capsys.readouterr().err
+            assert len(err.strip().splitlines()) == 1
+            assert "TOOL_COMPASS_GATEWAY_AUTH_TOKEN" in err
+            assert "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1" in err
+            mock_build_app.assert_not_called()
+            mock_mcp_run.assert_not_called()
+            fake_uvicorn.Server.assert_not_called()
+            server_instance.serve.assert_not_called()
+
+    def test_non_loopback_whitespace_only_token_exits_2(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import gateway
+        from config import CompassConfig, load_config
+
+        # 1) Whitespace-only token in environment counts as unset -> exits 2.
+        _reset_gateway_env_and_config(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOST", "0.0.0.0")
+        monkeypatch.setenv("TOOL_COMPASS_GATEWAY_AUTH_TOKEN", "   \t\n  ")
+        fake_uvicorn, server_instance, _ = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        with (
+            patch.object(gateway, "build_http_app", new=Mock()) as mock_build_app,
+            patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                gateway._run_http(port=8080)
+
+        assert exc_info.value.code == 2
+        capsys.readouterr()
+        mock_build_app.assert_not_called()
+        mock_mcp_run.assert_not_called()
+        fake_uvicorn.Server.assert_not_called()
+        server_instance.serve.assert_not_called()
+
+        # 2) Whitespace-only token in compass_config.json normalizes to None -> exits 2.
+        _reset_gateway_env_and_config(
+            monkeypatch,
+            tmp_path,
+            config_payload={"backends": {}, "gateway_auth_token": "   \t  "},
+        )
+        assert load_config().gateway_auth_token is None
+        monkeypatch.setenv("HOST", "0.0.0.0")
+
+        with (
+            patch.object(gateway, "build_http_app", new=Mock()) as mock_build_app_cfg,
+            patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run_cfg,
+        ):
+            with pytest.raises(SystemExit) as exc_info_cfg:
+                gateway._run_http(port=8080)
+
+        assert exc_info_cfg.value.code == 2
+        capsys.readouterr()
+        mock_build_app_cfg.assert_not_called()
+        mock_mcp_run_cfg.assert_not_called()
+
+        # 3) Empty/non-string config values normalize to None; middleware rejects blank tokens.
+        assert (
+            CompassConfig.from_dict(
+                {"backends": {}, "gateway_auth_token": ""}
+            ).gateway_auth_token
+            is None
+        )
+        assert (
+            CompassConfig.from_dict(
+                {"backends": {}, "gateway_auth_token": 12345}
+            ).gateway_auth_token
+            is None
+        )
+        with pytest.raises(ValueError, match="empty or whitespace"):
+            gateway._make_bearer_auth_middleware(Mock(), "   ")
+
+    def test_non_loopback_opt_out_starts_with_warning(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        import gateway
+
+        _reset_gateway_env_and_config(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOST", "0.0.0.0")
+        monkeypatch.setenv("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN", "1")
+        fake_uvicorn, _, _ = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        with patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run:
+            with caplog.at_level("WARNING"):
+                gateway._run_http(port=8080)
+                assert any(
+                    "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN" in r.getMessage()
+                    and "0.0.0.0" in r.getMessage()
+                    for r in caplog.records
+                    if r.levelname == "WARNING"
+                )
+
+                # Must warn on every start when the opt-out is in use.
+                caplog.clear()
+                gateway._run_http(port=8080)
+                assert any(
+                    "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN" in r.getMessage()
+                    for r in caplog.records
+                    if r.levelname == "WARNING"
+                )
+
+        assert mock_mcp_run.call_count == 2
+        mock_mcp_run.assert_called_with(transport="streamable-http")
+        fake_uvicorn.Server.assert_not_called()
+
+    def test_non_loopback_with_token_wraps_app_with_bearer_middleware(
+        self, monkeypatch, tmp_path
+    ):
+        import gateway
+
+        made_up_tok = "made-up-" + "gateway-token"
+        _reset_gateway_env_and_config(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOST", "0.0.0.0")
+        monkeypatch.setenv("TOOL_COMPASS_GATEWAY_AUTH_TOKEN", made_up_tok)
+        fake_uvicorn, server_instance, captured = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        inner_calls: list[str] = []
+
+        async def _stub_inner_app(scope, receive, send):
+            inner_calls.append(scope.get("path", ""))
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [(b"content-type", b"application/json")],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"ok":true}'})
+
+        with (
+            patch.object(gateway, "build_http_app", return_value=_stub_inner_app),
+            patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run,
+        ):
+            gateway._run_http(port=8080)
+
+        mock_mcp_run.assert_not_called()
+        fake_uvicorn.Server.assert_called_once()
+        server_instance.serve.assert_awaited_once()
+        assert captured["kwargs"]["host"] == "0.0.0.0"
+        assert captured["kwargs"]["port"] == 8080
+
+        wrapped_app = captured["app"]
+        assert wrapped_app is not _stub_inner_app
+
+        # Unauthenticated MCP call is rejected 401 before reaching inner app.
+        assert asyncio.run(_drive_asgi_http(wrapped_app, path="/mcp")) == 401
+        assert inner_calls == []
+
+        # Valid bearer token passes through to inner app.
+        auth_header = [(b"authorization", f"Bearer {made_up_tok}".encode("latin-1"))]
+        assert (
+            asyncio.run(
+                _drive_asgi_http(wrapped_app, path="/mcp", headers=auth_header)
+            )
+            == 200
+        )
+        assert inner_calls == ["/mcp"]
+
+        # /health remains open without a bearer token.
+        assert (
+            asyncio.run(_drive_asgi_http(wrapped_app, path="/health", method="GET"))
+            == 200
+        )
+        assert inner_calls == ["/mcp", "/health"]
+
+    def test_loopback_no_token_starts_as_today(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        import gateway
+
+        fake_uvicorn, _, _ = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        for loopback_host in (None, "127.0.0.1", "localhost", "::1"):
+            _reset_gateway_env_and_config(monkeypatch, tmp_path)
+            if loopback_host is not None:
+                monkeypatch.setenv("HOST", loopback_host)
+            caplog.clear()
+
+            with patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run:
+                with caplog.at_level("WARNING"):
+                    gateway._run_http(port=8080)
+
+            mock_mcp_run.assert_called_once_with(transport="streamable-http")
+            assert not any(
+                "non-loopback" in r.getMessage() for r in caplog.records
+            )
+        fake_uvicorn.Server.assert_not_called()
+
+    def test_loopback_case_and_whitespace_host_normalized_without_warning(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        import gateway
+
+        fake_uvicorn, _, _ = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        for raw_host, expected_bind in (
+            (" LOCALHOST ", "LOCALHOST"),
+            (" 127.0.0.1 ", "127.0.0.1"),
+            ("\t::1\n", "::1"),
+        ):
+            _reset_gateway_env_and_config(monkeypatch, tmp_path)
+            monkeypatch.setenv("HOST", raw_host)
+            caplog.clear()
+
+            with patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run:
+                with caplog.at_level("WARNING"):
+                    gateway._run_http(port=8080)
+
+            assert gateway.mcp.settings.host == expected_bind
+            mock_mcp_run.assert_called_once_with(transport="streamable-http")
+            assert not any(
+                "non-loopback" in r.getMessage() for r in caplog.records
+            )
+
+    def test_cli_serve_http_non_loopback_no_token_exits_2(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import cli
+        import gateway
+
+        _reset_gateway_env_and_config(monkeypatch, tmp_path)
+        monkeypatch.setenv("HOST", "0.0.0.0")
+        fake_uvicorn, server_instance, _ = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        with (
+            patch.object(gateway, "build_http_app", new=Mock()) as mock_build_app,
+            patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                cli.main(["serve", "--http"])
+
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "TOOL_COMPASS_GATEWAY_AUTH_TOKEN" in err
+        assert "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1" in err
+        mock_build_app.assert_not_called()
+        mock_mcp_run.assert_not_called()
+        fake_uvicorn.Server.assert_not_called()
+        server_instance.serve.assert_not_called()
+
+    def test_dockerfile_mcp_gateway_stage_refuses_bare_start(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import gateway
+
+        repo_root = Path(__file__).resolve().parent.parent
+        dockerfile_text = (repo_root / "Dockerfile").read_text(encoding="utf-8")
+        entrypoint_text = (repo_root / "docker-entrypoint.sh").read_text(
+            encoding="utf-8"
+        )
+
+        stages = _parse_dockerfile_stages(dockerfile_text)
+        assert "mcp-gateway" in stages
+        gw_stage = stages["mcp-gateway"]
+        gw_env = gw_stage["env"]
+
+        # Static checks on the shipped mcp-gateway stage + entrypoint script.
+        assert gw_env.get("HOST") == "0.0.0.0"
+        assert gw_env.get("PORT") == "8080"
+        assert not gw_env.get("TOOL_COMPASS_GATEWAY_AUTH_TOKEN", "").strip()
+        assert not gw_env.get("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN", "").strip()
+        assert gw_stage["entrypoint"] == ["docker-entrypoint.sh"]
+        assert gw_stage["cmd"] == ["python", "gateway.py"]
+        assert "TOOL_COMPASS_GATEWAY_AUTH_TOKEN" not in entrypoint_text
+        assert "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN" not in entrypoint_text
+        assert 'exec "$@"' in entrypoint_text
+
+        # Execute the stage's CMD (`gateway.py` -> `gateway.main()`) under the
+        # stage's ENV with server primitives patched so nothing listens.
+        _reset_gateway_env_and_config(monkeypatch, tmp_path)
+        for key, val in gw_env.items():
+            if key in (
+                "PATH",
+                "PYTHONPATH",
+                "PYTHONUNBUFFERED",
+                "PYTHONDONTWRITEBYTECODE",
+            ):
+                continue
+            monkeypatch.setenv(key, val)
+        monkeypatch.setattr(sys, "argv", ["gateway.py"])
+        fake_uvicorn, server_instance, _ = _make_fake_uvicorn()
+        monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+        with (
+            patch.object(gateway, "build_http_app", new=Mock()) as mock_build_app,
+            patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                gateway.main()
+
+        assert exc_info.value.code == 2
+        err = capsys.readouterr().err
+        assert "TOOL_COMPASS_GATEWAY_AUTH_TOKEN" in err
+        assert "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1" in err
+        mock_build_app.assert_not_called()
+        mock_mcp_run.assert_not_called()
+        fake_uvicorn.Server.assert_not_called()
+        server_instance.serve.assert_not_called()

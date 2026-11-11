@@ -607,7 +607,26 @@ jobs:
             docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
               -e GRADIO_AUTH=u:p -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
           else
+            SMOKE_ENV_ARGS=()
+            if [ "${{ matrix.target }}" = "mcp-gateway" ]; then
+              # Bare start (HOST=0.0.0.0, no token, no opt-out) must refuse with
+              # exit code 2. Bound with timeout so a fail-open start cannot hang.
+              set +e
+              BARE_OUT="$(timeout 30s docker run --rm --name tc-smoke-bare \
+                -e PYTHONUNBUFFERED=1 ${{ matrix.tag }} 2>&1)"
+              BARE_RC=$?
+              set -e
+              docker rm -f tc-smoke-bare >/dev/null 2>&1 || true
+              echo "$BARE_OUT"
+              if [ "$BARE_RC" -ne 2 ]; then
+                echo "::error::bare mcp-gateway start expected exit 2, got ${BARE_RC}"
+                exit 1
+              fi
+              SMOKE_VAL="ci-smoke"
+              SMOKE_ENV_ARGS=(-e "TOOL_COMPASS_GATEWAY_AUTH_TOKEN=${SMOKE_VAL}")
+            fi
             docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
+              ${SMOKE_ENV_ARGS[@]+"${SMOKE_ENV_ARGS[@]}"} \
               -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
           fi
           cleanup() { docker logs tc-smoke || true; docker rm -f tc-smoke || true; }
