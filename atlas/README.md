@@ -1,14 +1,14 @@
 # tool-compass: how it works
 
-Mapped at 2026-10-15 from commit 5b2768d by Atlas 1.24.0.
+Mapped at 2026-11-11 from commit b8a7f76 by Atlas 1.26.0.
 
 ## What this is
 
 8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.
 
-## What changed since 2026-10-15 (aadd8f9)
+## What changed since 2026-10-15 (5b2768d)
 
-Nothing structural changed since 2026-10-15; 5 files changed content.
+Nothing structural changed since 2026-10-15; 8 files changed content.
 
 ## What comes in
 
@@ -87,15 +87,17 @@ People write .github/, assets/, docs/ and site/; 11 writes with paths built at r
 
 ## Where to start
 
-.github/workflows/ci.yml → gateway.py → config.py → backend_client_simple.py → tool_manifest.py → embedder.py → indexer.py
+.github/workflows/ci.yml → gateway.py → config.py → tool_manifest.py
 
 Read those in order to follow one pull request end to end.
+
+Beside the path, gateway.py also calls backend_client_simple.py, embedder.py and indexer.py.
 
 ## What this map cannot see
 
 - 11 writes and 4 reads use paths built at run time and are not named here.
 - 5 writes and 35 reads go to a path their caller passes, not to this repository.
-- There is a docker-compose.yml and a fly.toml that no workflow runs; what deploys from them does so from outside this repository, and is not on this page.
+- There are a docker-compose.yml and a fly.toml that no workflow runs; what deploys from them does so from outside this repository, and is not on this page.
 - Statistics confidence is low: fewer than 25 source files reach 10 revisions in the window.
 
 Regenerate with `npx --yes @dogfood-lab/atlas map`.

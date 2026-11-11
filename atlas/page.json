@@ -28,21 +28,21 @@
   "changes": {
     "fileCounts": {
       "added": 0,
-      "changed": 5,
+      "changed": 8,
       "moved": 0,
-      "parts": 2,
+      "parts": 3,
       "removed": 0
     },
     "items": [
       {
         "kind": "counts",
-        "sentence": "Nothing structural changed since 2026-10-15; 5 files changed content.",
+        "sentence": "Nothing structural changed since 2026-10-15; 8 files changed content.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "aadd8f9a27c2bd4504c30791141fb1fabbeb86b4",
-      "generatedAt": "2026-10-15T03:39:52.801Z"
+      "commit": "5b2768d1f579d24077e2530b05fb3ae7a0df876c",
+      "generatedAt": "2026-10-15T03:56:21.577Z"
     },
     "unchanged": true
   },
@@ -51,8 +51,8 @@
     "Window: 180 days; a pair counts from 3 shared commits, since 0 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "5b2768d1f579d24077e2530b05fb3ae7a0df876c",
-  "defaultBranch": "fix/docker-smoke-readiness",
+  "commit": "b8a7f76284b2cef575b8bbfcb0499605f8d72d1f",
+  "defaultBranch": "main",
   "derived": "8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.",
   "doors": [
     {
@@ -353,7 +353,7 @@
   "duplicatesLead": null,
   "duplicatesNote": [],
   "edges": [],
-  "engine": "1.24.0",
+  "engine": "1.26.0",
   "generated": [
     {
       "block": true,
@@ -370,11 +370,11 @@
       ]
     }
   ],
-  "generatedAt": "2026-10-15T03:56:21.577Z",
+  "generatedAt": "2026-11-11T22:49:12.709Z",
   "limits": [
     "11 writes and 4 reads use paths built at run time and are not named here.",
     "5 writes and 35 reads go to a path their caller passes, not to this repository.",
-    "There is a docker-compose.yml and a fly.toml that no workflow runs; what deploys from them does so from outside this repository, and is not on this page.",
+    "There are a docker-compose.yml and a fly.toml that no workflow runs; what deploys from them does so from outside this repository, and is not on this page.",
     "Statistics confidence is low: fewer than 25 source files reach 10 revisions in the window."
   ],
   "mainDoor": ".github/workflows/ci.yml",
@@ -498,15 +498,22 @@
       ]
     }
   ],
+  "startBeside": [
+    {
+      "files": [
+        "backend_client_simple.py",
+        "embedder.py",
+        "indexer.py"
+      ],
+      "from": "gateway.py"
+    }
+  ],
   "startDoor": ".github/workflows/ci.yml",
   "startHere": [
     ".github/workflows/ci.yml",
     "gateway.py",
     "config.py",
-    "backend_client_simple.py",
-    "tool_manifest.py",
-    "embedder.py",
-    "indexer.py"
+    "tool_manifest.py"
   ],
   "summary": null,
   "summaryFrom": null,
@@ -519,6 +526,7 @@
   "testedByScript": [
     "npm"
   ],
+  "testedCodeParts": 3,
   "unnamedWrites": 11,
   "unread": [],
   "unreadFiles": 0,
