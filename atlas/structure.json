@@ -21,15 +21,15 @@
           "path": ".github/dependabot.yml"
         },
         {
-          "hash": "e9ba297b2f6abd942e7cde2382a33f5048fa5c38afac294b8f1e2df53c855509",
+          "hash": "ab3d4c8ccdcd59b8788b267f0510382ef9ce962bbcae03cf94ae259dabf5ce3f",
           "path": ".github/workflows/ci.yml"
         },
         {
-          "hash": "11b3644468890257965539668f35cfda35618139de343b79283bc3b3b21bea6a",
+          "hash": "cabc85a65e7023c371792d89a83cf5ffa67abd8e32179e7eceb29cb8f2b55ff2",
           "path": ".github/workflows/publish.yml"
         },
         {
-          "hash": "5dca3b1e284d4cf662ee8b9f623075b0166d322020960692b5423b233145a8ba",
+          "hash": "1b4b01870c3fa6ffadc846c9c9a770dbef6422689a6cceca3258af09533ecf1f",
           "path": ".github/workflows/release-binaries.yml"
         },
         {
@@ -222,7 +222,7 @@
           "path": ".pre-commit-config.yaml"
         },
         {
-          "hash": "4dd7007d677eff1dff1cf3c85c70207236d747e93a277121c8afb71c8e58e338",
+          "hash": "27fc9e46feb16f3161ad050561d3f8c1d02eb489727fc00acad4c4946002fa13",
           "path": "CHANGELOG.md"
         },
         {
@@ -6392,11 +6392,11 @@
           "path": "logo.png"
         },
         {
-          "hash": "8314bc1e906228382632c99ed7740517d381a22b61b9edda28800ae089ccbfb4",
+          "hash": "49da7dc516c31d5eb97fb6b9e67b7ef7d2df1c7d87e5dfabf60ba634168608dd",
           "path": "pyproject.toml"
         },
         {
-          "hash": "f5b695e02ab83a6e198565404f0dc28ccb22c3cf7d2bf5eef6f638dd742f623d",
+          "hash": "ce3701a7aeec65fc9b02d9e6b7ca4b64e9b574342334e16c7c0f5f70760a5839",
           "path": "requirements-dev.txt"
         },
         {
@@ -7294,11 +7294,11 @@
           "path": "site/astro.config.mjs"
         },
         {
-          "hash": "5d9cd61765e32218056a88a768a1f094d735566b5ad895f47a267e9c08db503a",
+          "hash": "5066bb1689deb99179d1584771c94c3f70343f1bf166b5f6815c19317608c166",
           "path": "site/package-lock.json"
         },
         {
-          "hash": "cc0fe95aaa8707d74256f7e76474da2ed0dd589c264ce3f42b0cef2ef08dd203",
+          "hash": "859a8307d6339930fd472d7617a348202dc86f67e4dd71d956e0888ad4806459",
           "path": "site/package.json"
         },
         {
@@ -8768,6 +8768,13 @@
           "event": "workflow_dispatch"
         }
       ],
+      "unresolvedExpressions": [
+        {
+          "adds": "words",
+          "job": "docker",
+          "step": "Smoke run"
+        }
+      ],
       "uses": [
         "actions/checkout",
         "actions/configure-pages",
@@ -9911,9 +9918,9 @@
       "to": "root"
     }
   ],
-  "engine": "1.24.0",
+  "engine": "1.26.0",
   "generatedFrom": {
-    "commit": "5b2768d1f579d24077e2530b05fb3ae7a0df876c",
+    "commit": "b8a7f76284b2cef575b8bbfcb0499605f8d72d1f",
     "tracked": 120
   },
   "landings": [
