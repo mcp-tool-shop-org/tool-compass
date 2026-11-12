@@ -28,30 +28,60 @@
   "changes": {
     "fileCounts": {
       "added": 0,
-      "changed": 8,
+      "changed": 20,
       "moved": 0,
-      "parts": 3,
+      "parts": 5,
       "removed": 0
     },
     "items": [
       {
+        "kind": "landing",
+        "sentence": "Dockerfile is now also read by tests/test_gateway_handlers.py and tests/test_ui.py.",
+        "subjects": [
+          "Dockerfile",
+          "tests/test_gateway_handlers.py",
+          "tests/test_ui.py"
+        ]
+      },
+      {
+        "kind": "landing",
+        "sentence": "docker-entrypoint.sh is now read by tests/test_gateway_handlers.py.",
+        "subjects": [
+          "docker-entrypoint.sh",
+          "tests/test_gateway_handlers.py"
+        ]
+      },
+      {
+        "kind": "landing",
+        "sentence": "gateway.py is now also read by tests/test_gateway_handlers.py.",
+        "subjects": [
+          "gateway.py",
+          "tests/test_gateway_handlers.py"
+        ]
+      },
+      {
+        "kind": "landing",
+        "sentence": "And 1 more new writer or reader of a place.",
+        "subjects": []
+      },
+      {
         "kind": "counts",
-        "sentence": "Nothing structural changed since 2026-10-15; 8 files changed content.",
+        "sentence": "20 files changed content, across 5 parts.",
         "subjects": []
       }
     ],
     "since": {
-      "commit": "5b2768d1f579d24077e2530b05fb3ae7a0df876c",
-      "generatedAt": "2026-10-15T03:56:21.577Z"
+      "commit": "b8a7f76284b2cef575b8bbfcb0499605f8d72d1f",
+      "generatedAt": "2026-11-11T22:49:12.709Z"
     },
-    "unchanged": true
+    "unchanged": false
   },
   "changesTogether": [],
   "changesTogetherNote": [
     "Window: 180 days; a pair counts from 3 shared commits, since 0 source files reach 10 revisions; the floor rises to 10 when 25 do."
   ],
   "changesTogetherWithTests": 0,
-  "commit": "b8a7f76284b2cef575b8bbfcb0499605f8d72d1f",
+  "commit": "03a2cf4315de134caedc90124f0e79f81180cc74",
   "defaultBranch": "main",
   "derived": "8 parts, mostly Python (46 files), JavaScript (4), shell (4), CSS (2), TypeScript (2) and Astro (1). Work enters through 7 doors; the busiest is CI, which reaches 5 parts. It publishes to PyPI, @mcptoolshop/tool-compass to npm, and a container image. It deploys a site to GitHub Pages. People run tool-compass and tool-compass-ui.",
   "doors": [
@@ -87,7 +117,6 @@
         "backend_client_simple.py",
         "bootstrap.py",
         "chain_indexer.py",
-        "cli.py",
         "compass_config.example.json",
         "config.py",
         "embedder.py",
@@ -95,8 +124,7 @@
         "llms.txt",
         "pyproject.toml",
         "sync_manager.py",
-        "tool_manifest.py",
-        "ui.py"
+        "tool_manifest.py"
       ],
       "pushes": false,
       "reach": [
@@ -127,16 +155,18 @@
         }
       ],
       "runs": [
+        "cli.py",
         "docker-entrypoint.sh",
         "gateway.py",
         "scripts/check-org-urls.sh",
         "scripts/regenerate-scorecard.sh",
         "scripts/verify-metrics.sh",
+        "ui.py",
         "npm/test/",
         "tests/"
       ],
-      "runsCount": 7,
-      "runsMore": 35,
+      "runsCount": 9,
+      "runsMore": 37,
       "sends": [
         "uploads coverage to Codecov",
         "runs the pre-commit hooks",
@@ -175,8 +205,7 @@
         "pyproject.toml",
         "requirements.txt",
         "sync_manager.py",
-        "tool_manifest.py",
-        "ui.py"
+        "tool_manifest.py"
       ],
       "pushes": false,
       "reach": [
@@ -189,10 +218,11 @@
       "runs": [
         "cli.py",
         "docker-entrypoint.sh",
-        "gateway.py"
+        "gateway.py",
+        "ui.py"
       ],
-      "runsCount": 3,
-      "runsMore": 0,
+      "runsCount": 4,
+      "runsMore": 1,
       "sends": [
         "publishes to PyPI and a container image"
       ],
@@ -370,7 +400,7 @@
       ]
     }
   ],
-  "generatedAt": "2026-11-11T22:49:12.709Z",
+  "generatedAt": "2026-11-12T08:47:23.869Z",
   "limits": [
     "11 writes and 4 reads use paths built at run time and are not named here.",
     "5 writes and 35 reads go to a path their caller passes, not to this repository.",
@@ -496,9 +526,54 @@
           "phrase": "`indexer.py`"
         }
       ]
+    },
+    {
+      "entry": "main",
+      "file": "ui.py",
+      "inner": [],
+      "part": "root",
+      "partLabel": "the repository root",
+      "phrase": "`main`",
+      "steps": [
+        {
+          "name": "load_config",
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "`load_config`"
+        },
+        {
+          "count": 3,
+          "name": null,
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "`embedder.py`"
+        },
+        {
+          "name": "load_config",
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "`load_config`"
+        },
+        {
+          "count": 3,
+          "name": null,
+          "part": "root",
+          "partLabel": "the repository root",
+          "phrase": "`embedder.py`"
+        }
+      ]
     }
   ],
   "startBeside": [
+    {
+      "files": [
+        "indexer.py",
+        "backend_client_simple.py",
+        "sync_manager.py",
+        "ui.py"
+      ],
+      "from": "cli.py"
+    },
     {
       "files": [
         "backend_client_simple.py",
@@ -511,6 +586,7 @@
   "startDoor": ".github/workflows/ci.yml",
   "startHere": [
     ".github/workflows/ci.yml",
+    "cli.py",
     "gateway.py",
     "config.py",
     "tool_manifest.py"
