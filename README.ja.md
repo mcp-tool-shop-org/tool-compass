@@ -6,7 +6,7 @@
 
 <p align="center"><img src="https://raw.githubusercontent.com/mcp-tool-shop-org/brand/main/logos/tool-compass/readme.png" alt="Tool Compass Logo" width="800"></p>
 
-**MCPツールのためのセマンティックナビゲーター - 記憶ではなく、意図に基づいて適切なツールを見つける**
+**MCPツールのセマンティックナビゲーター：目的別に最適なツールを見つけましょう。ツールの機能を暗記する必要はありません。**
 
 <a href="https://github.com/mcp-tool-shop-org/tool-compass/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/mcp-tool-shop-org/tool-compass/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
 <a href="https://codecov.io/gh/mcp-tool-shop-org/tool-compass"><img src="https://img.shields.io/codecov/c/github/mcp-tool-shop-org/tool-compass?style=flat-square" alt="Codecov"></a>
@@ -18,9 +18,9 @@
 <a href="https://mcp-tool-shop-org.github.io/tool-compass/"><img src="https://img.shields.io/badge/Landing_Page-live-blue?style=flat-square" alt="Landing Page"></a>
 
 
-*トークン数を95%削減。実行したい内容を記述してツールを見つけます。*
+*トークンの使用量を95%削減。やりたいことを説明することで、必要なツールを見つけられます。*
 
-[インストール](#quick-start) • [使い方](#usage) • [Docker](#option-2-docker) • [ハンドブック](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [パフォーマンス](#performance) • [貢献](#contributing)
+[インストール](#クイックスタート) • [使い方](#使用方法) • [Docker](#option-2-docker) • [ハンドブック](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [パフォーマンス](#パフォーマンス) • [貢献方法](#貢献)
 
 </div>
 
@@ -28,7 +28,7 @@
 
 ## 問題点
 
-MCPサーバーは、数十または数百のツールを公開します。すべてのツールの定義をコンテキストにロードすると、トークンが無駄になり、応答が遅くなります。
+MCPサーバーには、数十から数百ものツールが用意されています。すべてのツールの定義を読み込んでおくことは、トークンの消費を増やし、応答速度を低下させるため、非効率です。
 
 ```
 Before: 77 tools × ~500 tokens = 38,500 tokens per request
@@ -39,13 +39,13 @@ Savings: 95%
 
 ## 解決策
 
-Tool Compassは、**セマンティック検索**を使用して、自然言語による記述から関連するツールを見つけます。すべてのツールをロードする代わりに、Claudeは意図とともに`compass()`を呼び出し、関連するツールのみを取得します。
+Tool Compassは、自然言語による説明から関連するツールを検索するために、**セマンティック検索**を使用します。すべてのツールを読み込む代わりに、Claudeは意図を`compass()`に送信し、関連するツールのみを取得します。
 
 ## クイックスタート
 
-📖 **完全なドキュメント:** インストール、構成、アーキテクチャの詳細については、[Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/)を参照してください。
+📖 **詳細なドキュメント:** インストール、設定、およびアーキテクチャの詳細については、[Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) を参照してください。
 
-### オプション1：npm（前提条件なし、Pythonのインストール不要）
+### オプション1：npm（前提条件なし、Pythonのインストールは不要）
 
 ```bash
 npx @mcptoolshop/tool-compass --help
@@ -55,7 +55,7 @@ npx @mcptoolshop/tool-compass doctor                # Diagnose setup
 npx @mcptoolshop/tool-compass execute fs:read_file '{"path":"README.md"}'  # Smoke-test a proxied call
 ```
 
-初回実行時に、検証済みのプラットフォームバイナリをダウンロードします（SHA256でGitHubリリースに対してチェックされます）。ローカルにキャッシュされ、その後の呼び出しは瞬時に開始されます。npmの[@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass)を参照してください。
+初回実行時に、検証済みのプラットフォームバイナリをダウンロードします（SHA256で、GitHubのリリースに対してチェックされます）。ローカルにキャッシュされるため、その後の実行はすぐに開始されます。npmの[@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass)を参照してください。
 
 ### オプション2：PyPI
 
@@ -98,27 +98,52 @@ tool-compass ui
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
 cd tool-compass
 
-# Start with Docker Compose (requires Ollama running locally)
-docker-compose up
+# Start with Docker Compose (requires Ollama running locally and a UI login)
+GRADIO_AUTH=user:pass docker compose up
 
 # Or include Ollama in the stack
-docker-compose --profile with-ollama up
+GRADIO_AUTH=user:pass docker compose --profile with-ollama up
 
 # Access the UI at http://localhost:7860
 ```
 
-> GHCRイメージ（`ghcr.io/mcp-tool-shop-org/tool-compass`）は、
-> `linux/amd64`と`linux/arm64`をサポートしているため、同じタグをx86_64サーバーとApple Silicon / ARMワークステーションの両方で実行できます。
+または、クローンせずに、公開されているUIイメージを直接実行します。
 
-## 機能
+```bash
+docker run --rm -p 7860:7860 \
+  -e GRADIO_AUTH=user:pass \
+  -v tool-compass-data:/app/tool_compass/db \
+  ghcr.io/mcp-tool-shop-org/tool-compass:ui
+```
 
-- **ハイブリッド検索** - セマンティック（HNSW）+ 語彙的融合、正確な名前によるブースト - 実行したい内容を記述するか、ツールの名前を貼り付けると、最も関連性の高いツールとしてランク付けされます。
-- **完全なスキーマの段階的な開示** - `compass()` → `describe()` → `execute()`。`describe()`は完全な`inputSchema`（必須フィールド、説明、列挙型、デフォルト値）を返します。
-- **stdio + HTTPバックエンド** - ローカルのサブプロセスMCPサーバーと、ストリーミング可能なHTTP経由のリモート/SaaSサーバーをフロントエンドで処理し、オプションでベアラー・トークン認証を使用します。
-- **ツールごとのタイムアウトと許可/拒否** - バックエンド/ツールごとにデフォルトのタイムアウトをオーバーライドします。広範なバックエンドから安全なサブセットを公開します。
-- **ホットキャッシュとチェーン検出** - 頻繁に使用されるツールを事前にロードします。一般的なツールのワークフローを自動的に検出します。
-- **分析** - 使用状況のパターンとツールのパフォーマンスを追跡します（保持/削除）。
-- **クロスプラットフォームとDocker対応** - Windows、macOS、Linux。ワンコマンドでデプロイできます。
+> **コンテナーでは、UIへのログインが必要です。** コンテナーが`0.0.0.0`にバインドされるため、ログインなしでは起動できません。次の2つの方法のいずれかで起動してください。`GRADIO_AUTH=user:pass`を設定します（`.env`、シェル環境、または`-e`を使用）。または、独自のログインを強制するリバースプロキシの背後でデプロイする場合は、`TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1`を設定します（起動時に警告が表示され、UIの実行コントロールが非表示になります）。
+
+**ボリュームをマウントします。** セマンティックインデックスは`/app/tool_compass/db`に存在し、これをビルドすることは、すべてのツールをすべての設定済みのサーバーに組み込むことを意味します。ボリュームがない場合、コンテナーが終了するとその作業は破棄され、次の起動時に再度実行されることになります。これは、「ツールコンパスの動作が遅い」という問題として現れ、フラグが不足しているという問題とは異なります。イメージは、もし忘れてしまった場合に警告を表示します。`docker compose up`はすでに名前付きボリュームをマウントしているので、これはプレーンな`docker run`にのみ適用されます。
+
+> GHCRイメージ（`ghcr.io/mcp-tool-shop-org/tool-compass`）は、`linux/amd64`と`linux/arm64`をサポートしているため、同じタグがx86_64サーバーとApple Silicon / ARMワークステーションで実行できます。
+
+**MCP HTTPゲートウェイ**コンテナ（ステージ`mcp-gateway`、ポート`8080`）を実行するには、ベアラートークンを渡してください。コンテナは`HOST=0.0.0.0`にバインドされるため、`TOOL_COMPASS_GATEWAY_AUTH_TOKEN`（または認証を行うリバースプロキシの背後にある場合は`TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1`）がないと起動しません。
+
+```bash
+# Docker Compose (gateway profile)
+TOOL_COMPASS_GATEWAY_AUTH_TOKEN=<your-token> docker compose --profile gateway up
+
+# Or published gateway image directly
+docker run --rm -p 8080:8080 \
+  -e TOOL_COMPASS_GATEWAY_AUTH_TOKEN=<your-token> \
+  -v tool-compass-data:/app/tool_compass/db \
+  ghcr.io/mcp-tool-shop-org/tool-compass:gateway
+```
+
+## 特徴
+
+- **ハイブリッド検索** - セマンティック（HNSW）と語彙的融合を組み合わせ、完全一致する名前を優先的に表示 — 必要な情報を記述するか、ツールの名前を貼り付けると、最も関連性の高い結果が最初に表示されます。
+- **完全なスキーマによる段階的な情報開示** - `compass()` → `describe()` → `execute()`；`describe()` は完全な `inputSchema` を返します（必須フィールド、説明、列挙型、デフォルト値）。
+- **stdio + HTTP バックエンド** - ローカルのサブプロセス MCP サーバーと、ストリーミング可能な HTTP を介したリモートの / SaaS サーバーをフロントエンドで使用。オプションでベアラー・トークン認証を使用。
+- **ツールごとのタイムアウトと許可/拒否** - バックエンド/ツールごとにデフォルトのタイムアウトを上書きします。広範なバックエンドから安全なサブセットを抽出します。
+- **ホットキャッシュとチェーン検出** - よく使用されるツールを事前に読み込みます。一般的なツールのワークフローを自動的に検出します。
+- **分析** - 使用状況のパターンとツールのパフォーマンスを追跡します（保持期間/削除機能付き）。
+- **クロスプラットフォーム対応 & Docker 対応** - Windows、macOS、Linux。ワンコマンドでデプロイできます。
 
 ## アーキテクチャ
 
@@ -141,7 +166,7 @@ docker-compose --profile with-ollama up
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 使い方
+## 使用方法
 
 ### `compass()`ツール
 
@@ -154,7 +179,7 @@ compass(
 )
 ```
 
-戻り値：
+返品：
 ```json
 {
   "matches": [
@@ -173,23 +198,23 @@ compass(
 
 ### 利用可能なツール
 
-| ツール | 説明 |
+| 道具 | 説明 |
 |------|-------------|
-| `compass(intent)` | 正確な名前によるブーストを備えたハイブリッドセマンティック+語彙検索 |
-| `describe(tool_name)` | ツールの完全な`inputSchema`を取得します（必須/列挙型/デフォルト値）。 |
-| `execute(tool_name, args)` | ツールのバックエンドでツールを実行します。 |
-| `compass_categories()` | カテゴリとサーバーを一覧表示します。 |
-| `compass_status(active)` | システムの状態と構成。`active=True`は、ライブバックエンドの稼働状況をチェックします。 |
-| `compass_analytics(timeframe)` | 使用状況の統計 |
-| `compass_chains(action)` | ツールのワークフローを管理します。 |
-| `compass_sync(force)` | バックエンドからインデックスを再構築します。 |
-| `compass_audit()` | 完全なシステムレポート |
+| `compass(intent)` | 正確な名称による検索を重視した、意味的および語彙的なハイブリッド検索 |
+| `describe(tool_name)` | ツールの完全な `inputSchema`（必須項目／列挙型／デフォルト値）を取得します。 |
+| `execute(tool_name, args)` | バックエンドでツールを実行する。 |
+| `compass_categories()` | カテゴリとサーバーのリスト |
+| `compass_status(active)` | システムの健全性と構成状況。`active=True`は、稼働中のバックエンドに対して、稼働状況を監視するプログラムを実行します。 |
+| `compass_analytics(timeframe)` | 利用状況に関する統計データ |
+| `compass_chains(action)` | ツールのワークフローを管理する。 |
+| `compass_sync(force)` | バックエンドからインデックスを再構築する。 |
+| `compass_audit()` | システム全体のレポート |
 
-同じアクションは、CLIからも利用できます。これには、ターミナルからプロキシされた呼び出しをテストするための`tool-compass execute <tool> '<json>'`も含まれます。
+同じ操作をコマンドラインインターフェース（CLI）から実行できます。具体的には、ターミナルからプロキシ経由の呼び出しを簡易テストするための操作（`tool-compass execute <tool> '<json>'`など）が含まれます。
 
-### 段階的な開示パターン
+### 段階的な情報開示パターン
 
-Tool Compassは、トークンの使用量を最小限に抑えるために、3段階の段階的な開示パターンを使用します。
+Tool Compassは、トークンの使用量を最小限に抑えるために、段階的に情報を開示する3段階のプロセスを採用しています。
 
 ```
 1. compass("your intent")     → Get tool name + short description (~100 tokens)
@@ -197,12 +222,12 @@ Tool Compassは、トークンの使用量を最小限に抑えるために、3�
 3. execute("tool:name", args) → Run the tool
 ```
 
-**重要な理由:**
-- 77個のツールを事前にロードすると、約38,500トークンになります。
-- 段階的な開示では、使用するツールごとに約600トークンです。
-- 節約：**典型的なワークフローでは95%以上**
+**なぜこれが重要なのか：**
+- 77個のツールを事前に読み込むと、約38,500トークンを消費する。
+- プログレッシブ・ディスクロージャー（段階的な情報開示）を採用すると、使用するツールごとに約600トークンが消費される。
+- 削減効果：**一般的なワークフローでは95%以上**
 
-**例：ワークフロー**
+**ワークフローの例:**
 
 ```python
 # Step 1: Find the right tool
@@ -217,39 +242,41 @@ describe("comfy:comfy_generate")
 execute("comfy:comfy_generate", {"prompt": "a sunset over mountains"})
 ```
 
-compassの結果の`hint`フィールドは、このフローをガイドし、`describe()`を使用するタイミングを示唆します。
+コンパスの結果に表示される「`hint`」の項目は、この処理の流れを制御し、いつ「`describe()`」を使用すべきかを示します。
 
-## 構成
+## 設定
 
-| 変数 | 説明 | デフォルト値 |
+| 変数 | 説明 | デフォルト |
 |----------|-------------|---------|
-| `TOOL_COMPASS_BASE_PATH` | プロジェクトのルート | 自動検出 |
-| `TOOL_COMPASS_PYTHON` | Python実行可能ファイル | 自動検出 |
-| `TOOL_COMPASS_CONFIG` | 構成ファイルのパス | `~/.config/tool-compass/compass_config.json` |
-| `TOOL_COMPASS_DATA_DIR` | データディレクトリ | プラットフォーム固有（下記参照） |
+| `TOOL_COMPASS_BASE_PATH` | プロジェクトのルートディレクトリ | 自動検出 |
+| `TOOL_COMPASS_PYTHON` | Python実行ファイル | 自動検出 |
+| `TOOL_COMPASS_CONFIG` | 設定ファイルのパス | `~/.config/tool-compass/compass_config.json` |
+| `TOOL_COMPASS_DATA_DIR` | データディレクトリ | プラットフォーム固有の機能（下記参照） |
 | `OLLAMA_URL` | OllamaサーバーのURL | `http://localhost:11434` |
 | `COMFYUI_URL` | ComfyUIサーバー | `http://localhost:8188` |
-| `PORT` | HTTPトランスポートを有効にするには、これを設定します（例：Fly.io用）。 | 設定なし（stdio） |
-| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | HTTPトランスポートで必要なベアラー・トークン（オプトイン。`gateway_auth_token`構成フィールドをオーバーライドします）。 | 設定なし（認証なし） |
+| `PORT` | HTTPトランスポートを有効にする（例：Fly.ioで使用する場合） | （stdio）の設定を解除する。 |
+| `HOST` | HTTPトランスポートで使用するバインドアドレスを指定します。ループバックアドレス以外の値を指定する場合は、`TOOL_COMPASS_GATEWAY_AUTH_TOKEN`（または`gateway_auth_token`）を設定する必要があります。ただし、`TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1`が設定されている場合は例外です。 | `127.0.0.1` |
+| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | HTTPトランスポート用のベアラートークン（`compass_config.json`の`gateway_auth_token`を上書きします）。`HOST`がループバックでない場合（`127.0.0.1`、`localhost`、`::1`）に必須であり、ループバックの場合はオプションです。 | ループバックを無効にする（拒否する）。 |
+| `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN` | 値を `1` に設定すると、認証を行うリバースプロキシが前面に配置されている場合に、ベアラートークンなしで HTTP ゲートウェイをループバック外にバインドできるようになります（起動時に警告が記録されます）。 | 無効化（または、設定解除） |
+| `GRADIO_AUTH` | UIログイン（`user:pass`）；設定されている場合、UIの起動時に毎回適用され、ループバック、Docker環境、または`--share`上で実行する場合に必須となります。 | 設定解除（ループバックのみ） |
+| `TOOL_COMPASS_UI_ALLOW_NO_LOGIN` | `1` に設定すると、認証プロキシの背後で `GRADIO_AUTH` なしにループバック以外でUIを起動できます（警告を表示し、実行コントロールを非表示にします）。 | 設定解除 |
 
 **デフォルトのデータディレクトリ:**
 - **Windows:** `%LOCALAPPDATA%\tool-compass\`
 - **macOS:** `~/Library/Application Support/tool-compass/`
 - **Linux:** `~/.config/tool-compass/`（または`$XDG_CONFIG_HOME/tool-compass/`）
 
-v2.5.0で追加された構成ファイルの設定（`compass_config.json`内）- `hybrid_search`、
-`exact_name_boost`、バックエンドごとの`default_timeout` / `tool_timeouts`、
-`allow_tools` / `deny_tools`、`analytics_retention_days`、およびHTTP（`type: "http"`）
-バックエンドは、[ハンドブック → 構成](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/)に記載されています。
+設定ファイルの設定（`compass_config.json`内）は、v2.5.0で追加されました。
+`hybrid_search`、`exact_name_boost`、バックエンドごとの`default_timeout` / `tool_timeouts`、`allow_tools` / `deny_tools`、`analytics_retention_days`、およびHTTP（`type: "http"`）バックエンドに関する情報は、[ハンドブック → 構成](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/)に記載されています。
 環境変数オプションについては、[`.env.example`](.env.example)を参照してください。
 
 ## パフォーマンス
 
-| メトリック | 値 |
+| 指標 | 値 |
 |--------|-------|
-| インデックスのビルド時間 | 約5秒（44個のツールの場合） |
-| クエリのレイテンシー | 約15ms（埋め込みを含む） |
-| トークンの節約 | 約95%（38K → 2K） |
+| インデックスのビルド時間 | 44個のツールで約5秒 |
+| クエリのレイテンシー | 約15ミリ秒（埋め込みを含む） |
+| トークンの削減 | 約95%（38K → 2K） |
 | 上位3件の精度 | 約95%（上位3件に正しいツールが含まれる） |
 
 ## テスト
@@ -267,22 +294,22 @@ pytest -m "not integration"
 
 ## トラブルシューティング
 
-### MCPサーバーに接続できない
+### MCPサーバーへの接続に失敗
 
 Claude DesktopのログにJSON解析エラーが表示される場合：
 ```
 Unexpected token 'S', "Starting T"... is not valid JSON
 ```
 
-**原因:** `print()`ステートメントがJSON-RPCプロトコルを破損させます。
+**原因:** `print()`ステートメントがJSON-RPCプロトコルを破損させています。
 
-**修正:** ロギングまたは`file=sys.stderr`を使用します。
+**修正:** ログまたは`file=sys.stderr`を使用します。
 ```python
 import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Ollamaへの接続に失敗しました
+### Ollamaへの接続に失敗
 
 ```bash
 # Check Ollama is running
@@ -300,45 +327,44 @@ tool-compass sync
 
 ## 関連プロジェクト
 
-AIを活用した開発のための**Compass Suite**の一部です。
+AIを活用した開発のための**Compass Suite**の一部：
 
-- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - 意味に基づいたファイル検索
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - ベクトル埋め込みされた Gradio コンポーネント
-- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - ヘッドレス LLM のファインチューニング
-- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - 複雑さを排除した ComfyUI
+- [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - セマンティックファイル検索
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - ベクトル埋め込みGradioコンポーネント
+- [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - ヘッドレスLLMのファインチューニング
+- [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - 複雑さを排除したComfyUI
 
-## 貢献について
+## 貢献
 
-皆様からの貢献をお待ちしております！ 貢献ガイドラインについては、[CONTRIBUTING.md](CONTRIBUTING.md) をご覧ください。
+貢献を歓迎します！ガイドラインについては、[CONTRIBUTING.md](CONTRIBUTING.md)を参照してください。
 
 ## セキュリティとデータ範囲
 
-Tool Compass は、**ローカル優先**の開発ツールです。 詳細は [SECURITY.md](SECURITY.md) を参照してください。
+Tool Compassは、**ローカル優先**の開発ツールです。完全なポリシーについては、[SECURITY.md](SECURITY.md)を参照してください。
 
-- **処理されるデータ:** ローカル HNSW ベクトル DB にインデックス化されたツールの説明、ローカル SQLite (`compass_analytics.db`) に記録される検索クエリ、ローカル Ollama を介して生成される埋め込み。
-- **処理されないデータ:** ユーザーコード、ファイルの内容、認証情報。 ツールの呼び出し引数はハッシュ化され、プレーンテキストで保存されません。
-- **ネットワーク:** ローカル Ollama に接続して埋め込みを生成します。 オプションの Gradio UI は localhost にバインドされます。 外部へのテレメトリは行いません。
-- **テレメトリなし:** 外部にデータを収集しません。 分析はローカルでのみ行われます。
+- **アクセスされるデータ:** ローカルHNSWベクトルDBにインデックス化されたツールの説明、ローカルのSQLite（`compass_analytics.db`）に記録された検索クエリ、ローカルのOllamaによって生成された埋め込み。
+- **アクセスされないデータ:** ユーザーコード、ファイルの内容、認証情報。ツールの呼び出し引数はハッシュ化され、プレーンテキストで保存されません。
+- **ネットワーク:** ローカルのOllamaに接続して埋め込みを行います。オプションのGradio UIは、localhostにバインドされます。外部のテレメトリは行いません。
+- **テレメトリなし:** 外部に何も収集しません。分析はローカルでのみ行われます。
 
 ## スコアカード
 
-カテゴリごとのスコアは、スワーム後に再生成されます。
-`bash scripts/regenerate-scorecard.sh` (これは `npx @mcptoolshop/shipcheck audit` をラップします)。 現在の公式な詳細については、[SCORECARD.md](SCORECARD.md) を参照してください。 下の表はそれを反映しており、手動で作成されていません。 手動で作成されたセクション (既知のギャップ、修正履歴) は、SCORECARD.md 内の `<!-- SHIPCHECK-AUTO-START/END -->` マーカーの外に存在し、再生成時に保持されます。
+カテゴリごとのスコアは、スワーム後に`bash scripts/regenerate-scorecard.sh`によって再生成されます（`npx @mcptoolshop/shipcheck audit`をラップします）。現在の公式な詳細については、[SCORECARD.md](SCORECARD.md)を参照してください。以下の表はその内容を反映しており、手動で作成されていません。手動で作成されたセクション（既知のギャップ、修正履歴）は、SCORECARD.md内の`<!-- SHIPCHECK-AUTO-START/END -->`マーカーの外に存在し、再生成時に保持されます。
 
-最新の `shipcheck audit`: **32 個チェック済み · 0 個チェックなし · 5 個スキップ · 100% 合格 — すべての必須条件を満たしています。**
+最新の`shipcheck audit`：**32個チェック済み · 0個チェックなし · 5個スキップ · 100%パス — すべてのハードゲートをパス。**
 
 | カテゴリ | スコア | 注記 |
 |----------|-------|-------|
-| A. セキュリティ | ✅ 合格 | SHA で固定されたアクション、ダイジェストで固定されたベースイメージ、SLSA プロビナンス + SBOM (PyPI + GHCR)、プリコミットのシークレットスキャン、オプトインゲートウェイベアラート認証 |
-| B. エラー処理 | ✅ 合格 | 構造化された結果、段階的な機能低下、終了コード |
-| C. オペレーターのドキュメント | ✅ 合格 | README、CHANGELOG、LICENSE、Makefile `verify` + `verify-metrics` + `scorecard` |
-| D. 配送の衛生管理 | ✅ 合格 | CI の統合、すべてのジョブでのタイムアウト時間 + 保持日数、pyproject.toml 内の pytest 構成 |
-| E. ID (ソフト) | ✅ 合格 | ロゴ、ランディングページ、GitHub メタデータ、pyproject.toml 内の明示的なメンテナー |
-| **Total** | **100%** | すべての必須条件を満たしています — `make scorecard` を介して再生成 |
+| A. セキュリティ | ✅ パス | SHAで固定されたアクション、ダイジェストで固定されたベースイメージ、SLSAプロビナンス + SBOM on PyPI + GHCR、プリコミットのシークレットスキャン、オプトインゲートウェイベアラート認証 |
+| B. エラー処理 | ✅ パス | 構造化された結果、正常なデグラデーション、終了コード |
+| C. 運用ドキュメント | ✅ パス | README、CHANGELOG、LICENSE、Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. 配送の衛生管理 | ✅ パス | CIの統合、すべてのジョブでタイムアウト分と保持期間を設定、pyproject.tomlのpytest設定 |
+| E. アイデンティティ（ソフト） | ✅ パス | ロゴ、ランディングページ、GitHubメタデータ、pyproject.tomlに明示的に記載されたメンテナー |
+| **Total** | **100%** | すべてのハードゲートをパス — `make scorecard`で再生成 |
 
 ## ライセンス
 
-[MIT](LICENSE) - 詳細については、LICENSE ファイルを参照してください。
+[MIT](LICENSE) - 詳細については、LICENSEファイルを参照してください。
 
 ---
 

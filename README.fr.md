@@ -20,15 +20,15 @@
 
 *95 % de tokens en moins. Trouvez des outils en décrivant ce que vous voulez faire.*
 
-[Installation](#quick-start) • [Utilisation](#usage) • [Docker](#option-2-docker) • [Guide de référence](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [Performances](#performance) • [Contribution](#contributing)
+[Installation](#démarrage-rapide) • [Utilisation](#utilisation) • [Docker](#option-2-docker) • [Guide](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) • [Performances](#performance) • [Contribution](#contribution)
 
-</div>
+</div
 
 ---
 
 ## Le problème
 
-Les serveurs MCP exposent des dizaines, voire des centaines d’outils. Le chargement de toutes les définitions d’outils dans le contexte gaspille des tokens et ralentit les réponses.
+Les serveurs MCP exposent des dizaines, voire des centaines d’outils. Charger toutes les définitions d’outils dans le contexte gaspille des tokens et ralentit les réponses.
 
 ```
 Before: 77 tools × ~500 tokens = 38,500 tokens per request
@@ -43,9 +43,9 @@ Tool Compass utilise la **recherche sémantique** pour trouver les outils pertin
 
 ## Démarrage rapide
 
-📖 **Documentation complète :** Consultez le [Guide de référence de Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) pour obtenir des informations détaillées sur l’installation, la configuration et l’architecture.
+📖 **Documentation complète :** Consultez le [Guide de Tool Compass](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) pour l’installation, la configuration et une analyse approfondie de l’architecture.
 
-### Option 1 : npm (aucune condition préalable, aucune installation de Python)
+### Option 1 : npm (aucune condition préalable, aucune installation de Python)
 
 ```bash
 npx @mcptoolshop/tool-compass --help
@@ -55,16 +55,16 @@ npx @mcptoolshop/tool-compass doctor                # Diagnose setup
 npx @mcptoolshop/tool-compass execute fs:read_file '{"path":"README.md"}'  # Smoke-test a proxied call
 ```
 
-Télécharge un binaire de plateforme vérifié lors de la première exécution (vérification SHA256 par rapport à la version GitHub). Mis en cache localement : les exécutions suivantes se lancent instantanément. Consultez [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) sur npm.
+Télécharge un binaire de plateforme vérifié lors de la première exécution (SHA256 vérifié par rapport à la version GitHub). Mis en cache localement : les exécutions suivantes démarrent instantanément. Voir [@mcptoolshop/tool-compass](https://www.npmjs.com/package/@mcptoolshop/tool-compass) sur npm.
 
-### Option 2 : PyPI
+### Option 2 : PyPI
 
 ```bash
 pip install tool-compass
 tool-compass --help
 ```
 
-### Option 3 : Clone local
+### Option 3 : Clone local
 
 ```bash
 # Prerequisites: Ollama with nomic-embed-text
@@ -91,35 +91,68 @@ tool-compass serve
 tool-compass ui
 ```
 
-### Option 4 : Docker
+### Option 4 : Docker
 
 ```bash
 # Clone the repo
 git clone https://github.com/mcp-tool-shop-org/tool-compass.git
 cd tool-compass
 
-# Start with Docker Compose (requires Ollama running locally)
-docker-compose up
+# Start with Docker Compose (requires Ollama running locally and a UI login)
+GRADIO_AUTH=user:pass docker compose up
 
 # Or include Ollama in the stack
-docker-compose --profile with-ollama up
+GRADIO_AUTH=user:pass docker compose --profile with-ollama up
 
 # Access the UI at http://localhost:7860
 ```
 
+Ou exécutez directement l’image d’interface utilisateur publiée, sans clonage :
+
+```bash
+docker run --rm -p 7860:7860 \
+  -e GRADIO_AUTH=user:pass \
+  -v tool-compass-data:/app/tool_compass/db \
+  ghcr.io/mcp-tool-shop-org/tool-compass:ui
+```
+
+> **Connexion à l’interface utilisateur requise dans les conteneurs.** Étant donné que le conteneur lie `0.0.0.0`,
+> le démarrage refuse de s’exécuter sans connexion. Démarrez-le de l’une des deux manières suivantes : définissez
+> `GRADIO_AUTH=user:pass` (via `.env`, l’environnement shell ou `-e`), ou définissez
+> `TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` lors du déploiement derrière un proxy inverse qui
+> applique sa propre connexion (affiche un avertissement au démarrage et masque les contrôles d’exécution de l’interface utilisateur).
+
+> **Montez le volume.** L’index sémantique se trouve dans `/app/tool_compass/db`, et
+> sa création signifie l’intégration de chaque outil dans chaque serveur configuré. Sans volume, ce travail est perdu lorsque le conteneur se termine et est refait au
+> prochain démarrage, ce qui donne l’impression que « Tool Compass est lent » plutôt que d’indiquer un paramètre manquant. L’image vous avertit si vous l’oubliez. `docker compose up` monte déjà un
+> volume nommé, de sorte que cela ne s’applique qu’à `docker run`.
+
 > L’image GHCR (`ghcr.io/mcp-tool-shop-org/tool-compass`) prend en charge
-> `linux/amd64` et `linux/arm64`, de sorte que la même balise fonctionne sur les serveurs x86_64
+> `linux/amd64` et `linux/arm64`, de sorte que le même tag s’exécute sur les serveurs x86_64
 > et les postes de travail Apple Silicon / ARM.
+
+Pour exécuter le conteneur de la **passerelle HTTP MCP** (étape `mcp-gateway`, port `8080`), fournissez un jeton de porteur, car le conteneur lie `HOST=0.0.0.0` et refuse de démarrer sans `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` (ou `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1` lorsqu’il est placé derrière un proxy inverse d’authentification) :
+
+```bash
+# Docker Compose (gateway profile)
+TOOL_COMPASS_GATEWAY_AUTH_TOKEN=<your-token> docker compose --profile gateway up
+
+# Or published gateway image directly
+docker run --rm -p 8080:8080 \
+  -e TOOL_COMPASS_GATEWAY_AUTH_TOKEN=<your-token> \
+  -v tool-compass-data:/app/tool_compass/db \
+  ghcr.io/mcp-tool-shop-org/tool-compass:gateway
+```
 
 ## Fonctionnalités
 
-- **Hybrid Search** - Semantic (HNSW) + lexical fusion with exact-name boost — describe what you want, or paste a tool name and it ranks #1
-- **Full-Schema Progressive Disclosure** - `compass()` → `describe()` → `execute()`; `describe()` returns the complete `inputSchema` (required fields, descriptions, enums, defaults)
-- **stdio + HTTP backends** - Front local subprocess MCP servers *and* remote / SaaS servers over streamable-http, with optional bearer-token auth
-- **Per-tool timeouts & allow/deny** - Override the default timeout per backend/tool; expose a safe subset of a broad backend
-- **Hot Cache & Chain Detection** - Frequently used tools pre-loaded; common tool workflows discovered automatically
-- **Analytics** - Track usage patterns and tool performance (with retention/prune)
-- **Cross-Platform & Docker Ready** - Windows, macOS, Linux; one-command deployment
+- **Recherche hybride** : sémantique (HNSW) + fusion lexicale avec un renforcement du nom exact : décrivez ce que vous voulez, ou collez le nom d’un outil, et il sera classé en première position.
+- **Divulgation progressive du schéma complet** : `compass()` → `describe()` → `execute()` ; `describe()` renvoie le schéma `inputSchema` complet (champs obligatoires, descriptions, énumérations, valeurs par défaut)
+- **Backends stdio + HTTP** : prend en charge les serveurs MCP locaux en tant que processus et les serveurs distants / SaaS via HTTP diffusible, avec une authentification facultative par jeton de porteur.
+- **Délai d’attente et autorisation/refus par outil** : remplacez le délai d’attente par défaut pour chaque backend/outil ; exposez un sous-ensemble sûr d’un backend étendu.
+- **Cache dynamique et détection de chaîne** : les outils fréquemment utilisés sont préchargés ; les flux de travail courants sont découverts automatiquement.
+- **Analyse** : suivez les modèles d’utilisation et les performances des outils (avec conservation/suppression).
+- **Multiplateforme et prêt pour Docker** : Windows, macOS, Linux ; déploiement en une seule commande.
 
 ## Architecture
 
@@ -155,7 +188,7 @@ compass(
 )
 ```
 
-Renvoie :
+Renvoie :
 ```json
 {
   "matches": [
@@ -176,21 +209,21 @@ Renvoie :
 
 | Outil | Description |
 |------|-------------|
-| `compass(intent)` | Recherche sémantique et lexicale hybride avec un renforcement du nom exact |
-| `describe(tool_name)` | Obtenez le schéma complet `inputSchema` pour un outil (champs obligatoires/énumérations/valeurs par défaut) |
+| `compass(intent)` | Recherche sémantique + lexicale hybride avec renforcement du nom exact |
+| `describe(tool_name)` | Obtenez le schéma `inputSchema` complet d’un outil (champs obligatoires/énumérations/valeurs par défaut) |
 | `execute(tool_name, args)` | Exécutez un outil sur son backend |
 | `compass_categories()` | Affichez les catégories et les serveurs |
-| `compass_status(active)` | État du système et configuration ; `active=True` exécute une sonde de réactivité du backend en direct. |
+| `compass_status(active)` | État du système et configuration ; `active=True` exécute une sonde de réactivité du backend en direct |
 | `compass_analytics(timeframe)` | Statistiques d’utilisation |
 | `compass_chains(action)` | Gérez les flux de travail des outils |
 | `compass_sync(force)` | Reconstruisez l’index à partir des backends |
 | `compass_audit()` | Rapport système complet |
 
-Les mêmes actions sont disponibles à partir de la ligne de commande, y compris `tool-compass execute <tool> '<json>'` pour effectuer un test rapide d’un appel proxy à partir du terminal.
+Les mêmes actions sont disponibles à partir de l’interface de ligne de commande, y compris `tool-compass execute <tool> '<json>'` pour tester un appel proxyé à partir du terminal.
 
 ### Modèle de divulgation progressive
 
-Tool Compass utilise un modèle de divulgation progressive en trois étapes pour minimiser l’utilisation des tokens :
+Tool Compass utilise un modèle de divulgation progressive en trois étapes pour minimiser l’utilisation des tokens :
 
 ```
 1. compass("your intent")     → Get tool name + short description (~100 tokens)
@@ -198,12 +231,12 @@ Tool Compass utilise un modèle de divulgation progressive en trois étapes pour
 3. execute("tool:name", args) → Run the tool
 ```
 
-**Pourquoi c’est important :**
-- Chargement de 77 outils au départ = environ 38 500 tokens
-- Divulgation progressive = environ 600 tokens par outil utilisé
-- Économies : **95 % ou plus pour les flux de travail typiques**
+**Pourquoi cela est important :**
+- Charger 77 outils au départ = environ 38 500 tokens
+- Divulgation progressive = environ 600 tokens par outil utilisé
+- Économies : **95 % ou plus pour les flux de travail typiques**
 
-**Exemple de flux de travail :**
+**Exemple de flux de travail :**
 
 ```python
 # Step 1: Find the right tool
@@ -229,27 +262,28 @@ Le champ `hint` dans les résultats de compass guide ce flux, en suggérant quan
 | `TOOL_COMPASS_CONFIG` | Chemin du fichier de configuration | `~/.config/tool-compass/compass_config.json` |
 | `TOOL_COMPASS_DATA_DIR` | Répertoire des données | Spécifique à la plateforme (voir ci-dessous) |
 | `OLLAMA_URL` | URL du serveur Ollama | `http://localhost:11434` |
-| `COMFYUI_URL` | Serveur ComfyUI | `http://localhost:8188` |
+| `COMFYUI_URL` | ComfyUI serveur | `http://localhost:8188` |
 | `PORT` | Définissez pour activer le transport HTTP (par exemple, pour Fly.io) | non défini (stdio) |
-| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | Jeton de porteur requis pour le transport HTTP (optionnel ; remplace le champ de configuration `gateway_auth_token`) | non défini (aucune authentification) |
+| `HOST` | Adresse de liaison pour le transport HTTP ; les valeurs non en boucle nécessitent `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` (ou `gateway_auth_token`) à moins que `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1` ne soit défini | `127.0.0.1` |
+| `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` | Jeton de porteur pour le transport HTTP (remplace `gateway_auth_token` dans `compass_config.json`). Requis lorsque `HOST` n’est pas en boucle (`127.0.0.1`, `localhost`, `::1`) ; facultatif en boucle | non défini (refusé en boucle) |
+| `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN` | Définissez sur `1` pour autoriser la liaison de la passerelle HTTP en dehors de la boucle sans jeton de porteur lorsqu’un proxy inverse d’authentification est placé en amont (affiche un avertissement à chaque démarrage) | non défini (désactivé) |
+| `GRADIO_AUTH` | Connexion à l’interface utilisateur (`user:pass`) ; appliquée à chaque démarrage de l’interface utilisateur lorsqu’elle est définie, et requise en dehors de la boucle / dans Docker / sur `--share`. | non défini (uniquement en boucle) |
+| `TOOL_COMPASS_UI_ALLOW_NO_LOGIN` | Définir sur `1` pour permettre le démarrage de l’interface utilisateur en dehors de la boucle locale sans `GRADIO_AUTH` derrière un proxy d’authentification (avertit et masque les commandes d’exécution). | annuler |
 
 **Répertoires de données par défaut :**
 - **Windows :** `%LOCALAPPDATA%\tool-compass\`
 - **macOS :** `~/Library/Application Support/tool-compass/`
 - **Linux :** `~/.config/tool-compass/` (ou `$XDG_CONFIG_HOME/tool-compass/`)
 
-Les paramètres du fichier de configuration (dans `compass_config.json`) ajoutés dans la version 2.5.0 : `hybrid_search`,
-`exact_name_boost`, `default_timeout` / `tool_timeouts` par backend,
-`allow_tools` / `deny_tools`, `analytics_retention_days` et backends HTTP (`type: "http"`) sont documentés dans le [Guide de référence → Configuration](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/).
-Consultez [`.env.example`](.env.example) pour les options de variables d’environnement.
+Paramètres du fichier de configuration (dans `compass_config.json`) ajoutés dans v2.5.0 : `hybrid_search`, `exact_name_boost`, par backend `default_timeout` / `tool_timeouts`, `allow_tools` / `deny_tools`, `analytics_retention_days` et HTTP (`type: "http"`). Les backends sont documentés dans [Manuel → Configuration](https://mcp-tool-shop-org.github.io/tool-compass/handbook/configuration/). Voir [`.env.example`](.env.example) pour les options de variables d’environnement.
 
-## Performances
+## Performance
 
-| Métrique | Valeur |
+| Indicateur | Valeur |
 |--------|-------|
 | Temps de construction de l’index | ~5 s pour 44 outils |
-| Latence de la requête | ~15 ms (y compris l’intégration) |
-| Économie de tokens | ~95 % (38 000 → 2 000) |
+| Latence des requêtes | ~15 ms (y compris l’intégration) |
+| Économie de jetons | ~95 % (38 K → 2 K) |
 | Précision@3 | ~95 % (outil correct dans les 3 premiers) |
 
 ## Tests
@@ -282,7 +316,7 @@ import sys
 print("Debug message", file=sys.stderr)
 ```
 
-### Échec de la connexion à Ollama
+### Échec de la connexion Ollama
 
 ```bash
 # Check Ollama is running
@@ -300,49 +334,44 @@ tool-compass sync
 
 ## Projets connexes
 
-Fait partie de la **Suite Compass** pour le développement basé sur l’IA :
+Fait partie de la **suite Compass** pour le développement basé sur l’IA :
 
 - [File Compass](https://github.com/mcp-tool-shop-org/file-compass) - Recherche sémantique de fichiers
-- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Composants Gradio intégrant des vecteurs
+- [Integradio](https://github.com/mcp-tool-shop-org/integradio) - Composants Gradio intégrés sous forme de vecteurs
 - [Backpropagate](https://github.com/mcp-tool-shop-org/backpropagate) - Ajustement fin d’un LLM sans interface graphique
 - [Comfy Headless](https://github.com/mcp-tool-shop-org/comfy-headless) - ComfyUI sans la complexité
 
-## Contributions
+## Contribution
 
-Nous acceptons les contributions ! Consultez le fichier [CONTRIBUTING.md](CONTRIBUTING.md) pour connaître les directives.
+Nous acceptons les contributions ! Consultez [CONTRIBUTING.md](CONTRIBUTING.md) pour connaître les directives.
 
 ## Sécurité et portée des données
 
-Tool Compass est un outil de développement **d’abord local**. Consultez le fichier [SECURITY.md](SECURITY.md) pour connaître l’intégralité de la politique.
+Tool Compass est un outil de développement **local-first**. Consultez [SECURITY.md](SECURITY.md) pour connaître la politique complète.
 
-- **Données concernées :** descriptions des outils indexées dans la base de données vectorielle HNSW locale, requêtes de recherche enregistrées dans SQLite local (`compass_analytics.db`), intégrations générées via Ollama local.
+- **Données concernées :** descriptions des outils indexées dans la base de données vectorielle HNSW locale, requêtes de recherche enregistrées dans le fichier journal local SQLite (`compass_analytics.db`), intégrations générées via Ollama local.
 - **Données non concernées :** aucun code utilisateur, aucun contenu de fichier, aucun identifiant. Les arguments des appels d’outils sont hachés, et non stockés en texte clair.
-- **Réseau :** se connecte à Ollama local pour les intégrations. Interface utilisateur Gradio facultative, qui se lie à localhost. Aucune télémétrie externe.
-- **Aucune télémétrie :** ne collecte aucune donnée en externe. Les analyses sont uniquement locales.
+- **Réseau :** se connecte à Ollama local pour les intégrations. L’interface utilisateur Gradio facultative se lie à localhost. Aucune télémétrie externe.
+- **Aucune télémétrie :** ne collecte rien en externe. Les analyses sont uniquement locales.
 
 ## Tableau de bord
 
-Les scores par catégorie sont régénérés après l’exécution du processus via
-`bash scripts/regenerate-scorecard.sh` (qui encapsule `npx
-@mcptoolshop/shipcheck audit`). Consultez le fichier [SCORECARD.md](SCORECARD.md) pour obtenir la
-présentation détaillée la plus récente. Le tableau ci-dessous est un reflet de ce fichier et n’est pas créé manuellement. Les sections sélectionnées manuellement (Lacunes connues,
-Historique des corrections) se trouvent en dehors des marqueurs `<!-- SHIPCHECK-AUTO-START/END -->`
-dans SCORECARD.md et sont conservées lors des régénérations.
+Les scores par catégorie sont régénérés après l’exécution du « swarm » via `bash scripts/regenerate-scorecard.sh` (qui encapsule `npx @mcptoolshop/shipcheck audit`). Consultez [SCORECARD.md](SCORECARD.md) pour obtenir la liste détaillée la plus récente. Le tableau ci-dessous est un reflet de celle-ci et n’est pas créé manuellement. Les sections créées manuellement (Lacunes connues, Historique des corrections) se trouvent en dehors des marqueurs `<!-- SHIPCHECK-AUTO-START/END -->` dans SCORECARD.md et survivent aux régénérations.
 
-Dernière exécution de `shipcheck audit` : **32 éléments vérifiés · 0 éléments non vérifiés · 5 éléments ignorés · 100 % de réussite — tous les critères obligatoires sont respectés.**
+Dernier `shipcheck audit` : **32 vérifiés · 0 non vérifiés · 5 ignorés · 100 % de réussite — tous les seuils obligatoires sont respectés.**
 
 | Catégorie | Score | Notes |
 |----------|-------|-------|
-| A. Sécurité | ✅ Réussi | Actions avec SHA fixe ; image de base avec hachage fixe ; provenance SLSA + SBOM sur PyPI + GHCR ; analyse des secrets pré-commit ; authentification par jeton d’accès facultative. |
+| A. Sécurité | ✅ Réussi | Actions avec empreinte SHA ; image de base avec empreinte de hachage ; provenance SLSA + SBOM sur PyPI + GHCR ; analyse des secrets pré-commit ; authentification de passerelle facultative. |
 | B. Gestion des erreurs | ✅ Réussi | Résultats structurés, dégradation progressive, codes de sortie |
-| C. Documentation pour les utilisateurs | ✅ Réussi | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
-| D. Bonnes pratiques de développement | ✅ Réussi | CI consolidé ; délai d’attente et durée de conservation définis pour chaque tâche ; configuration pytest dans pyproject.toml |
-| E. Identité (aspect secondaire) | ✅ Réussi | Logo, page d’accueil, métadonnées GitHub ; mainteneurs explicites dans pyproject.toml |
-| **Total** | **100%** | Tous les critères obligatoires sont respectés — régénérez via `make scorecard` |
+| C. Documentation pour les opérateurs | ✅ Réussi | README, CHANGELOG, LICENSE, Makefile `verify` + `verify-metrics` + `scorecard` |
+| D. Hygiène de l’expédition | ✅ Réussi | CI consolidé ; timeout-minutes + retention-days sur chaque tâche ; configuration pytest dans pyproject.toml |
+| E. Identité (souple) | ✅ Réussi | Logo, page d’accueil, métadonnées GitHub ; mainteneurs explicites dans pyproject.toml |
+| **Total** | **100%** | Tous les seuils obligatoires sont respectés — régénérez via `make scorecard` |
 
 ## Licence
 
-[MIT](LICENSE) - consultez le fichier LICENSE pour plus de détails.
+[MIT](LICENSE) — consultez le fichier LICENSE pour plus de détails.
 
 ---
 
