@@ -61,8 +61,9 @@ Tool Compass is designed as a **local development tool**. It has these security 
 
 | Component | Security Model |
 |-----------|----------------|
-| Gradio UI | No authentication by default |
-| MCP Gateway | Trusts backend servers |
+| Gradio UI | Loopback (`127.0.0.1` / `localhost` / `::1`) has no login by default unless `GRADIO_AUTH` / `--auth` is set; non-loopback binds (including Docker) and `--share` require `GRADIO_AUTH=user:pass` (or `TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` behind an authenticating proxy, which warns and hides execute controls) |
+| MCP Gateway (stdio) | Local subprocess transport; trusts configured backend servers |
+| MCP Gateway (HTTP) | Binds `127.0.0.1` by default; off loopback refuses to start without `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` (`gateway_auth_token`) or `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1` behind an authenticating proxy (`/health` and `/ready` remain unauthenticated for probes); trusts configured backend servers |
 | Analytics DB | Local SQLite, no encryption |
 | Embeddings | Sent to local Ollama |
 
@@ -70,14 +71,12 @@ Tool Compass is designed as a **local development tool**. It has these security 
 
 If deploying Tool Compass in a shared environment:
 
-1. **Enable Gradio authentication**:
-   ```python
-   demo.launch(auth=("user", "password"))
-   ```
+1. **Configure UI login**:
+   Set `GRADIO_AUTH=user:pass` (or pass `tool-compass ui --auth user:pass`). Non-loopback binds and the Docker UI image refuse to start without `GRADIO_AUTH` unless `TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` is explicitly set behind a reverse proxy that enforces its own login (which prints a startup warning and hides the UI execute controls).
 
 2. **Use environment variables** for sensitive config (not `compass_config.json`)
 
-3. **Network isolation**: Run behind a reverse proxy with auth
+3. **Network isolation and HTTP gateway auth**: Run behind an authenticating reverse proxy (`TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1` if delegating UI login to the proxy). When the HTTP gateway binds off loopback (`HOST` not `127.0.0.1`, `localhost`, or `::1`), set `TOOL_COMPASS_GATEWAY_AUTH_TOKEN` (or `gateway_auth_token` in config, or `fly secrets set TOOL_COMPASS_GATEWAY_AUTH_TOKEN=<token>` on Fly.io); only set `TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1` when a proxy in front enforces authentication and blocks direct access to the gateway port
 
 4. **Rate limiting**: Add nginx/Cloudflare rate limiting for the UI
 

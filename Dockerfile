@@ -113,9 +113,10 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Default command: Run Gradio UI.
 # UI-DOCKER-BIND-001: bind 0.0.0.0 explicitly so the UI is reachable through the
-# published port mapping (inside the container the container boundary is the
-# isolation layer; external exposure is controlled by `docker run -p` /
-# compose `ports:`). Without this the UI bound to 127.0.0.1 and was unreachable.
+# published port mapping; without this the UI bound to 127.0.0.1 inside the
+# container and was unreachable. Because 0.0.0.0 is non-loopback, startup
+# refuses to run unless GRADIO_AUTH=user:pass is set (or
+# TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1 is set behind a proxy that does its own login).
 CMD ["python", "ui.py", "--host", "0.0.0.0", "--port", "7860"]
 
 # =============================================================================
@@ -123,12 +124,15 @@ CMD ["python", "ui.py", "--host", "0.0.0.0", "--port", "7860"]
 # =============================================================================
 FROM production AS mcp-gateway
 
-# Override for HTTP mode (Fly.io / Smithery)
+# Override for HTTP mode (Fly.io / Smithery / reverse-proxy deployments).
 # ci-infra-01: gateway.py's _run_http defaults HOST to 127.0.0.1 (loopback), so
-# without this the published image binds loopback and any orchestrator's proxy /
-# health check (the HEALTHCHECK below hits localhost, but Fly/Smithery reach the
-# container over the network) can't reach the gateway. 0.0.0.0 is the documented
-# reverse-proxy path — this image is meant to sit behind an authenticated edge.
+# without this the published image binds loopback and orchestrators reaching the
+# container over the network cannot connect. Because HOST=0.0.0.0 is non-loopback,
+# the container refuses to start (exit 2) unless the operator passes
+# TOOL_COMPASS_GATEWAY_AUTH_TOKEN (or sets gateway_auth_token in config), or sets
+# TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 behind an authenticating proxy. Neither
+# variable is set here so the image fails closed by default; /health stays exempt
+# so the HEALTHCHECK below works with a token set.
 ENV PORT=8080 \
     HOST=0.0.0.0
 

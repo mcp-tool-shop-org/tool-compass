@@ -16,7 +16,7 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 import argparse
 
 import gradio as gr
@@ -73,8 +73,10 @@ _config = None
 _init_lock = threading.RLock()
 
 # F-5d41ce59: execute playground visibility. Hidden on Gradio --share unless
-# allow/deny policy is enforced on this path (same helper the gateway uses).
+# allow/deny policy is enforced on this path (same helper the gateway uses),
+# and hidden off loopback when running with TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1.
 _ui_share_mode = False
+_ui_no_login_opt_out = False
 _ui_execute_visible = True
 
 
@@ -1097,6 +1099,38 @@ def get_tool_details(tool_name: str) -> str:
 
 
 _SECRET_RESULT_HINTS = ("token", "authorization", "password", "secret", "api_key", "auth")
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+_NON_LOOPBACK_NO_LOGIN_HINT = (
+    "ERROR: Refusing to start UI on non-loopback host without a login; "
+    "set GRADIO_AUTH=user:pass (or pass --auth user:pass), or set "
+    "TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1 behind a proxy that enforces its own login."
+)
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True when ``host`` is a loopback address."""
+    return (host or "").strip().lower() in _LOOPBACK_HOSTS
+
+
+def _parse_gradio_auth(raw_auth: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Parse and validate GRADIO_AUTH ('user:pass'), or exit 2 when malformed."""
+    if raw_auth is None or raw_auth == "":
+        return None
+    auth_env = raw_auth.strip()
+    if ":" not in auth_env:
+        print(
+            "   ERROR: GRADIO_AUTH must be 'user:pass' (non-empty on both sides).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    user, _, pwd = auth_env.partition(":")
+    if not user or not pwd:
+        print(
+            "   ERROR: GRADIO_AUTH must be 'user:pass' (non-empty on both sides).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    return (user, pwd)
 
 
 def _execute_playground_visible(share: bool) -> bool:
@@ -1260,6 +1294,18 @@ def execute_tool_ui(tool_name: str, args_json: str, timeout: float = 30) -> str:
     children. Enforces gateway allow/deny policy before proxying. Hidden
     on --share when that policy helper cannot be imported.
     """
+    if _ui_no_login_opt_out:
+        return json.dumps(
+            {
+                "success": False,
+                "error_kind": "forbidden",
+                "error": (
+                    "Execute playground is disabled when running without a login "
+                    "(TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1)."
+                ),
+            },
+            indent=2,
+        )
     if _ui_share_mode and not _execute_playground_visible(True):
         return json.dumps(
             {
@@ -1796,17 +1842,23 @@ def get_filter_choices():
         return ["All"], ["All"]
 
 
-def create_ui(share: bool = False) -> gr.Blocks:
+def create_ui(share: bool = False, *, allow_no_login: bool = False) -> gr.Blocks:
     """Create the Gradio UI.
 
     ``share`` is the Gradio public-tunnel flag. Execute playground is
     hidden on --share unless allow/deny policy is enforced on this path
-    (F-5d41ce59). Default False so ``create_ui()`` construction tests stay
-    unchanged.
+    (F-5d41ce59), and always hidden when ``allow_no_login`` is True
+    (TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1). Default False so ``create_ui()``
+    construction tests stay unchanged.
     """
-    global _ui_share_mode, _ui_execute_visible
+    global _ui_share_mode, _ui_no_login_opt_out, _ui_execute_visible
     _ui_share_mode = bool(share)
-    show_execute = _execute_playground_visible(_ui_share_mode)
+    _ui_no_login_opt_out = bool(allow_no_login)
+    show_execute = (
+        False
+        if _ui_no_login_opt_out
+        else _execute_playground_visible(_ui_share_mode)
+    )
     _ui_execute_visible = show_execute
 
     servers, categories = get_filter_choices()
@@ -2375,6 +2427,31 @@ def main():
     parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     args = parser.parse_args()
 
+    # Apply GRADIO_AUTH=user:pass on every UI start when set; refuse malformed
+    # values unconditionally. Require a login on --share and on non-loopback
+    # binds unless TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1 is set behind a proxy.
+    auth = _parse_gradio_auth(os.environ.get("GRADIO_AUTH"))
+    if args.share and auth is None:
+        print(
+            "   ERROR: --share refused. Set GRADIO_AUTH='user:pass' to "
+            "enable basic auth on the public tunnel.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    allow_no_login = False
+    if not _is_loopback_host(args.host) and auth is None:
+        if os.environ.get("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", "").strip() != "1":
+            print(_NON_LOOPBACK_NO_LOGIN_HINT, file=sys.stderr)
+            sys.exit(2)
+        allow_no_login = True
+        print(
+            f"WARNING: Starting UI on non-loopback host '{args.host}' without a login "
+            "(TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1). Ensure an upstream proxy enforces "
+            "login; UI execute controls are hidden.",
+            file=sys.stderr,
+        )
+
     print("🧭 Starting Tool Compass UI...")
     print(f"   Port: {args.port}")
     print(f"   Host: {args.host}")
@@ -2388,32 +2465,15 @@ def main():
         print(f"   Warning: Could not load index: {e}")
         print("   Run 'tool-compass sync' to build the index first.")
 
-    # Gradio `share=True` publishes a public tunnel. Require basic auth via
-    # GRADIO_AUTH=user:pass so the public URL is not wide open.
-    auth = None
-    if args.share:
-        auth_env = os.environ.get("GRADIO_AUTH", "").strip()
-        if not auth_env or ":" not in auth_env:
-            print(
-                "   ERROR: --share refused. Set GRADIO_AUTH='user:pass' to "
-                "enable basic auth on the public tunnel.",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        user, _, pwd = auth_env.partition(":")
-        if not user or not pwd:
-            print(
-                "   ERROR: GRADIO_AUTH must be 'user:pass' (non-empty on both sides).",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        auth = (user, pwd)
+    if args.share and auth is not None:
         print(
             "   WARNING: --share creates a PUBLIC tunnel. Basic auth is enabled "
-            f"for user '{user}'. Anyone with the URL and credentials can access."
+            f"for user '{auth[0]}'. Anyone with the URL and credentials can access."
         )
+    elif auth is not None:
+        print(f"   Login enabled for user '{auth[0]}'.")
 
-    demo = create_ui(share=args.share)
+    demo = create_ui(share=args.share, allow_no_login=allow_no_login)
     try:
         demo.launch(
             server_name=args.host,

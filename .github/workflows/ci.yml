@@ -277,17 +277,25 @@ jobs:
           # retention and is plenty of window for incident response.
           retention-days: 14
 
-      # Now BLOCKING. `pip-audit -r requirements.txt` fails on any vulnerability
-      # outside the dated Pillow exception below (#157). The report-only
-      # artifact step above still runs for the full JSON snapshot.
-      - name: Audit dependencies for vulnerabilities
+      # Now BLOCKING, in two parts. The core install (requirements.txt without
+      # the Web UI line) is audited strictly, with no ignores. The Web UI extra
+      # (gradio) is audited next with the dated Pillow exception (#157). The
+      # report-only artifact step above still runs for the full JSON snapshot.
+      - name: Audit core dependencies for vulnerabilities
         if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
         run: |
+          grep -vi '^gradio' requirements.txt > "$RUNNER_TEMP/requirements-core.txt"
+          pip-audit -r "$RUNNER_TEMP/requirements-core.txt"
+
+      - name: Audit Web UI extra for vulnerabilities
+        if: matrix.python-version == '3.12' && matrix.os == 'ubuntu-latest'
+        run: |
+          grep -i '^gradio' requirements.txt > "$RUNNER_TEMP/requirements-ui.txt"
           # Dated exception until 2026-12-10 (#157): gradio 6.31.0 requires
           # pillow<13.0, holding pillow at 12.3.0 while the 40 advisories below
           # are fixed in 13.0.0 and unreachable from tool-compass. Remove when
           # a stable gradio allows pillow 13, or re-read on 2026-12-10.
-          pip-audit -r requirements.txt \
+          pip-audit -r "$RUNNER_TEMP/requirements-ui.txt" \
             --ignore-vuln PYSEC-2026-4327 \
             --ignore-vuln PYSEC-2026-4328 \
             --ignore-vuln PYSEC-2026-4326 \
@@ -596,8 +604,39 @@ jobs:
           # the entrypoint's volume warning for the whole window) must say where
           # it is stuck. On timeout the step sends SIGABRT, which makes Python
           # write every thread's stack to the container log before it dies.
-          docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
-            -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          if [ "${{ matrix.smoke }}" = "bind" ]; then
+            # UI image binds 0.0.0.0 and must refuse a bare start without login.
+            rc=0
+            docker run --rm ${{ matrix.tag }} >/dev/null 2>&1 || rc=$?
+            if [ "$rc" -ne 2 ]; then
+              echo "::error::UI container without GRADIO_AUTH exited $rc (expected 2)"
+              exit 1
+            fi
+            docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
+              -e GRADIO_AUTH=u:p -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          else
+            SMOKE_ENV_ARGS=()
+            if [ "${{ matrix.target }}" = "mcp-gateway" ]; then
+              # Bare start (HOST=0.0.0.0, no token, no opt-out) must refuse with
+              # exit code 2. Bound with timeout so a fail-open start cannot hang.
+              set +e
+              BARE_OUT="$(timeout 30s docker run --rm --name tc-smoke-bare \
+                -e PYTHONUNBUFFERED=1 ${{ matrix.tag }} 2>&1)"
+              BARE_RC=$?
+              set -e
+              docker rm -f tc-smoke-bare >/dev/null 2>&1 || true
+              echo "$BARE_OUT"
+              if [ "$BARE_RC" -ne 2 ]; then
+                echo "::error::bare mcp-gateway start expected exit 2, got ${BARE_RC}"
+                exit 1
+              fi
+              SMOKE_VAL="ci-smoke"
+              SMOKE_ENV_ARGS=(-e "TOOL_COMPASS_GATEWAY_AUTH_TOKEN=${SMOKE_VAL}")
+            fi
+            docker run -d --name tc-smoke -e PYTHONUNBUFFERED=1 -e PYTHONFAULTHANDLER=1 \
+              ${SMOKE_ENV_ARGS[@]+"${SMOKE_ENV_ARGS[@]}"} \
+              -p ${{ matrix.port }}:${{ matrix.port }} ${{ matrix.tag }}
+          fi
           cleanup() { docker logs tc-smoke || true; docker rm -f tc-smoke || true; }
           trap cleanup EXIT
           # 90 x 2s = 3 minutes. 45 x 2s was enough on every run that started

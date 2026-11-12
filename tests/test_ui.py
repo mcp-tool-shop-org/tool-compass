@@ -42,7 +42,16 @@ import ui
 # =============================================================================
 
 
-_UI_STATE_NAMES = ("_index", "_analytics", "_chain_indexer", "_config")
+_UI_STATE_NAMES = (
+    "_index",
+    "_analytics",
+    "_chain_indexer",
+    "_config",
+    "_ui_share_mode",
+    "_ui_no_login_opt_out",
+    "_ui_execute_visible",
+)
+_MISSING = object()
 
 
 @pytest.fixture(autouse=True)
@@ -51,16 +60,19 @@ def _reset_ui_globals():
 
     Mirrors the autouse `_reset_gateway_globals` pattern from conftest.py:
     ui.py keeps lazy singletons on the module namespace, so mutating them
-    in one test would leak into the next. This fixture resets the four
-    state names back to None after each test so every test starts from a
-    clean slate.
+    in one test would leak into the next. This fixture resets module-level
+    state back to its pre-test values so every test starts from a clean slate.
     """
-    snapshot = {name: getattr(ui, name, None) for name in _UI_STATE_NAMES}
+    snapshot = {name: getattr(ui, name, _MISSING) for name in _UI_STATE_NAMES}
     try:
         yield
     finally:
         for name, value in snapshot.items():
-            setattr(ui, name, value)
+            if value is _MISSING:
+                if hasattr(ui, name):
+                    delattr(ui, name)
+            else:
+                setattr(ui, name, value)
 
 
 # =============================================================================
@@ -1976,4 +1988,222 @@ def test_create_ui_constructs_without_index():
             demo = ui.create_ui()
         launch_mock.assert_not_called()
     assert isinstance(demo, ui.gr.Blocks)
+
+
+# =============================================================================
+# UI login & non-loopback fail-closed startup guards (ui.main)
+# =============================================================================
+
+
+def _stub_ui_main_runtime(monkeypatch):
+    """Stub UI index/view loaders and capture gr.Blocks.launch without listening."""
+    idx = MagicMock()
+    idx.get_stats.return_value = {
+        "total_tools": 0,
+        "core_tools": 0,
+        "by_server": {},
+        "by_category": {},
+    }
+    monkeypatch.setenv("GRADIO_ANALYTICS_ENABLED", "False")
+    monkeypatch.setattr(ui, "get_index", lambda: idx)
+    monkeypatch.setattr(ui, "get_filter_choices", lambda: (["All"], ["All"]))
+    monkeypatch.setattr(ui, "_check_ollama_banner", lambda: "")
+    monkeypatch.setattr(ui, "filter_tools", lambda *_a, **_kw: "<p>stub</p>")
+    monkeypatch.setattr(ui, "get_analytics_dashboard", lambda *_a, **_kw: "<p>stub</p>")
+    monkeypatch.setattr(ui, "get_chains_view", lambda *_a, **_kw: "<p>stub</p>")
+    monkeypatch.setattr(ui, "get_system_status", lambda *_a, **_kw: "<p>stub</p>")
+
+    launched: list[tuple[object, tuple, dict]] = []
+
+    def _fake_launch(self_blocks, *args, **kwargs):
+        launched.append((self_blocks, args, kwargs))
+
+    monkeypatch.setattr(ui.gr.Blocks, "launch", _fake_launch)
+    return launched
+
+
+def _parse_dockerfile_stage(dockerfile_text: str, stage_name: str) -> tuple[dict[str, str], list[str]]:
+    """Extract ENV key/values and JSON-array CMD from a named Dockerfile stage."""
+    logical_lines: list[str] = []
+    buf = ""
+    for raw in dockerfile_text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            if not buf:
+                continue
+            # Comments inside a backslash-continued block are skipped by Docker.
+            if stripped.startswith("#"):
+                continue
+        if stripped.endswith("\\"):
+            buf += stripped[:-1].strip() + " "
+        else:
+            buf += stripped
+            logical_lines.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        logical_lines.append(buf.strip())
+
+    in_stage = False
+    env_vars: dict[str, str] = {}
+    cmd: list[str] | None = None
+    for line in logical_lines:
+        upper = line.upper()
+        if upper.startswith("FROM "):
+            m = re.match(r"^FROM\s+\S+(?:\s+AS\s+(\S+))?", line, flags=re.IGNORECASE)
+            current = m.group(1) if m else None
+            if in_stage:
+                break
+            if current == stage_name:
+                in_stage = True
+            continue
+        if not in_stage:
+            continue
+        if upper.startswith("ENV "):
+            rest = line[4:].strip()
+            for token in rest.split():
+                if "=" in token:
+                    k, _, v = token.partition("=")
+                    env_vars[k] = v
+        elif upper.startswith("CMD "):
+            rest = line[4:].strip()
+            if rest.startswith("["):
+                cmd = json.loads(rest)
+    assert in_stage, f"Stage {stage_name!r} not found in Dockerfile"
+    assert cmd is not None, f"Stage {stage_name!r} has no JSON-array CMD"
+    return env_vars, cmd
+
+
+class TestUiLoginStartup:
+    def test_login_set_without_share_passes_pair_to_launch(self, monkeypatch):
+        launched = _stub_ui_main_runtime(monkeypatch)
+        monkeypatch.setenv("GRADIO_AUTH", "u:p")
+        monkeypatch.delenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", raising=False)
+        monkeypatch.setattr("sys.argv", ["ui.py"])
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            ui.main()
+
+        assert len(launched) == 1
+        _demo, _args, kwargs = launched[0]
+        assert kwargs["auth"] == ("u", "p")
+        assert kwargs["share"] is False
+        assert kwargs["server_name"] == "127.0.0.1"
+
+    def test_non_loopback_without_login_or_opt_out_exits_2(self, monkeypatch, capsys):
+        launched = _stub_ui_main_runtime(monkeypatch)
+        monkeypatch.delenv("GRADIO_AUTH", raising=False)
+        monkeypatch.delenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", raising=False)
+        monkeypatch.setattr("sys.argv", ["ui.py", "--host", "0.0.0.0"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            ui.main()
+
+        assert exc_info.value.code == 2
+        assert launched == []
+        err_lines = [ln for ln in capsys.readouterr().err.strip().splitlines() if ln.strip()]
+        assert len(err_lines) == 1
+        assert "GRADIO_AUTH" in err_lines[0]
+        assert "TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1" in err_lines[0]
+
+    def test_non_loopback_with_opt_out_starts_warns_and_hides_execute(
+        self, monkeypatch, capsys
+    ):
+        launched = _stub_ui_main_runtime(monkeypatch)
+        monkeypatch.delenv("GRADIO_AUTH", raising=False)
+        monkeypatch.setenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", "1")
+        monkeypatch.setattr("sys.argv", ["ui.py", "--host", "0.0.0.0"])
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            ui.main()
+
+        assert len(launched) == 1
+        demo, _args, kwargs = launched[0]
+        assert kwargs["server_name"] == "0.0.0.0"
+        assert kwargs["auth"] is None
+
+        captured = capsys.readouterr()
+        combined = f"{captured.out}\n{captured.err}"
+        assert "WARNING" in combined
+        assert "TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1" in combined
+
+        elem_ids = {getattr(b, "elem_id", None) for b in demo.blocks.values()}
+        assert "tc-exec-search" not in elem_ids
+        assert "tc-exec-browser" not in elem_ids
+        assert ui._ui_execute_visible is False
+        assert ui._run_button_html("srv:tool", {"a": 1}) == ""
+        denied = json.loads(ui.execute_tool_ui("srv:tool", "{}"))
+        assert denied["success"] is False
+        assert denied["error_kind"] == "forbidden"
+
+    @pytest.mark.parametrize("bad_auth", ["nocolon", "u:", ":p", ":", "   "])
+    def test_malformed_login_without_share_exits_2(self, bad_auth, monkeypatch):
+        launched = _stub_ui_main_runtime(monkeypatch)
+        monkeypatch.setenv("GRADIO_AUTH", bad_auth)
+        monkeypatch.delenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", raising=False)
+        monkeypatch.setattr("sys.argv", ["ui.py"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            ui.main()
+
+        assert exc_info.value.code == 2
+        assert launched == []
+
+    def test_loopback_without_login_starts_as_today(self, monkeypatch):
+        launched = _stub_ui_main_runtime(monkeypatch)
+        monkeypatch.delenv("GRADIO_AUTH", raising=False)
+        monkeypatch.delenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", raising=False)
+        monkeypatch.setattr("sys.argv", ["ui.py"])
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            ui.main()
+
+        assert len(launched) == 1
+        demo, _args, kwargs = launched[0]
+        assert kwargs["server_name"] == "127.0.0.1"
+        assert kwargs["share"] is False
+        assert kwargs["auth"] is None
+        elem_ids = {getattr(b, "elem_id", None) for b in demo.blocks.values()}
+        assert "tc-exec-search" in elem_ids
+        assert "tc-exec-browser" in elem_ids
+
+    def test_share_without_login_still_refused(self, monkeypatch):
+        launched = _stub_ui_main_runtime(monkeypatch)
+        monkeypatch.delenv("GRADIO_AUTH", raising=False)
+        monkeypatch.setenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", "1")
+        monkeypatch.setattr("sys.argv", ["ui.py", "--share"])
+
+        with pytest.raises(SystemExit) as exc_info:
+            ui.main()
+
+        assert exc_info.value.code == 2
+        assert launched == []
+
+    def test_dockerfile_ui_cmd_cannot_reach_launch_without_login_or_opt_out(
+        self, monkeypatch
+    ):
+        from pathlib import Path
+
+        dockerfile = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text(
+            encoding="utf-8"
+        )
+        stage_env, cmd = _parse_dockerfile_stage(dockerfile, "production")
+        assert "GRADIO_AUTH" not in stage_env
+        assert "TOOL_COMPASS_UI_ALLOW_NO_LOGIN" not in stage_env
+        assert len(cmd) >= 2 and cmd[0] == "python" and cmd[1] == "ui.py"
+
+        launched = _stub_ui_main_runtime(monkeypatch)
+        monkeypatch.delenv("GRADIO_AUTH", raising=False)
+        monkeypatch.delenv("TOOL_COMPASS_UI_ALLOW_NO_LOGIN", raising=False)
+        for key, value in stage_env.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.setattr("sys.argv", ["ui.py", *cmd[2:]])
+
+        with pytest.raises(SystemExit) as exc_info:
+            ui.main()
+
+        assert exc_info.value.code == 2
+        assert launched == []
 

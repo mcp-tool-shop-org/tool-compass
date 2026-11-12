@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "pins": {
+    "0ec3b638688c0d83:zh": {
+      "lang": "zh",
+      "source": "Per-category scores are regenerated post-swarm via\n`bash scripts/regenerate-scorecard.sh` (which wraps `npx\n@mcptoolshop/shipcheck audit`). See [SCORECARD.md](SCORECARD.md) for the\ncurrent authoritative breakdown — the table below mirrors it and is\nintentionally not hand-authored. Hand-curated sections (Known Gaps,\nRemediation History) live outside the `<!-- SHIPCHECK-AUTO-START/END -->`\nmarkers in SCORECARD.md and survive regenerations.",
+      "translation": "通过 `bash scripts/regenerate-scorecard.sh` 在群集完成后重新生成每个类别的分数（该工具包装了 `npx @mcptoolshop/shipcheck audit`）。有关当前权威的细分，请参阅 [SCORECARD.md](SCORECARD.md)——下表是对其的镜像，并且有意不是手动编写的。手动策划的部分（已知差距、修复历史记录）位于 SCORECARD.md 中的 `<!-- SHIPCHECK-AUTO-START/END -->` 标记之外，并且会在重新生成时保留。",
+      "pinnedAt": "2026-11-12T11:38:07.275Z"
+    },
+    "28f2f2cfe1b673d7:ja": {
+      "lang": "ja",
+      "source": "Get the full `inputSchema` for a tool (required/enums/defaults)",
+      "translation": "ツールの完全な `inputSchema`（必須項目／列挙型／デフォルト値）を取得します。",
+      "pinnedAt": "2026-11-12T11:38:07.731Z"
+    },
+    "bb5538e8cb37670d:ja": {
+      "lang": "ja",
+      "source": "Set to `1` to allow starting the UI off loopback without `GRADIO_AUTH` behind an authenticating proxy (warns and hides execute controls)",
+      "translation": "`1` に設定すると、認証プロキシの背後で `GRADIO_AUTH` なしにループバック以外でUIを起動できます（警告を表示し、実行コントロールを非表示にします）。",
+      "pinnedAt": "2026-11-12T11:38:07.733Z"
+    },
+    "ee7649ad38ebf58b:zh": {
+      "lang": "zh",
+      "source": "📖 **Full documentation:** See the [Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/) for installation, configuration, and architecture deep-dives.",
+      "translation": "📖 **完整文档：** 请参阅 [Tool Compass Handbook](https://mcp-tool-shop-org.github.io/tool-compass/handbook/)，其中包含有关安装、配置和架构的详细信息。",
+      "pinnedAt": "2026-11-12T11:38:07.271Z"
+    }
+  }
+}

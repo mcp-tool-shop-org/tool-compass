@@ -1,6 +1,8 @@
 # Tool Compass - Docker Compose Configuration
 #
 # Usage:
+#   Set GRADIO_AUTH in your environment or .env first (required for the UI container;
+#   or set TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1 behind a proxy that does its own login):
 #   docker compose up                 # Start Gradio UI (production stage, 7860)
 #   docker compose up -d              # Start in background
 #   docker compose --profile gateway up  # MCP HTTP gateway (mcp-gateway stage, 8080)
@@ -31,6 +33,10 @@ services:
       # Optional: Mount config for customization
       # - ./compass_config.json:/app/tool_compass/compass_config.json:ro
     environment:
+      # Required: set GRADIO_AUTH in your environment or .env before starting
+      # (or set TOOL_COMPASS_UI_ALLOW_NO_LOGIN=1 behind a proxy that does its own login)
+      - GRADIO_AUTH
+      - TOOL_COMPASS_UI_ALLOW_NO_LOGIN
       # Ollama connection (use host.docker.internal on Docker Desktop)
       - OLLAMA_URL=${OLLAMA_URL:-http://host.docker.internal:11434}
       # Analytics and features
@@ -63,6 +69,11 @@ services:
       - LOG_LEVEL=${LOG_LEVEL:-INFO}
       - HOST=0.0.0.0
       - PORT=8080
+      # Required off loopback: set TOOL_COMPASS_GATEWAY_AUTH_TOKEN in your host
+      # environment / .env, or set TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 when
+      # running behind an authenticating reverse proxy (one of them is required).
+      - TOOL_COMPASS_GATEWAY_AUTH_TOKEN
+      - TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; r = httpx.get('http://localhost:8080/health'); r.raise_for_status()"]

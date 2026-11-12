@@ -21,7 +21,7 @@
           "path": ".github/dependabot.yml"
         },
         {
-          "hash": "ab3d4c8ccdcd59b8788b267f0510382ef9ce962bbcae03cf94ae259dabf5ce3f",
+          "hash": "fa3ecd5634876e89ef8c792f83ef88667407dba29fb267044300b5db5acfda7c",
           "path": ".github/workflows/ci.yml"
         },
         {
@@ -155,7 +155,7 @@
               "line": 94
             }
           ],
-          "hash": "97108afe763a24a83fda0fdf320072a33b1612021e5e6bc8c9618e1d487b3202",
+          "hash": "48b92015ab3f5989c866368b6afd0f25923af9ef4c52d5b2337e07c6fcd43811",
           "path": "npm/bin/tool-compass.js",
           "sequences": []
         },
@@ -164,7 +164,7 @@
           "path": "npm/logo-lockup.png"
         },
         {
-          "hash": "011b89ec3ee8cb0e4bfc0b749216ad630371221e3e2df75678c76da672ec2228",
+          "hash": "11c9904c6ee8be78bf520c68e0b80bd9db663d70c6cdd4c8daa727422b4d09ae",
           "path": "npm/package.json"
         },
         {
@@ -206,7 +206,7 @@
           "path": ".dockerignore"
         },
         {
-          "hash": "1ed02b1be6db4d8fd44879c0cea6a897e5f0a372f660939b55369cb446f5b640",
+          "hash": "d78c6caf69557911b25cace3ea9e3d936b0d83375d99ee214bfe29885fdb8701",
           "path": ".env.example"
         },
         {
@@ -222,7 +222,7 @@
           "path": ".pre-commit-config.yaml"
         },
         {
-          "hash": "27fc9e46feb16f3161ad050561d3f8c1d02eb489727fc00acad4c4946002fa13",
+          "hash": "a08cd185fcda063392216888a10fd077fed1cc22d4810ddbdcd187f3f93047f9",
           "path": "CHANGELOG.md"
         },
         {
@@ -234,7 +234,7 @@
           "path": "CONTRIBUTING.md"
         },
         {
-          "hash": "53f958cf3a8c524122efb2df470e61905d24d841d6ae3ae63ccfbdd4c790be1b",
+          "hash": "a625d3fd5c9137717850e9c900f48b66db9ad512c4d272fc6cae8dd26b2aebe4",
           "path": "Dockerfile"
         },
         {
@@ -266,7 +266,7 @@
           "path": "README.ja.md"
         },
         {
-          "hash": "ef5bce348fd042e35ed25529aa420be7e5ae8597d15940ef9333708d288628cc",
+          "hash": "ce21b3a5962d27b5d663a1994c9bb4c3f902a1dc9d5f203340ebf35e517a21b4",
           "path": "README.md"
         },
         {
@@ -282,7 +282,7 @@
           "path": "SCORECARD.md"
         },
         {
-          "hash": "b537cf86de4b6fb9f7fab5eb7c399a2321529a8d24745ba7fbf2b692107859e1",
+          "hash": "9fab144ecc73faf317f4994fff87e7b128a4693af26aaae4199cf7d477e27b69",
           "path": "SECURITY.md"
         },
         {
@@ -1469,77 +1469,72 @@
             {
               "in": "_cmd_search",
               "kind": "except",
-              "line": 727
+              "line": 737
             },
             {
               "in": "_cmd_describe",
               "kind": "except",
-              "line": 883
+              "line": 893
             },
             {
               "in": "_cmd_describe",
               "kind": "except",
-              "line": 917
+              "line": 927
             },
             {
               "in": "_cmd_execute",
               "kind": "except",
-              "line": 1016
+              "line": 1026
             },
             {
               "in": "_cmd_execute",
               "kind": "except",
-              "line": 1039
+              "line": 1049
             },
             {
               "in": "_run",
               "kind": "except",
-              "line": 1059
+              "line": 1069
             },
             {
               "in": "_cmd_execute",
               "kind": "except",
-              "line": 1064
+              "line": 1074
             },
             {
               "in": "_cmd_sync",
               "kind": "except",
-              "line": 1192
+              "line": 1202
             },
             {
               "in": "_cmd_sync",
               "kind": "except",
-              "line": 1221
+              "line": 1231
             },
             {
               "in": "_cmd_sync",
               "kind": "except",
-              "line": 1228
+              "line": 1238
             },
             {
               "in": "_locate_example_config",
               "kind": "except",
-              "line": 1333
+              "line": 1343
             },
             {
               "in": "_cmd_init",
               "kind": "except",
-              "line": 1390
+              "line": 1400
             },
             {
               "in": "_cmd_doctor",
               "kind": "except",
-              "line": 1509
+              "line": 1519
             },
             {
               "in": "_cmd_doctor",
               "kind": "except",
-              "line": 1517
-            },
-            {
-              "in": "_cmd_doctor",
-              "kind": "except",
-              "line": 1526
+              "line": 1527
             },
             {
               "in": "_cmd_doctor",
@@ -1547,87 +1542,92 @@
               "line": 1536
             },
             {
+              "in": "_cmd_doctor",
+              "kind": "except",
+              "line": 1546
+            },
+            {
               "in": "_check_index_initialized",
               "kind": "except",
-              "line": 1653
+              "line": 1663
             },
             {
               "in": "_configured_embedding_provider",
               "kind": "except",
-              "line": 1758
+              "line": 1768
             },
             {
               "in": "_cmd_ui",
               "kind": "except",
-              "line": 1782
+              "line": 1792
             },
             {
               "in": "_cmd_status",
               "kind": "except",
-              "line": 1828
+              "line": 1844
             },
             {
               "in": "_cmd_status",
               "kind": "except",
-              "line": 1837
+              "line": 1853
             },
             {
               "in": "_cmd_categories",
               "kind": "except",
-              "line": 1923
+              "line": 1939
             },
             {
               "in": "_cmd_categories",
               "kind": "except",
-              "line": 1932
+              "line": 1948
             },
             {
               "in": "_cmd_audit",
               "kind": "except",
-              "line": 1967
+              "line": 1983
             },
             {
               "in": "_cmd_audit",
               "kind": "except",
-              "line": 1981
+              "line": 1997
             },
             {
               "in": "_cmd_analytics",
               "kind": "except",
-              "line": 2052
+              "line": 2068
             },
             {
               "in": "_cmd_analytics",
               "kind": "except",
-              "line": 2067
+              "line": 2083
             },
             {
               "in": "_cmd_chains",
               "kind": "except",
-              "line": 2127
+              "line": 2143
             },
             {
               "in": "_cmd_chains",
               "kind": "except",
-              "line": 2136
+              "line": 2152
             },
             {
               "in": "main",
               "kind": "except",
-              "line": 2235
+              "line": 2251
             },
             {
               "in": "main",
               "kind": "except",
-              "line": 2293
+              "line": 2309
             },
             {
               "in": "main",
               "kind": "except",
-              "line": 2299
+              "line": 2315
             }
           ],
-          "hash": "910b7191948e97f2820087156f929a76ad2297a20738723557b6358a2cad2ad9",
+          "hash": "001c54f31d8fdb562de99b42f35db1d3b64626c0edbf194ea8878a24d92ec293",
           "importsFiles": [
             "_version.py",
             "backend_client_simple.py",
@@ -1694,14 +1694,14 @@
             {
               "calls": [
                 {
-                  "line": 656,
+                  "line": 666,
                   "name": "CompassIndex",
                   "target": {
                     "file": "indexer.py"
                   }
                 },
                 {
-                  "line": 657,
+                  "line": 667,
                   "name": "load_index",
                   "receiver": "CompassIndex",
                   "target": {
@@ -1724,7 +1724,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 656,
+                  "line": 666,
                   "name": "CompassIndex",
                   "target": {
                     "file": "indexer.py"
@@ -1732,7 +1732,7 @@
                   "via": "_load_index"
                 },
                 {
-                  "line": 657,
+                  "line": 667,
                   "name": "load_index",
                   "receiver": "CompassIndex",
                   "target": {
@@ -1741,7 +1741,7 @@
                   "via": "_load_index"
                 },
                 {
-                  "line": 730,
+                  "line": 740,
                   "name": "_lexical_search_fallback",
                   "target": {
                     "file": "gateway.py"
@@ -1762,7 +1762,7 @@
             {
               "calls": [
                 {
-                  "line": 837,
+                  "line": 847,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -1777,7 +1777,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 869,
+                  "line": 879,
                   "name": "_escape_like",
                   "target": {
                     "file": "gateway.py"
@@ -1798,7 +1798,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 1049,
+                  "line": 1059,
                   "name": "get_backends",
                   "target": {
                     "file": "gateway.py"
@@ -1813,7 +1813,7 @@
                   "via": "_print_success"
                 },
                 {
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -1837,7 +1837,7 @@
               "calls": [
                 {
                   "branch": "json_mode",
-                  "line": 1134,
+                  "line": 1144,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -1853,7 +1853,7 @@
                 },
                 {
                   "branch": "json_mode",
-                  "line": 1147,
+                  "line": 1157,
                   "name": "SimpleBackendManager",
                   "target": {
                     "file": "backend_client_simple.py"
@@ -1862,7 +1862,7 @@
                 },
                 {
                   "branch": "json_mode",
-                  "line": 1148,
+                  "line": 1158,
                   "name": "CompassIndex",
                   "target": {
                     "file": "indexer.py"
@@ -1871,7 +1871,7 @@
                 },
                 {
                   "branch": "json_mode",
-                  "line": 1150,
+                  "line": 1160,
                   "name": "load_index",
                   "receiver": "CompassIndex",
                   "target": {
@@ -1881,7 +1881,7 @@
                 },
                 {
                   "branch": "json_mode",
-                  "line": 1152,
+                  "line": 1162,
                   "name": "SyncManager",
                   "target": {
                     "file": "sync_manager.py"
@@ -1890,7 +1890,7 @@
                 },
                 {
                   "branch": "json_mode",
-                  "line": 1154,
+                  "line": 1164,
                   "name": "full_sync",
                   "receiver": "SyncManager",
                   "target": {
@@ -1900,7 +1900,7 @@
                 },
                 {
                   "branch": "json_mode",
-                  "line": 1156,
+                  "line": 1166,
                   "name": "disconnect_all",
                   "receiver": "SimpleBackendManager",
                   "target": {
@@ -1923,7 +1923,7 @@
             {
               "calls": [
                 {
-                  "line": 1316,
+                  "line": 1326,
                   "name": "get_default_config",
                   "target": {
                     "file": "config.py"
@@ -1938,7 +1938,7 @@
             {
               "calls": [
                 {
-                  "line": 1332,
+                  "line": 1342,
                   "name": "get_base_path",
                   "target": {
                     "file": "config.py"
@@ -1953,7 +1953,7 @@
             {
               "calls": [
                 {
-                  "line": 1365,
+                  "line": 1375,
                   "name": "get_config_path",
                   "target": {
                     "file": "config.py"
@@ -1967,7 +1967,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 1332,
+                  "line": 1342,
                   "name": "get_base_path",
                   "target": {
                     "file": "config.py"
@@ -1975,7 +1975,7 @@
                   "via": "_locate_example_config"
                 },
                 {
-                  "line": 1316,
+                  "line": 1326,
                   "name": "get_default_config",
                   "target": {
                     "file": "config.py"
@@ -1997,7 +1997,7 @@
             {
               "calls": [
                 {
-                  "line": 1507,
+                  "line": 1517,
                   "name": "doctor",
                   "target": {
                     "file": "config.py"
@@ -2025,7 +2025,7 @@
             {
               "calls": [
                 {
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2041,7 +2041,7 @@
             {
               "calls": [
                 {
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2079,7 +2079,7 @@
             {
               "calls": [
                 {
-                  "line": 1755,
+                  "line": 1765,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -2100,7 +2100,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 1810,
+                  "line": 1826,
                   "name": "main",
                   "target": {
                     "file": "ui.py"
@@ -2121,7 +2121,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 1836,
+                  "line": 1852,
                   "name": "compass_status",
                   "target": {
                     "file": "gateway.py"
@@ -2134,7 +2134,7 @@
                   "via": "_print_success"
                 },
                 {
-                  "line": 1755,
+                  "line": 1765,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -2142,7 +2142,7 @@
                   "via": "_configured_embedding_provider"
                 },
                 {
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2171,7 +2171,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 1931,
+                  "line": 1947,
                   "name": "compass_categories",
                   "target": {
                     "file": "gateway.py"
@@ -2179,7 +2179,7 @@
                 },
                 {
                   "branch": "not cats",
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2209,7 +2209,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 1976,
+                  "line": 1992,
                   "name": "compass_audit",
                   "target": {
                     "file": "gateway.py"
@@ -2222,7 +2222,7 @@
                   "via": "_print_success"
                 },
                 {
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2251,7 +2251,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 2062,
+                  "line": 2078,
                   "name": "compass_analytics",
                   "target": {
                     "file": "gateway.py"
@@ -2264,7 +2264,7 @@
                   "via": "_print_dim"
                 },
                 {
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2287,7 +2287,7 @@
                   "via": "_print_error"
                 },
                 {
-                  "line": 2135,
+                  "line": 2151,
                   "name": "compass_chains",
                   "target": {
                     "file": "gateway.py"
@@ -2295,7 +2295,7 @@
                 },
                 {
                   "branch": "not chains",
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2430,7 +2430,7 @@
                     }
                   ],
                   "innerTruncated": true,
-                  "line": 2266,
+                  "line": 2282,
                   "name": "main",
                   "target": {
                     "file": "gateway.py"
@@ -2438,7 +2438,7 @@
                 },
                 {
                   "branch": "args.command == \"init\"",
-                  "line": 1365,
+                  "line": 1375,
                   "name": "get_config_path",
                   "target": {
                     "file": "config.py"
@@ -2447,7 +2447,7 @@
                 },
                 {
                   "branch": "args.command == \"init\"",
-                  "line": 1332,
+                  "line": 1342,
                   "name": "get_base_path",
                   "target": {
                     "file": "config.py"
@@ -2458,13 +2458,13 @@
                   "branch": "args.command == \"init\"",
                   "inner": [
                     {
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
                     }
                   ],
-                  "line": 1316,
+                  "line": 1326,
                   "name": "get_default_config",
                   "target": {
                     "file": "config.py"
@@ -2482,7 +2482,7 @@
                   "branch": "args.command == \"doctor\"",
                   "inner": [
                     {
-                      "line": 1279,
+                      "line": 1299,
                       "name": "get_all_tools",
                       "target": {
                         "file": "tool_manifest.py"
@@ -2490,19 +2490,19 @@
                     },
                     {
                       "branch": "config_path.exists()",
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
                     },
                     {
-                      "line": 1223,
+                      "line": 1243,
                       "name": "rstrip",
                       "target": null,
                       "via": "_ollama_reachable"
                     }
                   ],
-                  "line": 1507,
+                  "line": 1517,
                   "name": "doctor",
                   "target": {
                     "file": "config.py"
@@ -2518,7 +2518,7 @@
                 },
                 {
                   "branch": "args.command == \"search\"",
-                  "line": 656,
+                  "line": 666,
                   "name": "CompassIndex",
                   "target": {
                     "file": "indexer.py"
@@ -2527,7 +2527,7 @@
                 },
                 {
                   "branch": "args.command == \"search\"",
-                  "line": 657,
+                  "line": 667,
                   "name": "load_index",
                   "receiver": "CompassIndex",
                   "target": {
@@ -2537,7 +2537,7 @@
                 },
                 {
                   "branch": "args.command == \"search\"",
-                  "line": 730,
+                  "line": 740,
                   "name": "_lexical_search_fallback",
                   "target": {
                     "file": "gateway.py"
@@ -2553,7 +2553,7 @@
                 },
                 {
                   "branch": "args.command == \"describe\"",
-                  "line": 837,
+                  "line": 847,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2563,7 +2563,7 @@
                 },
                 {
                   "branch": "args.command == \"describe\"",
-                  "line": 869,
+                  "line": 879,
                   "name": "_escape_like",
                   "target": {
                     "file": "gateway.py"
@@ -2589,7 +2589,7 @@
                       }
                     }
                   ],
-                  "line": 1049,
+                  "line": 1059,
                   "name": "get_backends",
                   "target": {
                     "file": "gateway.py"
@@ -2598,7 +2598,7 @@
                 },
                 {
                   "branch": "args.command == \"execute\"",
-                  "line": 1652,
+                  "line": 1662,
                   "name": "SQLITE_DB_PATH",
                   "passed": true,
                   "target": {
@@ -2611,13 +2611,13 @@
                   "inner": [
                     {
                       "branch": "config_path.exists()",
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
                     }
                   ],
-                  "line": 1134,
+                  "line": 1144,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -2626,7 +2626,7 @@
                 },
                 {
                   "branch": "args.command == \"sync\"",
-                  "line": 1147,
+                  "line": 1157,
                   "name": "SimpleBackendManager",
                   "target": {
                     "file": "backend_client_simple.py"
@@ -2635,7 +2635,7 @@
                 },
                 {
                   "branch": "args.command == \"sync\"",
-                  "line": 1148,
+                  "line": 1158,
                   "name": "CompassIndex",
                   "target": {
                     "file": "indexer.py"
@@ -2644,7 +2644,7 @@
                 },
                 {
                   "branch": "args.command == \"sync\"",
-                  "line": 1150,
+                  "line": 1160,
                   "name": "load_index",
                   "receiver": "CompassIndex",
                   "target": {
@@ -2654,7 +2654,7 @@
                 },
                 {
                   "branch": "args.command == \"sync\"",
-                  "line": 1152,
+                  "line": 1162,
                   "name": "SyncManager",
                   "target": {
                     "file": "sync_manager.py"
@@ -2663,7 +2663,7 @@
                 },
                 {
                   "branch": "args.command == \"sync\"",
-                  "line": 1154,
+                  "line": 1164,
                   "name": "full_sync",
                   "receiver": "SyncManager",
                   "target": {
@@ -2673,7 +2673,7 @@
                 },
                 {
                   "branch": "args.command == \"sync\"",
-                  "line": 1156,
+                  "line": 1166,
                   "name": "disconnect_all",
                   "receiver": "SimpleBackendManager",
                   "target": {
@@ -2685,7 +2685,7 @@
                   "branch": "args.command == \"ui\"",
                   "inner": [
                     {
-                      "line": 1109,
+                      "line": 1143,
                       "name": "_tool_denied_by_policy",
                       "passed": true,
                       "target": {
@@ -2694,7 +2694,7 @@
                       "via": "_execute_playground_visible"
                     },
                     {
-                      "line": 233,
+                      "line": 235,
                       "name": "load_config",
                       "target": {
                         "file": "config.py"
@@ -2702,16 +2702,8 @@
                       "via": "_check_ollama_banner"
                     },
                     {
-                      "line": 235,
+                      "line": 237,
                       "name": "Embedder",
-                      "target": {
-                        "file": "embedder.py"
-                      },
-                      "via": "_check_ollama_banner"
-                    },
-                    {
-                      "line": 239,
-                      "name": "health_check",
                       "target": {
                         "file": "embedder.py"
                       },
@@ -2719,6 +2711,14 @@
                     },
                     {
                       "line": 241,
+                      "name": "health_check",
+                      "target": {
+                        "file": "embedder.py"
+                      },
+                      "via": "_check_ollama_banner"
+                    },
+                    {
+                      "line": 243,
                       "name": "close",
                       "target": {
                         "file": "embedder.py"
@@ -2726,7 +2726,7 @@
                       "via": "_check_ollama_banner"
                     },
                     {
-                      "line": 161,
+                      "line": 163,
                       "name": "load_config",
                       "target": {
                         "file": "config.py"
@@ -2734,7 +2734,7 @@
                       "via": "get_chain_indexer_instance"
                     },
                     {
-                      "line": 1682,
+                      "line": 1728,
                       "name": "Embedder",
                       "target": {
                         "file": "embedder.py"
@@ -2742,7 +2742,7 @@
                       "via": "get_system_status"
                     },
                     {
-                      "line": 1689,
+                      "line": 1735,
                       "name": "health_check",
                       "target": {
                         "file": "embedder.py"
@@ -2750,7 +2750,7 @@
                       "via": "get_system_status"
                     },
                     {
-                      "line": 1695,
+                      "line": 1741,
                       "name": "close",
                       "target": {
                         "file": "embedder.py"
@@ -2758,7 +2758,7 @@
                       "via": "get_system_status"
                     }
                   ],
-                  "line": 1810,
+                  "line": 1826,
                   "name": "main",
                   "target": {
                     "file": "ui.py"
@@ -2801,120 +2801,120 @@
             {
               "in": "from_file",
               "kind": "except",
-              "line": 200
+              "line": 205
             },
             {
               "in": "from_file",
               "kind": "except",
-              "line": 219
+              "line": 224
             },
             {
               "in": "from_file",
               "kind": "except",
-              "line": 223
+              "line": 228
             },
             {
               "in": "from_file",
               "kind": "except",
-              "line": 225
+              "line": 230
             },
             {
               "in": "from_file",
               "kind": "raise",
-              "line": 236
+              "line": 241
             },
             {
               "in": "from_file",
               "kind": "except",
-              "line": 280
+              "line": 285
             },
             {
               "in": "from_dict",
               "kind": "raise",
-              "line": 305
+              "line": 310
             },
             {
               "in": "from_dict",
               "kind": "raise",
-              "line": 346
+              "line": 351
             },
             {
               "in": "from_dict",
               "kind": "except",
-              "line": 436
+              "line": 441
             },
             {
               "in": "validate_and_clamp",
               "kind": "except",
-              "line": 495
+              "line": 500
             },
             {
               "in": "validate_and_clamp",
               "kind": "except",
-              "line": 652
+              "line": 672
             },
             {
               "in": "_validate_and_clamp_backends",
               "kind": "except",
-              "line": 697
+              "line": 717
             },
             {
               "in": "_validate_and_clamp_backends",
               "kind": "except",
-              "line": 728
+              "line": 748
             },
             {
               "in": "apply_env_overrides",
               "kind": "except",
-              "line": 950
+              "line": 970
             },
             {
               "in": "_safe_home",
               "kind": "except",
-              "line": 1078
+              "line": 1098
             },
             {
               "in": "redact_url_credentials",
               "kind": "except",
-              "line": 1172
+              "line": 1192
             },
             {
               "in": "_ollama_reachable",
               "kind": "except",
-              "line": 1219
+              "line": 1239
             },
             {
               "in": "_ollama_reachable",
               "kind": "except",
-              "line": 1225
+              "line": 1245
             },
             {
               "in": "_http_reachable",
               "kind": "except",
-              "line": 1241
+              "line": 1261
             },
             {
               "in": "_http_reachable",
               "kind": "except",
-              "line": 1247
+              "line": 1267
             },
             {
               "in": "doctor",
               "kind": "except",
-              "line": 1281
+              "line": 1301
             },
             {
               "in": "doctor",
               "kind": "except",
-              "line": 1319
+              "line": 1339
             },
             {
               "in": "doctor",
               "kind": "except",
-              "line": 1337
+              "line": 1357
             }
           ],
-          "hash": "aee6666987e338a515fa7c1d436e2d38a38504fc7df2b9590c79b6976e9de644",
+          "hash": "f28c6807b1b3d1e859b3e5db84b3a389fc44fb404015002c3fc0249f8e5ca3e9",
           "importsFiles": [
             "_version.py",
             "analytics.py",
@@ -2926,7 +2926,7 @@
             {
               "calls": [
                 {
-                  "line": 977,
+                  "line": 997,
                   "name": "validate_and_clamp",
                   "target": null
                 }
@@ -2939,7 +2939,7 @@
             {
               "calls": [
                 {
-                  "line": 977,
+                  "line": 997,
                   "name": "validate_and_clamp",
                   "target": null,
                   "via": "apply_env_overrides"
@@ -2954,7 +2954,7 @@
               "calls": [
                 {
                   "branch": "config_path.exists()",
-                  "line": 977,
+                  "line": 997,
                   "name": "validate_and_clamp",
                   "target": null,
                   "via": "apply_env_overrides"
@@ -2968,7 +2968,7 @@
             {
               "calls": [
                 {
-                  "line": 1223,
+                  "line": 1243,
                   "name": "rstrip",
                   "target": null
                 }
@@ -2981,7 +2981,7 @@
             {
               "calls": [
                 {
-                  "line": 1245,
+                  "line": 1265,
                   "name": "rstrip",
                   "target": null
                 }
@@ -2994,7 +2994,7 @@
             {
               "calls": [
                 {
-                  "line": 1279,
+                  "line": 1299,
                   "name": "get_all_tools",
                   "target": {
                     "file": "tool_manifest.py"
@@ -3002,13 +3002,13 @@
                 },
                 {
                   "branch": "config_path.exists()",
-                  "line": 977,
+                  "line": 997,
                   "name": "validate_and_clamp",
                   "target": null,
                   "via": "apply_env_overrides"
                 },
                 {
-                  "line": 1223,
+                  "line": 1243,
                   "name": "rstrip",
                   "target": null,
                   "via": "_ollama_reachable"
@@ -3022,11 +3022,11 @@
           ]
         },
         {
-          "hash": "3bd630c505484399f5219070498734df4cff663b47a461264051f27d5071f22c",
+          "hash": "613d43a90cfe145f76f1d5ebac6abbc3b3e67ffc7d8799dba3933af4e2e9cf52",
           "path": "docker-compose.yml"
         },
         {
-          "hash": "187c386302a83f3867b23ff2ef614b162c5fe1c8ec006f8bf2e3362059040bd8",
+          "hash": "b4c6c1ccb793749010df0758e758903d2ce8bc01370fa4d29667f1769d3e4655",
           "path": "docker-entrypoint.sh"
         },
         {
@@ -3239,7 +3239,7 @@
           "sequences": []
         },
         {
-          "hash": "996bfbdbc3319d3ab0e05533136240da12dcab95abdec06cea2ff66b7d441c4e",
+          "hash": "b1815e7d9137b7be27f4cb65c6d29819348cec64251a541e690d1448f6fbdeb6",
           "path": "fly.toml"
         },
         {
@@ -3705,15 +3705,20 @@
             {
               "in": "_extract_bearer_token",
               "kind": "except",
-              "line": 3978
+              "line": 4000
+            },
+            {
+              "in": "_make_bearer_auth_middleware",
+              "kind": "raise",
+              "line": 4019
             },
             {
               "in": "main",
               "kind": "except",
-              "line": 4200
+              "line": 4234
             }
           ],
-          "hash": "54bf089eb0b78302b20650727aab7fb35d4cdd54442edc0c73f9a64e60ef6eb8",
+          "hash": "938fb2d40581e98cb405824ff1d5636610b4fe7c4bf2c04a6769f883811ba936",
           "importsFiles": [
             "_version.py",
             "analytics.py",
@@ -5844,7 +5849,7 @@
                   "inner": [
                     {
                       "branch": "config_path.exists()",
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
@@ -5869,7 +5874,7 @@
                   "inner": [
                     {
                       "branch": "config_path.exists()",
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
@@ -5920,7 +5925,7 @@
                   "inner": [
                     {
                       "branch": "config_path.exists()",
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
@@ -6392,7 +6397,7 @@
           "path": "logo.png"
         },
         {
-          "hash": "49da7dc516c31d5eb97fb6b9e67b7ef7d2df1c7d87e5dfabf60ba634168608dd",
+          "hash": "049a9e7d9b1db377ce02aa3b012393ce4d44bbbd3a730548e8d45aa1f4bf5815",
           "path": "pyproject.toml"
         },
         {
@@ -6592,210 +6597,210 @@
             {
               "in": "_build",
               "kind": "raise",
-              "line": 126
+              "line": 128
             },
             {
               "in": "_build",
               "kind": "except",
-              "line": 170
+              "line": 172
             },
             {
               "in": "_build",
               "kind": "except",
-              "line": 175
+              "line": 177
             },
             {
               "in": "_check_ollama_banner",
               "kind": "except",
-              "line": 249
+              "line": 251
             },
             {
               "in": "_lexical_fallback_for_ui",
               "kind": "except",
-              "line": 275
+              "line": 277
             },
             {
               "in": "_lexical_fallback_for_ui",
               "kind": "except",
-              "line": 304
+              "line": 306
             },
             {
               "in": "search_tools",
               "kind": "except",
-              "line": 438
+              "line": 440
             },
             {
               "in": "search_tools",
               "kind": "except",
-              "line": 449
+              "line": 451
             },
             {
               "in": "search_tools",
               "kind": "except",
-              "line": 473
+              "line": 475
             },
             {
               "in": "_nearest_matches",
               "kind": "except",
-              "line": 675
+              "line": 677
             },
             {
               "in": "search_chains",
               "kind": "except",
-              "line": 783
+              "line": 785
             },
             {
               "in": "get_all_tools",
               "kind": "except",
-              "line": 877
+              "line": 879
             },
             {
               "in": "filter_tools",
               "kind": "except",
-              "line": 886
+              "line": 888
             },
             {
               "in": "get_tool_details",
               "kind": "except",
-              "line": 991
+              "line": 993
             },
             {
               "in": "get_tool_details",
               "kind": "except",
-              "line": 1015
+              "line": 1017
             },
             {
               "in": "get_tool_details",
               "kind": "except",
-              "line": 1036
+              "line": 1038
             },
             {
               "in": "get_tool_details",
               "kind": "except",
-              "line": 1040
+              "line": 1042
             },
             {
               "in": "_execute_playground_visible",
               "kind": "except",
-              "line": 1110
+              "line": 1144
             },
             {
               "in": "_example_args_from_schema",
               "kind": "except",
-              "line": 1150
+              "line": 1184
             },
             {
               "in": "_lookup_tool_row",
               "kind": "except",
-              "line": 1195
+              "line": 1229
             },
             {
               "in": "_prefill_execute_fields",
               "kind": "except",
-              "line": 1206
+              "line": 1240
             },
             {
               "in": "_prefill_execute_fields",
               "kind": "except",
-              "line": 1210
+              "line": 1244
             },
             {
               "in": "_run_button_html",
               "kind": "except",
-              "line": 1229
+              "line": 1263
             },
             {
               "in": "execute_tool_ui",
               "kind": "except",
-              "line": 1292
+              "line": 1338
             },
             {
               "in": "execute_tool_ui",
               "kind": "except",
-              "line": 1317
+              "line": 1363
             },
             {
               "in": "execute_tool_ui",
               "kind": "except",
-              "line": 1324
+              "line": 1370
             },
             {
               "in": "_run",
               "kind": "except",
-              "line": 1344
+              "line": 1390
             },
             {
               "in": "_run",
               "kind": "except",
-              "line": 1361
+              "line": 1407
             },
             {
               "in": "execute_tool_ui",
               "kind": "except",
-              "line": 1366
+              "line": 1412
             },
             {
               "in": "get_analytics_dashboard",
               "kind": "except",
-              "line": 1449
+              "line": 1495
             },
             {
               "in": "get_chains_view",
               "kind": "except",
-              "line": 1553
+              "line": 1599
             },
             {
               "in": "get_chains_view",
               "kind": "except",
-              "line": 1570
+              "line": 1616
             },
             {
               "in": "get_system_status",
               "kind": "except",
-              "line": 1644
+              "line": 1690
             },
             {
               "in": "get_system_status",
               "kind": "except",
-              "line": 1657
+              "line": 1703
             },
             {
               "in": "get_system_status",
               "kind": "except",
-              "line": 1668
+              "line": 1714
             },
             {
               "in": "get_system_status",
               "kind": "except",
-              "line": 1696
+              "line": 1742
             },
             {
               "in": "get_filter_choices",
               "kind": "except",
-              "line": 1795
+              "line": 1841
             },
             {
               "in": "create_ui",
               "kind": "except",
-              "line": 1856
+              "line": 1908
             },
             {
               "in": "main",
               "kind": "except",
-              "line": 2387
+              "line": 2464
             },
             {
               "in": "main",
               "kind": "except",
-              "line": 2425
+              "line": 2485
             },
             {
               "in": "main",
               "kind": "raise",
-              "line": 2442
+              "line": 2502
             }
           ],
-          "hash": "ba2e5ac4527befef7cdbcc861ae5416175939ace045a3e793803ca32e6c592d2",
+          "hash": "681f0992d05d67c241f037d541dfa09f81594b2cf5ef53ed4fecdbabd826d154",
           "importsFiles": [
             "_version.py",
             "analytics.py",
@@ -6810,7 +6815,7 @@
             {
               "calls": [
                 {
-                  "line": 161,
+                  "line": 163,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -6825,28 +6830,28 @@
             {
               "calls": [
                 {
-                  "line": 233,
+                  "line": 235,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
                   }
                 },
                 {
-                  "line": 235,
+                  "line": 237,
                   "name": "Embedder",
                   "target": {
                     "file": "embedder.py"
                   }
                 },
                 {
-                  "line": 239,
+                  "line": 241,
                   "name": "health_check",
                   "target": {
                     "file": "embedder.py"
                   }
                 },
                 {
-                  "line": 241,
+                  "line": 243,
                   "name": "close",
                   "target": {
                     "file": "embedder.py"
@@ -6861,7 +6866,7 @@
             {
               "calls": [
                 {
-                  "line": 274,
+                  "line": 276,
                   "name": "_lexical_search_fallback",
                   "target": {
                     "file": "gateway.py"
@@ -6876,7 +6881,7 @@
             {
               "calls": [
                 {
-                  "line": 274,
+                  "line": 276,
                   "name": "_lexical_search_fallback",
                   "target": {
                     "file": "gateway.py"
@@ -6892,7 +6897,7 @@
             {
               "calls": [
                 {
-                  "line": 274,
+                  "line": 276,
                   "name": "_lexical_search_fallback",
                   "target": {
                     "file": "gateway.py"
@@ -6908,7 +6913,7 @@
             {
               "calls": [
                 {
-                  "line": 161,
+                  "line": 163,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -6924,7 +6929,7 @@
             {
               "calls": [
                 {
-                  "line": 1109,
+                  "line": 1143,
                   "name": "_tool_denied_by_policy",
                   "passed": true,
                   "target": {
@@ -6940,7 +6945,7 @@
             {
               "calls": [
                 {
-                  "line": 1109,
+                  "line": 1143,
                   "name": "_tool_denied_by_policy",
                   "passed": true,
                   "target": {
@@ -6949,7 +6954,7 @@
                   "via": "_execute_playground_visible"
                 },
                 {
-                  "line": 1335,
+                  "line": 1381,
                   "name": "get_backends",
                   "target": {
                     "file": "gateway.py"
@@ -6957,7 +6962,7 @@
                   "via": "_run"
                 },
                 {
-                  "line": 1346,
+                  "line": 1392,
                   "name": "_tool_denied_by_policy",
                   "target": {
                     "file": "gateway.py"
@@ -6973,7 +6978,7 @@
             {
               "calls": [
                 {
-                  "line": 161,
+                  "line": 163,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -6989,28 +6994,28 @@
             {
               "calls": [
                 {
-                  "line": 1643,
+                  "line": 1689,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
                   }
                 },
                 {
-                  "line": 1682,
+                  "line": 1728,
                   "name": "Embedder",
                   "target": {
                     "file": "embedder.py"
                   }
                 },
                 {
-                  "line": 1689,
+                  "line": 1735,
                   "name": "health_check",
                   "target": {
                     "file": "embedder.py"
                   }
                 },
                 {
-                  "line": 1695,
+                  "line": 1741,
                   "name": "close",
                   "target": {
                     "file": "embedder.py"
@@ -7025,7 +7030,7 @@
             {
               "calls": [
                 {
-                  "line": 1109,
+                  "line": 1143,
                   "name": "_tool_denied_by_policy",
                   "passed": true,
                   "target": {
@@ -7034,7 +7039,7 @@
                   "via": "_execute_playground_visible"
                 },
                 {
-                  "line": 233,
+                  "line": 235,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -7042,16 +7047,8 @@
                   "via": "_check_ollama_banner"
                 },
                 {
-                  "line": 235,
+                  "line": 237,
                   "name": "Embedder",
-                  "target": {
-                    "file": "embedder.py"
-                  },
-                  "via": "_check_ollama_banner"
-                },
-                {
-                  "line": 239,
-                  "name": "health_check",
                   "target": {
                     "file": "embedder.py"
                   },
@@ -7059,6 +7056,14 @@
                 },
                 {
                   "line": 241,
+                  "name": "health_check",
+                  "target": {
+                    "file": "embedder.py"
+                  },
+                  "via": "_check_ollama_banner"
+                },
+                {
+                  "line": 243,
                   "name": "close",
                   "target": {
                     "file": "embedder.py"
@@ -7066,7 +7071,7 @@
                   "via": "_check_ollama_banner"
                 },
                 {
-                  "line": 161,
+                  "line": 163,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -7074,7 +7079,7 @@
                   "via": "get_chain_indexer_instance"
                 },
                 {
-                  "line": 1682,
+                  "line": 1728,
                   "name": "Embedder",
                   "target": {
                     "file": "embedder.py"
@@ -7082,7 +7087,7 @@
                   "via": "get_system_status"
                 },
                 {
-                  "line": 1689,
+                  "line": 1735,
                   "name": "health_check",
                   "target": {
                     "file": "embedder.py"
@@ -7090,7 +7095,7 @@
                   "via": "get_system_status"
                 },
                 {
-                  "line": 1695,
+                  "line": 1741,
                   "name": "close",
                   "target": {
                     "file": "embedder.py"
@@ -7106,7 +7111,7 @@
             {
               "calls": [
                 {
-                  "line": 1109,
+                  "line": 1143,
                   "name": "_tool_denied_by_policy",
                   "passed": true,
                   "target": {
@@ -7118,13 +7123,13 @@
                   "inner": [
                     {
                       "branch": "config_path.exists()",
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
                     }
                   ],
-                  "line": 233,
+                  "line": 235,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -7132,7 +7137,7 @@
                   "via": "_check_ollama_banner"
                 },
                 {
-                  "line": 235,
+                  "line": 237,
                   "name": "Embedder",
                   "target": {
                     "file": "embedder.py"
@@ -7140,7 +7145,7 @@
                   "via": "_check_ollama_banner"
                 },
                 {
-                  "line": 239,
+                  "line": 241,
                   "name": "health_check",
                   "target": {
                     "file": "embedder.py"
@@ -7148,7 +7153,7 @@
                   "via": "_check_ollama_banner"
                 },
                 {
-                  "line": 241,
+                  "line": 243,
                   "name": "close",
                   "target": {
                     "file": "embedder.py"
@@ -7159,13 +7164,13 @@
                   "inner": [
                     {
                       "branch": "config_path.exists()",
-                      "line": 977,
+                      "line": 997,
                       "name": "validate_and_clamp",
                       "target": null,
                       "via": "apply_env_overrides"
                     }
                   ],
-                  "line": 161,
+                  "line": 163,
                   "name": "load_config",
                   "target": {
                     "file": "config.py"
@@ -7173,7 +7178,7 @@
                   "via": "get_chain_indexer_instance"
                 },
                 {
-                  "line": 1682,
+                  "line": 1728,
                   "name": "Embedder",
                   "target": {
                     "file": "embedder.py"
@@ -7181,7 +7186,7 @@
                   "via": "get_system_status"
                 },
                 {
-                  "line": 1689,
+                  "line": 1735,
                   "name": "health_check",
                   "target": {
                     "file": "embedder.py"
@@ -7189,7 +7194,7 @@
                   "via": "get_system_status"
                 },
                 {
-                  "line": 1695,
+                  "line": 1741,
                   "name": "close",
                   "target": {
                     "file": "embedder.py"
@@ -7294,7 +7299,7 @@
           "path": "site/astro.config.mjs"
         },
         {
-          "hash": "5066bb1689deb99179d1584771c94c3f70343f1bf166b5f6815c19317608c166",
+          "hash": "ef594c8a92ff33a7cc33f7584a74a7faca476a9bfe48c96770548bda01e2c600",
           "path": "site/package-lock.json"
         },
         {
@@ -7554,12 +7559,13 @@
           "exports": [
             "init_config_path"
           ],
-          "hash": "1ff0a475848b8de5d6bb882cf02e03879c4a4e1bf0a9057bb358b42732934721",
+          "hash": "ba8637df672e6fcbefd66bb643722dc3cb7114248f773007e5e5d0112bc35ceb",
           "importOrder": [
             "cli.py",
             "_version.py",
             "indexer.py",
             "gateway.py",
+            "ui.py",
             "config.py",
             "backend_client_simple.py",
             "sync_manager.py",
@@ -7573,7 +7579,8 @@
             "config.py",
             "gateway.py",
             "indexer.py",
-            "sync_manager.py"
+            "sync_manager.py",
+            "ui.py"
           ],
           "path": "tests/test_cli_coverage.py",
           "testFramework": "pytest"
@@ -7744,8 +7751,15 @@
           "testFramework": "pytest"
         },
         {
-          "hash": "34074222d40438d750bfd8d63944f153b471e4c28bdfaca1f6e2f21988da82fd",
+          "hash": "00509b85df65e084807d54a8e37e42f2ea93f5f6adc35eec5c9a0523965fcbed",
+          "importOrder": [
+            "gateway.py",
+            "config.py",
+            "cli.py"
+          ],
           "importsFiles": [
+            "cli.py",
+            "config.py",
             "gateway.py"
           ],
           "path": "tests/test_gateway_handlers.py",
@@ -7868,7 +7882,7 @@
             "created_ui",
             "test_create_ui_constructs_without_index"
           ],
-          "hash": "8259e8dd599e8c531e257a18e0bdfaf667c89ca10ebb9709534a593360662e6a",
+          "hash": "734cc8cb12eb663a1049f46bda8768c5958ccd6b4e7a5af4ec750cb3617cf2a9",
           "importsFiles": [
             "ui.py"
           ],
@@ -7938,7 +7952,7 @@
   ],
   "doors": [
     {
-      "checksCount": 19,
+      "checksCount": 17,
       "commands": [
         {
           "dir": "",
@@ -8015,9 +8029,19 @@
           "dir": "",
           "job": "test",
           "programs": [
+            "grep",
             "pip-audit"
           ],
-          "step": "Audit dependencies for vulnerabilities"
+          "step": "Audit core dependencies for vulnerabilities"
+        },
+        {
+          "dir": "",
+          "job": "test",
+          "programs": [
+            "grep",
+            "pip-audit"
+          ],
+          "step": "Audit Web UI extra for vulnerabilities"
         },
         {
           "dir": "npm",
@@ -8080,12 +8104,14 @@
           "dir": "",
           "job": "docker",
           "programs": [
+            "1",
             "cleanup",
             "curl",
             "docker",
             "echo",
             "seq",
             "sleep",
+            "timeout",
             "trap"
           ],
           "step": "Smoke run"
@@ -8500,9 +8526,8 @@
         },
         {
           "job": "docker",
-          "packed": true,
           "path": "cli.py",
-          "runKind": "checks",
+          "runKind": "executes",
           "via": "docker build Dockerfile"
         },
         {
@@ -8667,9 +8692,8 @@
         },
         {
           "job": "docker",
-          "packed": true,
           "path": "ui.py",
-          "runKind": "checks",
+          "runKind": "executes",
           "via": "docker build Dockerfile"
         }
       ],
@@ -8793,7 +8817,7 @@
       "usesWorkflowToken": false
     },
     {
-      "checksCount": 18,
+      "checksCount": 17,
       "commands": [
         {
           "dir": "",
@@ -9038,9 +9062,8 @@
         },
         {
           "job": "docker",
-          "packed": true,
           "path": "cli.py",
-          "runKind": "checks",
+          "runKind": "executes",
           "via": "docker build Dockerfile"
         },
         {
@@ -9125,9 +9148,8 @@
         },
         {
           "job": "docker",
-          "packed": true,
           "path": "ui.py",
-          "runKind": "checks",
+          "runKind": "executes",
           "via": "docker build Dockerfile"
         }
       ],
@@ -9920,7 +9942,7 @@
   ],
   "engine": "1.26.0",
   "generatedFrom": {
-    "commit": "b8a7f76284b2cef575b8bbfcb0499605f8d72d1f",
+    "commit": "03a2cf4315de134caedc90124f0e79f81180cc74",
     "tracked": 120
   },
   "landings": [
@@ -9951,6 +9973,18 @@
           "by": "scripts/check-org-urls.sh",
           "call": "literal",
           "confidence": "text"
+        },
+        {
+          "by": "tests/test_gateway_handlers.py",
+          "call": "read_text",
+          "confidence": "ast",
+          "fromTests": true
+        },
+        {
+          "by": "tests/test_ui.py",
+          "call": "read_text",
+          "confidence": "ast",
+          "fromTests": true
         }
       ],
       "target": "Dockerfile",
@@ -10222,6 +10256,24 @@
     {
       "readers": [
         {
+          "by": "tests/test_gateway_handlers.py",
+          "call": "literal",
+          "confidence": "ast",
+          "fromTests": true
+        },
+        {
+          "by": "tests/test_gateway_handlers.py",
+          "call": "read_text",
+          "confidence": "ast",
+          "fromTests": true
+        }
+      ],
+      "target": "docker-entrypoint.sh",
+      "writers": []
+    },
+    {
+      "readers": [
+        {
           "by": "pyproject.toml",
           "call": "configuration",
           "confidence": "config"
@@ -10255,6 +10307,12 @@
         },
         {
           "by": "tests/test_gateway_coverage.py",
+          "call": "literal",
+          "confidence": "ast",
+          "fromTests": true
+        },
+        {
+          "by": "tests/test_gateway_handlers.py",
           "call": "literal",
           "confidence": "ast",
           "fromTests": true
@@ -10528,6 +10586,12 @@
         {
           "by": "tests/test_regressions_swarm_02.py",
           "call": "read_text",
+          "confidence": "ast",
+          "fromTests": true
+        },
+        {
+          "by": "tests/test_ui.py",
+          "call": "literal",
           "confidence": "ast",
           "fromTests": true
         }

@@ -3948,12 +3948,11 @@ def build_http_app():
 
 
 # =============================================================================
-# OPS-1: optional bearer-token auth for the HTTP transport.
+# OPS-1: bearer-token auth for the HTTP transport.
 #
-# Opt-in and fail-closed only when enabled: if config.gateway_auth_token is
-# unset (None / empty after resolution) the wrapper is never installed and the
-# transport behaves exactly as today (auth deferred to a reverse proxy). When
-# set, every MCP HTTP request must carry `Authorization: Bearer <token>`
+# Required off loopback unless TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 is set;
+# optional on loopback (127.0.0.1, localhost, ::1). When a non-empty token is
+# configured, every MCP HTTP request must carry `Authorization: Bearer <token>`
 # (constant-time compared); missing/mismatched -> 401. The liveness endpoints
 # /health and /ready stay UNAUTHENTICATED so probes work without the token.
 #
@@ -3965,6 +3964,29 @@ def build_http_app():
 
 # Paths that must remain reachable without the bearer token (liveness probes).
 _OPS1_AUTH_EXEMPT_PATHS = frozenset({"/health", "/ready"})
+
+# Loopback bind targets permitted to run the HTTP gateway without a token.
+# Wildcard / unspecified forms ("0.0.0.0", "::", "*", "") and any other IP or
+# hostname are non-loopback and require a token (or explicit proxy opt-out).
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def _normalize_bind_host(raw_host: Optional[str]) -> str:
+    """Normalize HOST from the environment for bind and loopback checks.
+
+    When ``raw_host`` is ``None`` (``HOST`` unset), defaults to ``"127.0.0.1"``.
+    Otherwise strips surrounding whitespace; an empty or whitespace-only ``HOST``
+    becomes ``""`` (which Python/uvicorn treats as wildcard bind across all
+    interfaces and therefore must not default back to loopback).
+    """
+    if raw_host is None:
+        return "127.0.0.1"
+    return raw_host.strip()
+
+
+def _is_loopback_host(host: str) -> bool:
+    """Return True iff ``host`` (after strip + ASCII lowercase) is loopback."""
+    return host.strip().lower() in _LOOPBACK_HOSTS
 
 
 def _extract_bearer_token(headers: List[tuple]) -> Optional[str]:
@@ -3992,6 +4014,9 @@ def _make_bearer_auth_middleware(app, token: str):
     body. Non-http scopes (lifespan, websocket) and the exempt liveness paths
     pass straight through.
     """
+    token = (token if isinstance(token, str) else "").strip()
+    if not token:
+        raise ValueError("Bearer auth token must not be empty or whitespace")
 
     async def _send_401(send):
         body = b'{"error":"unauthorized","detail":"Missing or invalid bearer token"}'
@@ -4029,24 +4054,35 @@ def _make_bearer_auth_middleware(app, token: str):
 def _run_http(port: int) -> None:
     """Run the MCP gateway in HTTP mode with /health, /ready, /metrics.
 
-    SECURITY: The gateway proxies arbitrary MCP tool calls to backend servers.
-    Binding to a non-loopback interface exposes RCE-class surface. The HOST env
-    var defaults to 127.0.0.1 (loopback). Only bind to public interfaces when
-    running behind an authenticated reverse proxy (Fly.io edge, etc.).
-
-    OPS-1: when config.gateway_auth_token is set, an opt-in bearer-token check
-    is layered in front of the ASGI app (fail-closed; /health + /ready stay
-    open). When unset, behavior is unchanged (auth deferred to a proxy).
+    The HOST env var defaults to 127.0.0.1 (loopback). Off loopback, _run_http
+    requires a non-empty bearer token via TOOL_COMPASS_GATEWAY_AUTH_TOKEN /
+    gateway_auth_token unless TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 is set for
+    a deployment behind an authenticating reverse proxy.
     """
     import os
+    import sys
     from mcp.server.transport_security import TransportSecuritySettings
 
-    host = os.environ.get("HOST", "127.0.0.1")
-    if host not in ("127.0.0.1", "localhost", "::1"):
+    host = _normalize_bind_host(os.environ.get("HOST"))
+    raw_token = get_config().gateway_auth_token
+    token = raw_token.strip() if isinstance(raw_token, str) else ""
+    allow_no_token = (
+        os.environ.get("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN") or ""
+    ).strip() == "1"
+
+    if not _is_loopback_host(host) and not token:
+        if not allow_no_token:
+            print(
+                f"Refusing to start HTTP gateway on non-loopback HOST={host!r} without a token: "
+                "set TOOL_COMPASS_GATEWAY_AUTH_TOKEN (or gateway_auth_token), or set "
+                "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 behind an authenticating proxy.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
         logger.warning(
-            f"HTTP mode binding to non-loopback host {host!r}. "
-            "The gateway proxies arbitrary MCP tool calls — ensure an authenticated "
-            "reverse proxy is in front. Set HOST=127.0.0.1 for loopback-only."
+            f"HTTP mode binding to non-loopback host {host!r} without a bearer token "
+            "(TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN is set). Ensure an authenticating "
+            "reverse proxy sits in front, or set TOOL_COMPASS_GATEWAY_AUTH_TOKEN."
         )
 
     mcp.settings.host = host
@@ -4079,12 +4115,10 @@ def _run_http(port: int) -> None:
     # Build + register the ops routes (idempotent) after settings are live.
     app = build_http_app()
 
-    # OPS-1: resolve the auth token (config field + env override already
-    # applied by apply_env_overrides). Only when a non-empty token is present
-    # do we install the bearer middleware and serve the wrapped app directly
-    # via uvicorn (mirroring FastMCP.run_streamable_http_async). Otherwise fall
-    # back to mcp.run() so the no-auth path is byte-for-byte today's behavior.
-    token = (get_config().gateway_auth_token or "").strip()
+    # OPS-1: when a non-empty token is present, install the bearer middleware
+    # and serve the wrapped app directly via uvicorn (mirroring
+    # FastMCP.run_streamable_http_async). Otherwise fall back to mcp.run()
+    # (loopback without a token, or non-loopback with explicit opt-out).
     if token:
         logger.info(
             "OPS-1: bearer-token auth ENABLED on the HTTP transport "
