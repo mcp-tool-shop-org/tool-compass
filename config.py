@@ -10,9 +10,9 @@ Environment Variables:
     TOOL_COMPASS_GATEWAY_AUTH_TOKEN: Bearer token for the HTTP transport (OPS-1).
         Overrides the config gateway_auth_token field; secret (never printed).
         Required off loopback unless TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1 is set.
-    TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN: Opt-out (1/true/yes/on) allowing the
-        HTTP gateway to bind off loopback without a token behind an
-        authenticating reverse proxy.
+    TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN: Strict opt-out (only "1" after strip;
+        true/yes do not opt out) allowing the HTTP gateway to bind off loopback
+        without a token behind an authenticating reverse proxy.
     OLLAMA_URL: Ollama server URL (default: http://localhost:11434)
 
 Default config directories by platform:

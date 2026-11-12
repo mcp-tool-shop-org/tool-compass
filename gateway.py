@@ -65,7 +65,6 @@ from config import (
     CONFIG_PATH,
     redact_url_credentials,
     _redact_structural,
-    _env_truthy,
 )
 # Use simple backend client to avoid anyio conflicts when nested inside another MCP server
 from backend_client_simple import SimpleBackendManager as BackendManager, TOOL_CALL_TIMEOUT
@@ -4067,9 +4066,9 @@ def _run_http(port: int) -> None:
     host = _normalize_bind_host(os.environ.get("HOST"))
     raw_token = get_config().gateway_auth_token
     token = raw_token.strip() if isinstance(raw_token, str) else ""
-    allow_no_token = _env_truthy(
-        os.environ.get("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN")
-    )
+    allow_no_token = (
+        os.environ.get("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN") or ""
+    ).strip() == "1"
 
     if not _is_loopback_host(host) and not token:
         if not allow_no_token:

@@ -1201,7 +1201,9 @@ class TestRunHttpFailClosedOffLoopback:
                     if r.levelname == "WARNING"
                 )
 
-                # Must warn on every start when the opt-out is in use.
+                # Must warn on every start when the opt-out is in use (including
+                # surrounding whitespace around "1").
+                monkeypatch.setenv("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN", " 1 ")
                 caplog.clear()
                 gateway._run_http(port=8080)
                 assert any(
@@ -1213,6 +1215,36 @@ class TestRunHttpFailClosedOffLoopback:
         assert mock_mcp_run.call_count == 2
         mock_mcp_run.assert_called_with(transport="streamable-http")
         fake_uvicorn.Server.assert_not_called()
+
+    def test_non_loopback_opt_out_true_or_yes_still_exits_2(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        import gateway
+
+        for rejected_val in ("true", "yes", "TRUE", "YES", "on", "0", "2", "false"):
+            _reset_gateway_env_and_config(monkeypatch, tmp_path)
+            monkeypatch.setenv("HOST", "0.0.0.0")
+            monkeypatch.setenv("TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN", rejected_val)
+            fake_uvicorn, server_instance, _ = _make_fake_uvicorn()
+            monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+
+            with (
+                patch.object(gateway, "build_http_app", new=Mock()) as mock_build_app,
+                patch.object(gateway.mcp, "run", new=Mock()) as mock_mcp_run,
+            ):
+                with pytest.raises(SystemExit) as exc_info:
+                    gateway._run_http(port=8080)
+
+            assert (
+                exc_info.value.code == 2
+            ), f"TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN={rejected_val!r} must exit 2"
+            err = capsys.readouterr().err
+            assert "TOOL_COMPASS_GATEWAY_AUTH_TOKEN" in err
+            assert "TOOL_COMPASS_GATEWAY_ALLOW_NO_TOKEN=1" in err
+            mock_build_app.assert_not_called()
+            mock_mcp_run.assert_not_called()
+            fake_uvicorn.Server.assert_not_called()
+            server_instance.serve.assert_not_called()
 
     def test_non_loopback_with_token_wraps_app_with_bearer_middleware(
         self, monkeypatch, tmp_path
