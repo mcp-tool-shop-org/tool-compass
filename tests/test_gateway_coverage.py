@@ -3765,6 +3765,39 @@ class TestBearerAuthMiddlewareOPS1:
         assert calls == []  # inner app was NEVER invoked
 
     @pytest.mark.asyncio
+    async def test_non_ascii_bearer_rejected_401_not_500(self):
+        # hmac.compare_digest raises TypeError on non-ASCII str; the middleware must
+        # still answer 401 (a 500 would leak nothing, but it is the wrong refusal).
+        import gateway
+
+        calls = []
+        inner = _stub_inner_app(calls)
+        wrapped = gateway._make_bearer_auth_middleware(inner, "s3cr3t")
+
+        status, _ = await _drive_asgi(
+            wrapped, path="/mcp", headers={"authorization": "Bearer été"}
+        )
+
+        assert status == 401
+        assert calls == []
+
+    @pytest.mark.asyncio
+    async def test_non_ascii_configured_token_accepts_its_own_value(self):
+        import gateway
+
+        calls = []
+        inner = _stub_inner_app(calls)
+        token = "sécret"
+        wrapped = gateway._make_bearer_auth_middleware(inner, token)
+
+        # The header bytes arrive as latin-1 on the wire; send the same str back.
+        status, _ = await _drive_asgi(
+            wrapped, path="/mcp", headers={"authorization": "Bearer " + token}
+        )
+
+        assert status != 500
+
+    @pytest.mark.asyncio
     async def test_missing_bearer_rejected_401(self):
         import gateway
 

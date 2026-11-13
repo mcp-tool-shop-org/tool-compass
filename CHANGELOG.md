@@ -17,6 +17,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Site dependencies updated with `npm audit fix` (`vite`, `undici`, `zod` and related packages); `npm audit` now reports 0 vulnerabilities for `site/`.
 - The CI dependency audit is split in two: the core install is audited strictly with no exceptions, and the Web UI extra (`gradio`) keeps the dated Pillow exception.
 
+### Fixed
+
+- The gateway's bearer check compares bytes instead of text. A non-ASCII `Authorization` header (or a non-ASCII configured token) made `hmac.compare_digest` raise, so the request got a 500 instead of a 401. It still refused the request, and a non-ASCII token now works.
+
 ## [2.5.5] - 2026-10-15
 
 ### Fixed

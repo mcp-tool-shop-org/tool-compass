@@ -4043,7 +4043,11 @@ def _make_bearer_auth_middleware(app, token: str):
             await app(scope, receive, send)
             return
         presented = _extract_bearer_token(scope.get("headers") or [])
-        if presented is None or not hmac.compare_digest(presented, token):
+        # Compare bytes, not str: hmac.compare_digest raises TypeError on non-ASCII str,
+        # which turned a bad header into a 500 instead of a 401.
+        if presented is None or not hmac.compare_digest(
+            presented.encode("utf-8", "surrogateescape"), token.encode("utf-8", "surrogateescape")
+        ):
             await _send_401(send)
             return
         await app(scope, receive, send)
